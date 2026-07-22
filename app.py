@@ -9,15 +9,23 @@
 데이터 저장소는 두 가지를 자동 지원한다.
   · Streamlit secrets에 [postgres] 가 있으면  → Supabase(Postgres)  (배포용, 영속)
   · 없으면                                     → SQLite 파일          (로컬 개발용)
+
+  [A] ETL      : 로우데이터 정제 + STCO 품번코드 해독
+  [B] DATABASE : SQLAlchemy 누적적재 + 스키마 자동확장 + 중복방지 (Postgres/SQLite 공용)
+  [C] ANALYSIS : 종합 대시보드 + 플래그십(연차·아이템별 전년비교)
+
+실행:  streamlit run app.py
 ================================================================================
 """
 
 import io
 import os
+import gc
 import hashlib
 from datetime import datetime
 from urllib.parse import quote_plus
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -28,7 +36,7 @@ TABLE = "sales"
 ROW_KEY = "_row_key"
 
 # ==============================================================================
-# SECTION A. ETL
+# SECTION A. ETL  ─ 로우데이터 정제 + STCO 품번코드 해독
 # ==============================================================================
 BRAND_MAP = {
     "0": "ZERO LOUNGE", "9": "QUIKSILVER", "A": "CODI GALLERY", "C": "이월",
@@ -71,6 +79,7 @@ SEASON_MAP = {"A": "봄", "B": "여름", "C": "가을", "D": "겨울", "E": "RUN
 SEASON_GROUP = {"봄": "S/S", "여름": "S/S", "가을": "F/W", "겨울": "F/W",
                 "공통": "상시/ACC", "RUNNING": "상시/ACC"}
 
+# 아이템 → 아이템그룹 (구분자 기준 + 팀 요청: ACC에서 신발·넥타이·벨트·양말 분리)
 _ITEMGROUP_RAW = {
     "수트류": ["SJ", "SL", "EJ", "EP", "JV", "SP"],
     "셔츠":   ["DS", "WD"],
@@ -94,6 +103,7 @@ QTY_COL = "판매수량"
 
 
 def year_age_label(sale_year, product_year):
+    """연차: (기준=판매연도) − 상품년도. -1↓=내년신상, 0=신상, 1↑=N년차."""
     try:
         n = int(sale_year) - int(product_year)
     except (TypeError, ValueError):
@@ -103,6 +113,22 @@ def year_age_label(sale_year, product_year):
     if n == 0:
         return "신상"
     return f"{n}년차"
+
+
+def year_age_series(sale_year, product_year):
+    """year_age_label의 벡터화 버전. 대용량에서 행별 호출 대신 사용(결과 동일).
+
+    비교는 numpy float(NaN→False)로 수행하고, 유효하지 않은 행은 마지막에 None 처리.
+    """
+    sy = pd.to_numeric(sale_year, errors="coerce")
+    py = pd.to_numeric(product_year, errors="coerce")
+    n = sy - py
+    nyoncha = (n.astype("Int64").astype(str) + "년차").to_numpy()   # "1년차" … (결측은 뒤에서 마스킹)
+    nf = n.to_numpy(dtype="float64")
+    lab = np.where(nf <= -1, "내년신상",
+                   np.where(nf == 0, "신상", nyoncha))
+    out = pd.Series(lab, index=sy.index, dtype="object")
+    return out.where(sy.notna() & py.notna(), None)
 
 
 def _make_columns_unique(cols):
@@ -169,60 +195,98 @@ def decode_stco(code, cols=None):
     return res
 
 
+def _col_or_code(df, colname, code, idx):
+    """해당 컬럼값이 있으면 그것을, 비었거나 컬럼이 없으면 품번코드의 자리(idx)를 사용(벡터화)."""
+    code_part = code.str[idx]
+    if colname in df.columns:
+        s = df[colname].astype(str).str.strip().str.upper()
+        return s.where(s.ne("") & s.ne("NAN") & s.ne("NONE"), code_part)
+    return code_part
+
+
 def enrich(df):
-    df = df.copy()
+    """로우데이터 정제 + STCO 품번코드 해독 (벡터화 · 대용량 메모리 최적화)."""
     for col in NUMERIC_COLS:
         if col in df.columns:
             s = df[col].astype(str).str.replace(",", "", regex=False).str.strip()
             df[col] = pd.to_numeric(s, errors="coerce")
+
     if "품번" in df.columns:
-        def _decode(row):
-            cols = {k: row.get(k) for k in ["브랜드", "아이템", "년도", "시즌", "순번"]}
-            return decode_stco(row.get("품번", ""), cols)
-        decoded = df.apply(_decode, axis=1).apply(pd.Series)
-        for c in decoded.columns:
-            df[c] = decoded[c]
+        code = df["품번"].astype(str).str.strip().str.upper()
+        if "브랜드" in df.columns:
+            bname = df["브랜드"].astype(str).str.strip().map(BRAND_MAP)
+        else:
+            bname = pd.Series(np.nan, index=df.index, dtype="object")
+        df["브랜드명"] = bname.fillna(code.str[0].map(BRAND_CODE_MAP))
+        ic = _col_or_code(df, "아이템", code, slice(1, 3))
+        df["아이템명"] = ic.map({k: v[0] for k, v in ITEM_MAP.items()})
+        df["중카테고리"] = ic.map({k: v[1] for k, v in ITEM_MAP.items()})
+        df["대카테고리"] = ic.map({k: v[2] for k, v in ITEM_MAP.items()})
+        df["연도"] = _col_or_code(df, "년도", code, 3).map(YEAR_MAP)
+        season = _col_or_code(df, "시즌", code, 4).map(SEASON_MAP)
+        df["시즌명"] = season
+        df["시즌그룹"] = season.map(SEASON_GROUP)
+        df["순번"] = _col_or_code(df, "순번", code, slice(5, 7))
+        df["_아이템코드"] = ic
+
     if "판매일자" in df.columns:
         dt = pd.to_datetime(df["판매일자"], errors="coerce")
         df["_판매일"] = dt
         df["판매연도"] = dt.dt.year
         df["년월"] = dt.dt.strftime("%Y-%m")
         df["주차"] = dt.dt.strftime("%G-W%V")
-    if "아이템" in df.columns:
-        item_series = df["아이템"].astype(str).str.strip().str.upper()
+
+    if "_아이템코드" in df.columns:
+        item_code = df["_아이템코드"]
+    elif "아이템" in df.columns:
+        item_code = df["아이템"].astype(str).str.strip().str.upper()
     elif "품번" in df.columns:
-        item_series = df["품번"].astype(str).str.strip().str.upper().str[1:3]
+        item_code = df["품번"].astype(str).str.strip().str.upper().str[1:3]
     else:
-        item_series = None
-    if item_series is not None:
-        df["아이템그룹"] = item_series.map(ITEMGROUP_MAP).fillna("기타")
+        item_code = None
+    if item_code is not None:
+        df["아이템그룹"] = item_code.map(ITEMGROUP_MAP).fillna("기타")
+
     if "판매연도" in df.columns and "연도" in df.columns:
-        df["연차"] = [year_age_label(sy, py) for sy, py in zip(df["판매연도"], df["연도"])]
+        df["연차"] = year_age_series(df["판매연도"], df["연도"])
+
     rev = next((c for c in REVENUE_CANDIDATES if c in df.columns), None)
     df["_매출액"] = df[rev] if rev else 0
     df["_최초가매출"] = df["최초판매금액"] if "최초판매금액" in df.columns else 0
     df["_수량"] = pd.to_numeric(df["판매수량"], errors="coerce") if "판매수량" in df.columns else 0
     df["_채널"] = df["매장명"] if "매장명" in df.columns else df.get("매장코드", "기타")
+    if "_아이템코드" in df.columns:
+        df.drop(columns=["_아이템코드"], inplace=True)
     return df
 
 
 def add_row_key(df):
-    df = df.copy()
+    """중복 방지용 행 키(md5) 생성 — 벡터화로 문자열 결합 후 해시.
+
+    결측은 "nan"으로 통일(기존 apply 방식의 str(nan)과 동일)하여, 이미 적재된
+    DB의 키와 완전히 같은 값을 생성한다(누적/중복방지 호환).
+    """
     key_cols = [c for c in ["판매일자", "매장코드", "판매번호", "판매연번", "품번"] if c in df.columns]
+    if not key_cols:
+        df[ROW_KEY] = [hashlib.md5(str(i).encode()).hexdigest() for i in range(len(df))]
+        return df
 
-    def _key(row):
-        base = "|".join(str(row.get(c, "")) for c in key_cols)
-        return hashlib.md5(base.encode("utf-8")).hexdigest()
+    def _col_str(c):
+        return df[c].astype("string").fillna("nan").astype(str)
 
-    df[ROW_KEY] = df.apply(_key, axis=1)
+    base = _col_str(key_cols[0])
+    for c in key_cols[1:]:
+        base = base.str.cat(_col_str(c), sep="|")
+    df[ROW_KEY] = [hashlib.md5(s.encode("utf-8")).hexdigest() for s in base]
     return df
 
 
 # ==============================================================================
-# SECTION B. DATABASE (SQLAlchemy: Postgres/SQLite 공용)
+# SECTION B. DATABASE  ─ SQLAlchemy (Postgres/SQLite 공용)
 # ==============================================================================
 @st.cache_resource
 def get_engine():
+    """secrets에 [postgres] 있으면 Supabase, 없으면 SQLite."""
     try:
         pg = st.secrets.get("postgres", None)
     except Exception:
@@ -267,24 +331,50 @@ def ensure_table(conn, df):
 
 
 def append_to_db(df):
+    """정제·키 생성된 df를 누적 적재. 중복(ROW_KEY)은 건너뜀. 파생(_) 컬럼 제외.
+
+    메모리 최적화: 저장 대상 컬럼만 추린 뒤 파일 내 중복부터 제거하고,
+    실제 신규 행에 대해서만 문자열화/적재를 수행한다.
+    """
     save = [c for c in df.columns if not c.startswith("_") or c == ROW_KEY]
-    df = df[save].astype(object).where(pd.notnull(df[save]), None)
+    out = df[save].drop_duplicates(subset=[ROW_KEY])
     eng = get_engine()
     with eng.begin() as conn:
-        ensure_table(conn, df)
+        ensure_table(conn, out)
         before = conn.exec_driver_sql(f'SELECT COUNT(*) FROM "{TABLE}"').scalar()
         existing = set(r[0] for r in conn.exec_driver_sql(f'SELECT "{ROW_KEY}" FROM "{TABLE}"').fetchall())
-        new = df[~df[ROW_KEY].isin(existing)].copy()
-        if len(new):
-            new = new.astype(str).where(pd.notnull(new), None)
+        new = out[~out[ROW_KEY].isin(existing)]
+        n_new = len(new)
+        if n_new:
+            new = new.astype(object).where(new.notna(), None)  # 결측→None (신규 행에만)
+            # DB별 파라미터 한도(Postgres 65535 / SQLite 32766) 안전하게: chunk×cols < 30000
             chunk = max(1, 30000 // max(1, len(new.columns)))
             new.to_sql(TABLE, conn, if_exists="append", index=False, method="multi", chunksize=chunk)
-        after = before + len(new)
-    return {"inserted": len(new), "skipped": len(df) - len(new), "total_after": after}
+        after = before + n_new
+    return {"inserted": n_new, "skipped": len(out) - n_new, "total_after": after}
+
+
+# 분석 화면이 실제로 쓰는 컬럼만 로드 (49만 행 × 60여 컬럼 전체 로드 시 메모리 초과 → OOM)
+LOAD_COLS = ["판매일자", "브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명",
+             "연도", "판매연도", "년월", "최초판매금액", "실판매금액", "현판매금액",
+             "판매수량", "매장명", "매장코드", "품번"]
+LOAD_NUM = ["최초판매금액", "실판매금액", "현판매금액", "판매수량", "판매연도", "연도"]
+LOAD_CAT = ["브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명", "년월", "매장명", "매장코드"]
+
+
+def _existing_columns(conn, eng):
+    if eng.dialect.name == "postgresql":
+        rows = conn.exec_driver_sql(
+            "SELECT column_name FROM information_schema.columns WHERE table_name=%s", (TABLE,)).fetchall()
+    else:
+        rows = conn.exec_driver_sql(f'PRAGMA table_info("{TABLE}")').fetchall()
+        return [r[1] for r in rows]
+    return [r[0] for r in rows]
 
 
 @st.cache_data(ttl=120)
 def load_db():
+    """필요한 컬럼만 청크 단위로 읽어 category/downcast로 적재 (대용량 메모리 최적화)."""
     eng = get_engine()
     try:
         with eng.connect() as conn:
@@ -295,23 +385,48 @@ def load_db():
                 (TABLE,)).fetchone()
             if not exists:
                 return pd.DataFrame()
-            df = pd.read_sql(f'SELECT * FROM "{TABLE}"', conn)
+            have = _existing_columns(conn, eng)
+            use = [c for c in LOAD_COLS if c in have]
+            if not use:
+                use = have
+            q = "SELECT " + ", ".join(f'"{c}"' for c in use) + f' FROM "{TABLE}"'
+            parts = []
+            for ch in pd.read_sql(q, conn, chunksize=50000):
+                for c in LOAD_NUM:
+                    if c in ch.columns:
+                        ch[c] = pd.to_numeric(
+                            ch[c].astype(str).str.replace(",", "", regex=False),
+                            errors="coerce", downcast="float")
+                for c in LOAD_CAT:
+                    if c in ch.columns:
+                        ch[c] = ch[c].astype("category")
+                parts.append(ch)
+            if not parts:
+                return pd.DataFrame()
+            df = pd.concat(parts, ignore_index=True)
+            del parts
+            gc.collect()
     except Exception:
         return pd.DataFrame()
-    for col in NUMERIC_COLS + ["판매연도", "연도"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", "", regex=False), errors="coerce")
+
+    # concat 후 category 재정리(청크별 카테고리 합집합)
+    for c in LOAD_CAT:
+        if c in df.columns and str(df[c].dtype) != "category":
+            df[c] = df[c].astype("category")
+
     rev = next((c for c in REVENUE_CANDIDATES if c in df.columns), None)
-    df["_매출액"] = pd.to_numeric(df[rev].astype(str).str.replace(",", "", regex=False), errors="coerce") if rev else 0
-    df["_최초가매출"] = pd.to_numeric(df["최초판매금액"].astype(str).str.replace(",", "", regex=False), errors="coerce") if "최초판매금액" in df.columns else 0
-    df["_수량"] = pd.to_numeric(df[QTY_COL].astype(str).str.replace(",", "", regex=False), errors="coerce") if QTY_COL in df.columns else 0
+    df["_매출액"] = df[rev] if rev else 0.0
+    df["_최초가매출"] = df["최초판매금액"] if "최초판매금액" in df.columns else 0.0
+    df["_수량"] = df[QTY_COL] if QTY_COL in df.columns else 0.0
     df["_채널"] = df["매장명"] if "매장명" in df.columns else df.get("매장코드", "기타")
     if "판매일자" in df.columns:
         df["_판매일"] = pd.to_datetime(df["판매일자"], errors="coerce")
+    # 비즈니스 규칙(아이템그룹·연차)은 저장값 대신 항상 최신 기준으로 재계산
+    #  → 그룹 정의를 바꿔도 재적재 없이 즉시 반영됨
     if "아이템" in df.columns:
         df["아이템그룹"] = df["아이템"].astype(str).str.strip().str.upper().map(ITEMGROUP_MAP).fillna("기타")
     if "판매연도" in df.columns and "연도" in df.columns:
-        df["연차"] = [year_age_label(sy, py) for sy, py in zip(df["판매연도"], df["연도"])]
+        df["연차"] = year_age_series(df["판매연도"], df["연도"])
     return df
 
 
@@ -352,7 +467,12 @@ def _age_sort_key(a):
         return 99
 
 
+# ---- 전년비교 성과표 (연차 / 아이템그룹 공용) ----
+GROUPS = [("실판매금액(백만)", "실판매"), ("판가율", "판가율"), ("비중", "비중"), ("평균단가(원)", "평균단가")]
+
+
 def yoy_frame(cur, prev, dim, order_list=None):
+    """올해(cur)·전년(prev)을 dim으로 묶어 전년비교 numeric DataFrame(멀티헤더) 반환. G.TOTAL 상단."""
     def agg(f):
         if f is None or f.empty:
             return pd.DataFrame(columns=[dim, "rev", "orig", "qty"]).set_index(dim)
@@ -366,19 +486,21 @@ def yoy_frame(cur, prev, dim, order_list=None):
         keys = sorted(keys, key=lambda k: -float(c["rev"].get(k, 0)))
     tot_c, tot_p = float(c["rev"].sum()), float(p["rev"].sum())
 
-    def metrics(r26, r25, o26, o25, q26, q25, den_c, den_p):
+    def metrics(r26, r25, o26, o25, q26, q25, share_den_c, share_den_p):
         return {
             ("실판매금액(백만)", "25년"): r25 / 1e6, ("실판매금액(백만)", "26년"): r26 / 1e6,
             ("실판매금액(백만)", "증감율"): ((r26 - r25) / r25) if r25 else None,
             ("판가율", "25년"): (r25 / o25) if o25 else 0, ("판가율", "26년"): (r26 / o26) if o26 else 0,
             ("판가율", "증감"): ((r26 / o26 if o26 else 0) - (r25 / o25 if o25 else 0)),
-            ("비중", "25년"): (r25 / den_p) if den_p else 0, ("비중", "26년"): (r26 / den_c) if den_c else 0,
-            ("비중", "증감"): ((r26 / den_c if den_c else 0) - (r25 / den_p if den_p else 0)),
+            ("비중", "25년"): (r25 / share_den_p) if share_den_p else 0,
+            ("비중", "26년"): (r26 / share_den_c) if share_den_c else 0,
+            ("비중", "증감"): ((r26 / share_den_c if share_den_c else 0) - (r25 / share_den_p if share_den_p else 0)),
             ("평균단가(원)", "25년"): (r25 / q25) if q25 else 0, ("평균단가(원)", "26년"): (r26 / q26) if q26 else 0,
             ("평균단가(원)", "증감"): ((r26 / q26 if q26 else 0) - (r25 / q25 if q25 else 0)),
         }
 
     rows, index = [], []
+    # G.TOTAL 먼저
     rows.append(metrics(tot_c, tot_p, float(c["orig"].sum()), float(p["orig"].sum()),
                         float(c["qty"].sum()), float(p["qty"].sum()), tot_c, tot_p))
     index.append("G.TOTAL")
@@ -437,6 +559,7 @@ def yoy_excel_bytes(D, sheet="분석"):
 
 
 def perf_table(cur, prev, dim, order_list, title, key):
+    """제목 + 우측 엑셀버튼 + 전년비교 표 렌더."""
     D = yoy_frame(cur, prev, dim, order_list)
     h1, h2 = st.columns([4, 1])
     h1.markdown(f"**{title}**")
@@ -454,134 +577,6 @@ def render_flagship(df):
         return
     d = df[df["_판매일"].notna()].copy()
     years = sorted(d["_판매일"].dt.year.dropna().astype(int).unique(), reverse=True)
+
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 단위 백만원 · 판가율=실판가÷최초가(가중)")
-    f1, f2, f3, f4 = st.columns([1, 1.7, 1.2, 1.2])
-    with f1:
-        cy = st.selectbox("기준연도", years, index=0)
-    cur_all = d[d["_판매일"].dt.year == cy]
-    dmin, dmax = cur_all["_판매일"].min().date(), cur_all["_판매일"].max().date()
-    with f2:
-        rng = st.date_input(f"기준기간 (전년 {cy-1} 동기간 자동)", value=(dmin, dmax),
-                            min_value=d["_판매일"].min().date(), max_value=d["_판매일"].max().date())
-    with f3:
-        brands = sorted([b for b in d["브랜드명"].dropna().unique()]) if "브랜드명" in d.columns else []
-        selb = st.multiselect("브랜드", brands, default=brands)
-    with f4:
-        seasons = sorted([s for s in d["시즌명"].dropna().unique()]) if "시즌명" in d.columns else []
-        sels = st.multiselect("시즌", seasons, default=seasons)
-    chans = sorted([c for c in d["_채널"].dropna().unique()]) if "_채널" in d.columns else []
-    selc = st.multiselect("매장/채널", chans, default=chans)
-    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
-        st.info("기간(시작~끝)을 선택하세요.")
-        return
-    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
-    base = d.copy()
-    if selb and "브랜드명" in base:
-        base = base[base["브랜드명"].isin(selb)]
-    if sels and "시즌명" in base:
-        base = base[base["시즌명"].isin(sels)]
-    if selc and "_채널" in base:
-        base = base[base["_채널"].isin(selc)]
-    cur = base[(base["_판매일"] >= s) & (base["_판매일"] <= e)]
-    prev = base[(base["_판매일"] >= s - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
-    tot_c = cur["_매출액"].sum()
-    tot_p = prev["_매출액"].sum()
-    k1, k2, k3 = st.columns(3)
-    k1.metric(f"{cy} 매출(백만)", f"{_mm(tot_c):,.0f}")
-    k2.metric(f"{cy-1} 매출(백만)", f"{_mm(tot_p):,.0f}")
-    g = ((tot_c - tot_p) / tot_p) if tot_p else None
-    k3.metric("전년비 성장률", "신규/–" if g is None else f"{g*100:+.1f}%")
-    if not tot_p:
-        st.warning(f"전년({cy-1}) 동기간 데이터가 없어요. {cy-1}년 로우데이터를 적재하면 채워집니다.")
-    age_order = sorted([a for a in base["연차"].dropna().unique()], key=_age_sort_key)
-    st.markdown("### 연차별 성과표")
-    perf_table(cur, prev, "연차", age_order, "연차별 성과표", "age")
-    st.markdown("### 아이템그룹별 성과표 (전연차 토탈 + 연차별)")
-    perf_table(cur, prev, "아이템그룹", ITEMGROUP_ORDER, "아이템그룹별 성과표 (전연차)", "grp_all")
-    buckets = []
-    sinsang = [a for a in ["신상", "내년신상"] if a in age_order]
-    if sinsang:
-        buckets.append(("신상+내년신상", sinsang))
-    for a in age_order:
-        if a.endswith("년차"):
-            buckets.append((a, [a]))
-    for name, ages in buckets:
-        curb = cur[cur["연차"].isin(ages)]
-        prevb = prev[prev["연차"].isin(ages)]
-        perf_table(curb, prevb, "아이템그룹", ITEMGROUP_ORDER,
-                   f"아이템그룹별 성과표 ({name})", f"grp_{name}")
-
-
-def render_dashboard(q, df):
-    if q is None or q.empty:
-        st.warning("선택한 조건에 데이터가 없습니다.")
-        return
-    rev = q["_매출액"].sum(); qty = q["_수량"].sum()
-    orig = q["_최초가매출"].sum() if "_최초가매출" in q else 0
-    k = st.columns(5)
-    k[0].metric("총 매출액(실판가)", _won(rev))
-    k[1].metric("총 판매수량", f"{int(qty):,} 개")
-    k[2].metric("평균 단가", _won(rev / qty) if qty else "-")
-    k[3].metric("판가율", f"{rev/orig*100:.1f}%" if orig else "-")
-    k[4].metric("거래 건수", f"{len(q):,} 건")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**월별 매출 추이**")
-        if "년월" in q:
-            t = q.groupby("년월", as_index=False)["_매출액"].sum().sort_values("년월")
-            fig = px.line(t, x="년월", y="_매출액", markers=True, labels={"_매출액": "매출액"})
-            fig.update_layout(height=320, margin=dict(t=10, b=0)); st.plotly_chart(fig, use_container_width=True)
-    with c2:
-        st.markdown("**아이템그룹별 매출 비중**")
-        if "아이템그룹" in q:
-            comp = q.groupby("아이템그룹", as_index=False)["_매출액"].sum().sort_values("_매출액", ascending=False)
-            fig = px.pie(comp, names="아이템그룹", values="_매출액", hole=0.5)
-            fig.update_layout(height=320, margin=dict(t=10, b=0)); st.plotly_chart(fig, use_container_width=True)
-    st.markdown("**채널별 매출 TOP 10**")
-    if "_채널" in q:
-        ch = q.groupby("_채널", as_index=False)["_매출액"].sum().sort_values("_매출액", ascending=False).head(10)
-        fig = px.bar(ch, x="_매출액", y="_채널", orientation="h", labels={"_매출액": "매출액", "_채널": "채널"})
-        fig.update_layout(height=340, margin=dict(t=10, b=0), yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig, use_container_width=True)
-
-
-def main():
-    st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
-    st.title("📊 온라인팀 미니 ERP · 매출 분석")
-    with st.sidebar:
-        st.header("⚙️ 데이터 관리")
-        st.caption(f"저장소: **{backend_name()}**")
-        ups = st.file_uploader("① 로우데이터 업로드 (여러 개 한 번에 가능)",
-                               type=["xlsx", "xls", "csv"], accept_multiple_files=True)
-        if ups:
-            st.caption(f"{len(ups)}개 파일 선택됨")
-            if st.button("② DB에 적재하기", type="primary", use_container_width=True):
-                tn = ts = 0; last = 0
-                prog = st.progress(0.0)
-                for i, f in enumerate(ups):
-                    try:
-                        clean = add_row_key(enrich(read_raw_file(f)))
-                        res = append_to_db(clean)
-                        tn += res["inserted"]; ts += res["skipped"]; last = res["total_after"]
-                    except Exception as ex:
-                        st.error(f"{f.name} 오류: {ex}")
-                    prog.progress((i + 1) / len(ups))
-                load_db.clear()
-                st.success(f"적재 완료 ✅ 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
-        st.divider()
-        st.metric("현재 DB 누적", f"{db_row_count():,} 건")
-        if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
-            load_db.clear(); st.rerun()
-    df = load_db()
-    if df.empty:
-        st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요.")
-        return
-    tab1, tab2 = st.tabs(["📅 연차·아이템 세부분석 (플래그십)", "📊 종합 대시보드"])
-    with tab1:
-        render_flagship(df)
-    with tab2:
-        render_dashboard(df, df)
-
-
-if __name__ == "__main__":
-    main()
+    f1, f2, f3, f4 =
