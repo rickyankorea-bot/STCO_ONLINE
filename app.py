@@ -675,6 +675,52 @@ def render_dashboard(q, df):
         st.plotly_chart(fig, use_container_width=True)
 
 
+def render_channel_brand(df):
+    """매주 대표님 보고 B: 유통채널별 · 브랜드별 매출현황 (전년 동기간 비교)."""
+    st.subheader("📈 유통채널 · 브랜드별 매출현황 (전년 동기간 비교)")
+    if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
+        st.info("데이터를 먼저 적재하세요.")
+        return
+    d = df[df["_판매일"].notna()].copy()
+    dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
+    default_start = (pd.to_datetime(dmax) - pd.Timedelta(days=6)).date()
+
+    st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 백만원 · 판가율=실판가÷최초가(가중) · 기본기간=최근 1주")
+    c1, c2 = st.columns([2, 2])
+    with c1:
+        rng = st.date_input("조회기간 (기본: 최근 1주)", value=(default_start, dmax),
+                            min_value=dmin, max_value=dmax, key="cb_rng")
+    with c2:
+        brands = sorted([b for b in d["브랜드명"].dropna().unique()]) if "브랜드명" in d.columns else []
+        selb = st.multiselect("브랜드 필터", brands, default=brands, key="cb_brand")
+
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        st.info("기간(시작~끝)을 선택하세요.")
+        return
+    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    base = d
+    if selb and "브랜드명" in base.columns:
+        base = base[base["브랜드명"].isin(selb)]
+    cur = base[(base["_판매일"] >= s) & (base["_판매일"] <= e)]
+    prev = base[(base["_판매일"] >= s - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
+
+    tot_c, tot_p = cur["_매출액"].sum(), prev["_매출액"].sum()
+    k1, k2, k3 = st.columns(3)
+    k1.metric("기간 매출(백만)", f"{_mm(tot_c):,.0f}")
+    k2.metric("전년 동기(백만)", f"{_mm(tot_p):,.0f}")
+    g = ((tot_c - tot_p) / tot_p) if tot_p else None
+    k3.metric("전년비 신장률", "신규/–" if g is None else f"{g*100:+.1f}%")
+    if not tot_p:
+        st.warning("전년 동기간 데이터가 없어요. 기간을 조정하거나 전년 로우데이터를 적재하세요.")
+
+    st.markdown("### A. 유통채널별 (매출 순)")
+    perf_table(cur, prev, "_채널", None, "유통채널별 매출현황", "cb_ch")
+    st.caption("※ 채널을 자사몰/외부몰 등 그룹으로 묶으려면 '채널 기준정보(매핑)'가 필요해요 — 준비되면 그룹 집계도 추가해드릴게요.")
+
+    st.markdown("### B. 브랜드별")
+    perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br")
+
+
 def main():
     st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
     st.title("📊 온라인팀 미니 ERP · 매출 분석")
@@ -715,10 +761,14 @@ def main():
         st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요.")
         return
 
-    tab1, tab2 = st.tabs(["📅 연차·아이템 세부분석 (플래그십)", "📊 종합 대시보드"])
+    tab1, tab2, tab3 = st.tabs(["📅 연차·아이템 세부분석 (플래그십)",
+                                "📈 유통채널·브랜드 주간현황",
+                                "📊 종합 대시보드"])
     with tab1:
         render_flagship(df)
     with tab2:
+        render_channel_brand(df)
+    with tab3:
         render_dashboard(df, df)
 
 
