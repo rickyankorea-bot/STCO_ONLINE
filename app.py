@@ -579,7 +579,7 @@ def render_flagship(df):
     years = sorted(d["_판매일"].dt.year.dropna().astype(int).unique(), reverse=True)
 
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 단위 백만원 · 판가율=실판가÷최초가(가중)")
-f1, f2, f3, f4 = st.columns([1, 1.7, 1.2, 1.2])
+    f1, f2, f3, f4 = st.columns([1, 1.7, 1.2, 1.2])
     with f1:
         cy = st.selectbox("기준연도", years, index=0)
     cur_all = d[d["_판매일"].dt.year == cy]
