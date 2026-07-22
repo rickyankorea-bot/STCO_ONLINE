@@ -579,4 +579,148 @@ def render_flagship(df):
     years = sorted(d["_판매일"].dt.year.dropna().astype(int).unique(), reverse=True)
 
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 단위 백만원 · 판가율=실판가÷최초가(가중)")
-    f1, f2, f3, f4 =
+f1, f2, f3, f4 = st.columns([1, 1.7, 1.2, 1.2])
+    with f1:
+        cy = st.selectbox("기준연도", years, index=0)
+    cur_all = d[d["_판매일"].dt.year == cy]
+    dmin, dmax = cur_all["_판매일"].min().date(), cur_all["_판매일"].max().date()
+    with f2:
+        rng = st.date_input(f"기준기간 (전년 {cy-1} 동기간 자동)", value=(dmin, dmax),
+                            min_value=d["_판매일"].min().date(), max_value=d["_판매일"].max().date())
+    with f3:
+        brands = sorted([b for b in d["브랜드명"].dropna().unique()]) if "브랜드명" in d.columns else []
+        selb = st.multiselect("브랜드", brands, default=brands)
+    with f4:
+        seasons = sorted([s for s in d["시즌명"].dropna().unique()]) if "시즌명" in d.columns else []
+        sels = st.multiselect("시즌", seasons, default=seasons)
+    chans = sorted([c for c in d["_채널"].dropna().unique()]) if "_채널" in d.columns else []
+    selc = st.multiselect("매장/채널", chans, default=chans)
+
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        st.info("기간(시작~끝)을 선택하세요.")
+        return
+    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    base = d.copy()
+    if selb and "브랜드명" in base:
+        base = base[base["브랜드명"].isin(selb)]
+    if sels and "시즌명" in base:
+        base = base[base["시즌명"].isin(sels)]
+    if selc and "_채널" in base:
+        base = base[base["_채널"].isin(selc)]
+    cur = base[(base["_판매일"] >= s) & (base["_판매일"] <= e)]
+    prev = base[(base["_판매일"] >= s - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
+
+    tot_c = cur["_매출액"].sum()
+    tot_p = prev["_매출액"].sum()
+    k1, k2, k3 = st.columns(3)
+    k1.metric(f"{cy} 매출(백만)", f"{_mm(tot_c):,.0f}")
+    k2.metric(f"{cy-1} 매출(백만)", f"{_mm(tot_p):,.0f}")
+    g = ((tot_c - tot_p) / tot_p) if tot_p else None
+    k3.metric("전년비 성장률", "신규/–" if g is None else f"{g*100:+.1f}%")
+    if not tot_p:
+        st.warning(f"전년({cy-1}) 동기간 데이터가 없어요. {cy-1}년 로우데이터를 적재하면 채워집니다.")
+
+    # 연차 순서
+    age_order = sorted([a for a in base["연차"].dropna().unique()], key=_age_sort_key)
+    st.markdown("### 연차별 성과표")
+    perf_table(cur, prev, "연차", age_order, "연차별 성과표", "age")
+
+    st.markdown("### 아이템그룹별 성과표 (전연차 토탈 + 연차별)")
+    perf_table(cur, prev, "아이템그룹", ITEMGROUP_ORDER, "아이템그룹별 성과표 (전연차)", "grp_all")
+    # 연차별 버킷
+    buckets = []
+    sinsang = [a for a in ["신상", "내년신상"] if a in age_order]
+    if sinsang:
+        buckets.append(("신상+내년신상", sinsang))
+    for a in age_order:
+        if a.endswith("년차"):
+            buckets.append((a, [a]))
+    for name, ages in buckets:
+        curb = cur[cur["연차"].isin(ages)]
+        prevb = prev[prev["연차"].isin(ages)]
+        perf_table(curb, prevb, "아이템그룹", ITEMGROUP_ORDER,
+                   f"아이템그룹별 성과표 ({name})", f"grp_{name}")
+
+
+def render_dashboard(q, df):
+    if q is None or q.empty:
+        st.warning("선택한 조건에 데이터가 없습니다.")
+        return
+    rev = q["_매출액"].sum(); qty = q["_수량"].sum()
+    orig = q["_최초가매출"].sum() if "_최초가매출" in q else 0
+    k = st.columns(5)
+    k[0].metric("총 매출액(실판가)", _won(rev))
+    k[1].metric("총 판매수량", f"{int(qty):,} 개")
+    k[2].metric("평균 단가", _won(rev / qty) if qty else "-")
+    k[3].metric("판가율", f"{rev/orig*100:.1f}%" if orig else "-")
+    k[4].metric("거래 건수", f"{len(q):,} 건")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**월별 매출 추이**")
+        if "년월" in q:
+            t = q.groupby("년월", as_index=False)["_매출액"].sum().sort_values("년월")
+            fig = px.line(t, x="년월", y="_매출액", markers=True, labels={"_매출액": "매출액"})
+            fig.update_layout(height=320, margin=dict(t=10, b=0)); st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        st.markdown("**아이템그룹별 매출 비중**")
+        if "아이템그룹" in q:
+            comp = q.groupby("아이템그룹", as_index=False)["_매출액"].sum().sort_values("_매출액", ascending=False)
+            fig = px.pie(comp, names="아이템그룹", values="_매출액", hole=0.5)
+            fig.update_layout(height=320, margin=dict(t=10, b=0)); st.plotly_chart(fig, use_container_width=True)
+    st.markdown("**채널별 매출 TOP 10**")
+    if "_채널" in q:
+        ch = q.groupby("_채널", as_index=False)["_매출액"].sum().sort_values("_매출액", ascending=False).head(10)
+        fig = px.bar(ch, x="_매출액", y="_채널", orientation="h", labels={"_매출액": "매출액", "_채널": "채널"})
+        fig.update_layout(height=340, margin=dict(t=10, b=0), yaxis={"categoryorder": "total ascending"})
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def main():
+    st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
+    st.title("📊 온라인팀 미니 ERP · 매출 분석")
+
+    with st.sidebar:
+        st.header("⚙️ 데이터 관리")
+        st.caption(f"저장소: **{backend_name()}**")
+        ups = st.file_uploader("① 로우데이터 업로드 (여러 개 한 번에 가능)",
+                               type=["xlsx", "xls", "csv"], accept_multiple_files=True)
+        if ups:
+            st.caption(f"{len(ups)}개 파일 선택됨")
+            if st.button("② DB에 적재하기", type="primary", use_container_width=True):
+                tn = ts = 0; last = db_row_count()
+                prog = st.progress(0.0)
+                status = st.empty()
+                for i, f in enumerate(ups):
+                    try:
+                        status.caption(f"⏳ ({i+1}/{len(ups)}) {f.name} 처리 중…")
+                        clean = add_row_key(enrich(read_raw_file(f)))
+                        res = append_to_db(clean)
+                        tn += res["inserted"]; ts += res["skipped"]; last = res["total_after"]
+                        del clean, res            # 파일별 메모리 즉시 해제 (OOM 방지)
+                        gc.collect()
+                    except Exception as ex:
+                        st.error(f"{f.name} 오류: {ex}")
+                        gc.collect()
+                    prog.progress((i + 1) / len(ups))
+                status.empty()
+                load_db.clear()
+                st.success(f"적재 완료 ✅ 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
+        st.divider()
+        st.metric("현재 DB 누적", f"{db_row_count():,} 건")
+        if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
+            load_db.clear(); st.rerun()
+
+    df = load_db()
+    if df.empty:
+        st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요.")
+        return
+
+    tab1, tab2 = st.tabs(["📅 연차·아이템 세부분석 (플래그십)", "📊 종합 대시보드"])
+    with tab1:
+        render_flagship(df)
+    with tab2:
+        render_dashboard(df, df)
+
+
+if __name__ == "__main__":
+    main()
