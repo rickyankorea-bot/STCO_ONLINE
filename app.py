@@ -822,16 +822,16 @@ def _wk_block(cur, prev, rows):
 
 def _wk_rows():
     def code(x, cs): return x["매장코드"].astype(str).str.strip().isin(cs)
-    def story(x, v): return x["_채널스토리"] == v
+    def story(x, kw): return x["_채널스토리"].astype(str).str.contains(kw, na=False)
     def brand(x, ns): return x["브랜드명"].isin(ns)
     def age(x, a): return x["연차"].isin(a)
     return [
         (("전체", "G.TOTAL", "합계"), lambda x: pd.Series(True, index=x.index)),
         (("유통별", "통합몰", "합계"), lambda x: code(x, ["SD065"])),
         (("유통별", "네이버스토어", "합계"), lambda x: code(x, ["SD165", "SD174"])),
-        (("유통별", "원래직입점", "합계"), lambda x: story(x, "원래직입점")),
-        (("유통별", "웹뜰이관", "합계"), lambda x: story(x, "웹뜰에서 이관")),
-        (("유통별", "웍스바이이관", "합계"), lambda x: story(x, "웍스에서 이관")),
+        (("유통별", "원래직입점", "합계"), lambda x: story(x, "원래")),
+        (("유통별", "웹뜰이관", "합계"), lambda x: story(x, "웹뜰")),
+        (("유통별", "웍스바이이관", "합계"), lambda x: story(x, "웍스")),
         (("브랜드별", "S/D/L", "합계"), lambda x: brand(x, SDL_BRANDS)),
         (("브랜드별", "S/D/L", "신상"), lambda x: brand(x, SDL_BRANDS) & age(x, ["신상", "내년신상"])),
         (("브랜드별", "S/D/L", "1년차"), lambda x: brand(x, SDL_BRANDS) & age(x, ["1년차"])),
