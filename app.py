@@ -164,7 +164,7 @@ def read_raw_file(uploaded_file):
     df.columns = header
     df = df.reset_index(drop=True).dropna(how="all")
     df = df[~df.apply(lambda r: all((str(v).strip() == "" or str(v) == "nan") for v in r), axis=1)]
-    # ERP 다운로드 맨 아래 '전체 합계' 행 제거 — 날짜 없는(숫자만) 행은 실제 거래가 아님
+    # ERP 다운로드 맨 아래 '전체 합계' 행 제거 — 날짜·품번 없이 숫자만 있는 행은 실제 거래가 아님
     if "판매일자" in df.columns:
         dd = df["판매일자"].astype(str).str.strip().str.lower()
         df = df[dd.ne("") & ~dd.isin(["nan", "none", "nat"])]
@@ -425,7 +425,7 @@ def load_db():
     df["_채널"] = df["매장명"] if "매장명" in df.columns else df.get("매장코드", "기타")
     if "판매일자" in df.columns:
         df["_판매일"] = pd.to_datetime(df["판매일자"], errors="coerce")
-        df = df[df["_판매일"].notna()].copy()   # 합계행 등 날짜 없는 행 제외
+        df = df[df["_판매일"].notna()].copy()   # 합계행 등 날짜 없는 행 제외 (대시보드 총액 정합성)
     # 비즈니스 규칙(아이템그룹·연차)은 저장값 대신 항상 최신 기준으로 재계산
     #  → 그룹 정의를 바꿔도 재적재 없이 즉시 반영됨
     if "아이템" in df.columns:
@@ -563,6 +563,13 @@ def yoy_excel_bytes(D, sheet="분석"):
     return buf.getvalue()
 
 
+def _money_note():
+    """룰1: 표 오른쪽 상단 [금액: 백만원 / VAT+] 표기."""
+    st.markdown(
+        "<div style='text-align:right;color:#888;font-size:0.78rem;margin:-4px 0 -2px 0;'>"
+        "[금액: 백만원 / VAT+]</div>", unsafe_allow_html=True)
+
+
 def perf_table(cur, prev, dim, order_list, title, key):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더."""
     D = yoy_frame(cur, prev, dim, order_list)
@@ -572,7 +579,8 @@ def perf_table(cur, prev, dim, order_list, title, key):
                        file_name=f"{title[:24]}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key=f"dl_{key}", use_container_width=True)
-    st.dataframe(style_yoy(D), use_container_width=True)
+    _money_note()   # 룰1
+    st.dataframe(style_yoy(D), use_container_width=True, row_height=22)   # 룰4: 행높이 축소
 
 
 def render_flagship(df):
@@ -755,7 +763,7 @@ def read_master_file(uploaded_file):
         m[c] = m[c].astype(str).str.strip()
     m = m[m["매장코드"].ne("") & ~m["매장코드"].str.lower().isin(["nan", "none"])]
     if "유통성격" in m.columns:
-        m["유통성격"] = m["유통성격"].replace({"벤더": "밴더"})
+        m["유통성격"] = m["유통성격"].replace({"벤더": "밴더"})  # 표기 통일
     return m.reset_index(drop=True)
 
 
@@ -794,6 +802,9 @@ def master_row_count():
         return 0
 
 
+# ==============================================================================
+# 주간회의 보고자료  ─ 당월실적 / 연간누계 (전년 동기간 비교)
+# ==============================================================================
 SDL_BRANDS = ["STCO", "DIEMS", "GENDERLESS"]
 WK_MONEY = ["실판가", "사업계획"]
 
@@ -822,7 +833,7 @@ def _wk_block(cur, prev, rows):
 
 def _wk_rows():
     def code(x, cs): return x["매장코드"].astype(str).str.strip().isin(cs)
-    def story(x, kw): return x["_채널스토리"].astype(str).str.contains(kw, na=False)
+    def story(x, kw): return x["_채널스토리"].astype(str).str.contains(kw, na=False)  # 핵심단어 유연매칭
     def brand(x, ns): return x["브랜드명"].isin(ns)
     def age(x, a): return x["연차"].isin(a)
     return [
@@ -850,7 +861,7 @@ def _wk_fmt(block, sub, v):
     if sub == "사업계획" or sub == "진도율":
         return "–"
     if "실판가" in sub:
-        return f"{v:,.0f}"
+        return f"{v/1e6:,.0f}"   # 룰1: 백만원 단위
     if "판가율" in sub:
         return f"{v*100:.1f}%"
     if sub == "증감율":
@@ -939,7 +950,7 @@ def render_weekly_report(df):
     asof = st.date_input("조회 기준일 (당월·누계의 끝 날짜)", value=dmax, min_value=dmin, max_value=dmax, key="wk_asof")
     asof = pd.to_datetime(asof)
     cy, py = asof.year, asof.year - 1
-    st.caption(f"올해({cy}) vs 전년({py}) 동기간 · 실판가=실매출(원) · 판가율=실판가÷최초가(가중) · 비중=행÷전체")
+    st.caption(f"올해({cy}) vs 전년({py}) 동기간 · 실판가=실매출(백만원) · 판가율=실판가÷최초가(가중) · 비중=행÷전체")
 
     m_start = asof.replace(day=1)
     y_start = asof.replace(month=1, day=1)
@@ -949,22 +960,24 @@ def render_weekly_report(df):
     prev_y = d[(d["_판매일"] >= y_start - pd.DateOffset(years=1)) & (d["_판매일"] <= asof - pd.DateOffset(years=1))]
 
     rows = _wk_rows()
-    bm = _wk_block(cur_m, prev_m, rows)
-    by = _wk_block(cur_y, prev_y, rows)
+    bm = _wk_block(cur_m, prev_m, rows)   # 당월
+    by = _wk_block(cur_y, prev_y, rows)   # 누계
 
+    # 표 구성: 행(섹션/구분/세부) × 열(블록×지표)
     idx = [k for k, _ in rows]
     MON = "당월 실적"; YTD = "연간누계"
-    mcols = [(MON, f"{py}실판가"), (MON, f"{py}판가율"), (MON, f"{cy}실판가"),
-             (MON, "증감율"), (MON, "비중"), (MON, f"{cy}판가율"), (MON, "편차")]
-    ycols = [(YTD, f"{py}실판가"), (YTD, f"{py}판가율"), (YTD, "사업계획"), (YTD, f"{cy}실판가"),
-             (YTD, "진도율"), (YTD, "증감율"), (YTD, "비중"), (YTD, f"{cy}판가율"), (YTD, "편차")]
+    sy, sc = str(py)[-2:], str(cy)[-2:]   # 룰2: 연도 2자리 축약
+    mcols = [(MON, f"{sy}실판가"), (MON, f"{sy}판가율"), (MON, f"{sc}실판가"),
+             (MON, "증감율"), (MON, "비중"), (MON, f"{sc}판가율"), (MON, "편차")]
+    ycols = [(YTD, f"{sy}실판가"), (YTD, f"{sy}판가율"), (YTD, "사업계획"), (YTD, f"{sc}실판가"),
+             (YTD, "진도율"), (YTD, "증감율"), (YTD, "비중"), (YTD, f"{sc}판가율"), (YTD, "편차")]
 
     def cellval(block_res, key, sub):
         r = block_res[key]
         if "실판가" in sub:
-            return r["py실판가"] if sub.startswith(str(py)) else r["cy실판가"]
+            return r["py실판가"] if sub.startswith(str(py)[-2:]) else r["cy실판가"]
         if "판가율" in sub:
-            return r["py판가율"] if sub.startswith(str(py)) else r["cy판가율"]
+            return r["py판가율"] if sub.startswith(str(py)[-2:]) else r["cy판가율"]
         if sub in ("사업계획", "진도율"):
             return None
         return r[sub]
@@ -975,6 +988,7 @@ def render_weekly_report(df):
         data.append(row)
     D = pd.DataFrame(data, index=pd.MultiIndex.from_tuples(idx), columns=pd.MultiIndex.from_tuples(mcols + ycols))
 
+    # 표시용 포맷
     disp = D.copy()
     for col in disp.columns:
         disp[col] = [_wk_fmt(col[0], col[1], v) for v in D[col]]
@@ -992,17 +1006,21 @@ def render_weekly_report(df):
 
     h1, h2 = st.columns([5, 1])
     h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()}~{asof.date()} · 누계 {y_start.date()}~{asof.date()})")
+    # 엑셀 다운로드
     xls_bytes = weekly_excel_bytes(rows, bm, by, asof, cy, py)
     h2.download_button("⬇ 엑셀", xls_bytes, file_name=f"주간보고_{asof.date()}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="wk_dl", use_container_width=True)
-    st.dataframe(sty, use_container_width=True, height=560)
+    _money_note()   # 룰1
+    st.dataframe(sty, use_container_width=True, height=560, row_height=22)   # 룰4: 행높이 축소
     st.caption("※ 유통별 5개는 주요 채널만 (직영몰·특수채널·K2K이관 등은 G.TOTAL엔 포함, 유통 행엔 미표기). "
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
-    
+
+
 def main():
     st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
     st.title("📊 온라인팀 미니 ERP · 매출 분석")
+    fresh_slot = st.container()   # 타이틀 바로 아래: 매출 데이터 최종 업데이트 일자 표기 자리
 
     with st.sidebar:
         st.header("⚙️ 데이터 관리")
@@ -1049,6 +1067,12 @@ def main():
                     st.error(f"매장 기준정보 오류: {ex}")
 
     df = load_db()
+    # 타이틀 아래 최종 업데이트 일자 (매출 로우데이터의 마지막 판매일자 = 데이터가 채워진 마지막 날)
+    if not df.empty and "_판매일" in df.columns and df["_판매일"].notna().any():
+        _last = df["_판매일"].max()
+        fresh_slot.caption(
+            f"🗓️ **매출 로우데이터 최종 업데이트 일자 : {_last.year}년 {_last.month:02d}월 {_last.day:02d}일**"
+            "  (이 날짜까지의 매출이 입력되어 있어요)")
     if df.empty:
         st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요.")
         return
