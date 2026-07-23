@@ -726,7 +726,226 @@ def render_channel_brand(df):
     perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br")
 
 
-def main():
+# ==============================================================================
+# 매장(채널) 기준정보 마스터  ─ 업로드 시 전체 교체
+# ==============================================================================
+MASTER_TABLE = "channel_master"
+MASTER_COLS = ["매장코드", "매장명", "담당자", "유통성격", "채널소유", "채널스토리"]
+
+
+def read_master_file(uploaded_file):
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        raw = pd.read_csv(uploaded_file, header=None, dtype=str, keep_default_na=False)
+    else:
+        raw = pd.read_excel(uploaded_file, header=None, dtype=str)
+    hrow = 0
+    for i in range(min(10, len(raw))):
+        vals = [str(v).strip() for v in raw.iloc[i].tolist()]
+        if "매장코드" in vals:
+            hrow = i
+            break
+    header = [str(v).strip() for v in raw.iloc[hrow].tolist()]
+    m = raw.iloc[hrow + 1:].copy()
+    m.columns = header
+    m = m.dropna(how="all")
+    keep = [c for c in MASTER_COLS if c in m.columns]
+    m = m[keep].copy()
+    for c in keep:
+        m[c] = m[c].astype(str).str.strip()
+    m = m[m["매장코드"].ne("") & ~m["매장코드"].str.lower().isin(["nan", "none"])]
+    if "유통성격" in m.columns:
+        m["유통성격"] = m["유통성격"].replace({"벤더": "밴더"})
+    return m.reset_index(drop=True)
+
+
+def replace_master(m):
+    eng = get_engine()
+    with eng.begin() as conn:
+        m.astype(str).to_sql(MASTER_TABLE, conn, if_exists="replace", index=False)
+    return len(m)
+
+
+@st.cache_data(ttl=120)
+def load_master():
+    eng = get_engine()
+    try:
+        with eng.connect() as conn:
+            exists = conn.exec_driver_sql(
+                "SELECT 1 FROM information_schema.tables WHERE table_name=%s"
+                if eng.dialect.name == "postgresql" else
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (MASTER_TABLE,)).fetchone()
+            if not exists:
+                return pd.DataFrame()
+            m = pd.read_sql(f'SELECT * FROM "{MASTER_TABLE}"', conn)
+    except Exception:
+        return pd.DataFrame()
+    for c in m.columns:
+        m[c] = m[c].astype(str).str.strip()
+    return m
+
+
+def master_row_count():
+    try:
+        with get_engine().connect() as conn:
+            return conn.exec_driver_sql(f'SELECT COUNT(*) FROM "{MASTER_TABLE}"').scalar()
+    except Exception:
+        return 0
+
+
+SDL_BRANDS = ["STCO", "DIEMS", "GENDERLESS"]
+WK_MONEY = ["실판가", "사업계획"]
+
+
+def _wk_metrics(cur_sub, prev_sub, total_c):
+    r26 = float(cur_sub["_매출액"].sum()); r25 = float(prev_sub["_매출액"].sum())
+    o26 = float(cur_sub["_최초가매출"].sum()); o25 = float(prev_sub["_최초가매출"].sum())
+    pg26 = (r26 / o26) if o26 else 0.0; pg25 = (r25 / o25) if o25 else 0.0
+    return {
+        "py실판가": r25, "py판가율": pg25,
+        "cy실판가": r26, "증감율": ((r26 - r25) / r25) if r25 else None,
+        "비중": (r26 / total_c) if total_c else 0.0, "cy판가율": pg26,
+        "편차": pg26 - pg25,
+    }
+
+
+def _wk_block(cur, prev, rows):
+    total_c = float(cur["_매출액"].sum())
+    out = {}
+    for key, mask in rows:
+        cs = cur[mask(cur)] if len(cur) else cur
+        ps = prev[mask(prev)] if len(prev) else prev
+        out[key] = _wk_metrics(cs, ps, total_c)
+    return out
+
+
+def _wk_rows():
+    def code(x, cs): return x["매장코드"].astype(str).str.strip().isin(cs)
+    def story(x, v): return x["_채널스토리"] == v
+    def brand(x, ns): return x["브랜드명"].isin(ns)
+    def age(x, a): return x["연차"].isin(a)
+    return [
+        (("전체", "G.TOTAL", "합계"), lambda x: pd.Series(True, index=x.index)),
+        (("유통별", "통합몰", "합계"), lambda x: code(x, ["SD065"])),
+        (("유통별", "네이버스토어", "합계"), lambda x: code(x, ["SD165", "SD174"])),
+        (("유통별", "원래직입점", "합계"), lambda x: story(x, "원래직입점")),
+        (("유통별", "웹뜰이관", "합계"), lambda x: story(x, "웹뜰에서 이관")),
+        (("유통별", "웍스바이이관", "합계"), lambda x: story(x, "웍스에서 이관")),
+        (("브랜드별", "S/D/L", "합계"), lambda x: brand(x, SDL_BRANDS)),
+        (("브랜드별", "S/D/L", "신상"), lambda x: brand(x, SDL_BRANDS) & age(x, ["신상", "내년신상"])),
+        (("브랜드별", "S/D/L", "1년차"), lambda x: brand(x, SDL_BRANDS) & age(x, ["1년차"])),
+        (("브랜드별", "S/D/L", "2년차"), lambda x: brand(x, SDL_BRANDS) & age(x, ["2년차"])),
+        (("브랜드별", "S/D/L", "3년차"), lambda x: brand(x, SDL_BRANDS) & age(x, ["3년차"])),
+        (("브랜드별", "A (CODI GALLERY)", "합계"), lambda x: brand(x, ["CODI GALLERY"])),
+        (("브랜드별", "0 (ZERO LOUNGE)", "합계"), lambda x: brand(x, ["ZERO LOUNGE"])),
+        (("브랜드별", "J (GENTLEMENS)", "합계"), lambda x: brand(x, ["GENTLEMENS PHILOSOPHY"])),
+        (("브랜드별", "N (NORATED)", "합계"), lambda x: brand(x, ["NORATED"])),
+    ]
+
+
+def _wk_fmt(block, sub, v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "–"
+    if sub == "사업계획" or sub == "진도율":
+        return "–"
+    if "실판가" in sub:
+        return f"{v:,.0f}"
+    if "판가율" in sub:
+        return f"{v*100:.1f}%"
+    if sub == "증감율":
+        return f"{v*100:+.1f}%"
+    if sub == "비중":
+        return f"{v*100:.1f}%"
+    if sub == "편차":
+        return f"{v*100:+.1f}%p"
+    return v
+
+
+def render_weekly_report(df):
+    st.subheader("📋 주간회의 보고자료 (당월 · 연간누계, 전년 동기간 비교)")
+    if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
+        st.info("데이터를 먼저 적재하세요.")
+        return
+    d = df[df["_판매일"].notna()].copy()
+    master = load_master()
+    if not master.empty and "채널스토리" in master.columns:
+        cs_map = dict(zip(master["매장코드"].astype(str).str.strip(), master["채널스토리"]))
+        d["_채널스토리"] = d["매장코드"].astype(str).str.strip().map(cs_map)
+    else:
+        d["_채널스토리"] = None
+        st.warning("매장 기준정보(채널스토리)가 없어 유통별 3개(원래직입점·웹뜰이관·웍스바이이관)는 0으로 나와요. "
+                   "사이드바 **매장 기준정보 업로드**에 마스터 파일을 올리면 채워져요.")
+
+    dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
+    asof = st.date_input("조회 기준일 (당월·누계의 끝 날짜)", value=dmax, min_value=dmin, max_value=dmax, key="wk_asof")
+    asof = pd.to_datetime(asof)
+    cy, py = asof.year, asof.year - 1
+    st.caption(f"올해({cy}) vs 전년({py}) 동기간 · 실판가=실매출(원) · 판가율=실판가÷최초가(가중) · 비중=행÷전체")
+
+    m_start = asof.replace(day=1)
+    y_start = asof.replace(month=1, day=1)
+    cur_m = d[(d["_판매일"] >= m_start) & (d["_판매일"] <= asof)]
+    prev_m = d[(d["_판매일"] >= m_start - pd.DateOffset(years=1)) & (d["_판매일"] <= asof - pd.DateOffset(years=1))]
+    cur_y = d[(d["_판매일"] >= y_start) & (d["_판매일"] <= asof)]
+    prev_y = d[(d["_판매일"] >= y_start - pd.DateOffset(years=1)) & (d["_판매일"] <= asof - pd.DateOffset(years=1))]
+
+    rows = _wk_rows()
+    bm = _wk_block(cur_m, prev_m, rows)
+    by = _wk_block(cur_y, prev_y, rows)
+
+    idx = [k for k, _ in rows]
+    MON = "당월 실적"; YTD = "연간누계"
+    mcols = [(MON, f"{py}실판가"), (MON, f"{py}판가율"), (MON, f"{cy}실판가"),
+             (MON, "증감율"), (MON, "비중"), (MON, f"{cy}판가율"), (MON, "편차")]
+    ycols = [(YTD, f"{py}실판가"), (YTD, f"{py}판가율"), (YTD, "사업계획"), (YTD, f"{cy}실판가"),
+             (YTD, "진도율"), (YTD, "증감율"), (YTD, "비중"), (YTD, f"{cy}판가율"), (YTD, "편차")]
+
+    def cellval(block_res, key, sub):
+        r = block_res[key]
+        if "실판가" in sub:
+            return r["py실판가"] if sub.startswith(str(py)) else r["cy실판가"]
+        if "판가율" in sub:
+            return r["py판가율"] if sub.startswith(str(py)) else r["cy판가율"]
+        if sub in ("사업계획", "진도율"):
+            return None
+        return r[sub]
+
+    data = []
+    for key in idx:
+        row = [cellval(bm, key, s[1]) for s in mcols] + [cellval(by, key, s[1]) for s in ycols]
+        data.append(row)
+    D = pd.DataFrame(data, index=pd.MultiIndex.from_tuples(idx), columns=pd.MultiIndex.from_tuples(mcols + ycols))
+
+    disp = D.copy()
+    for col in disp.columns:
+        disp[col] = [_wk_fmt(col[0], col[1], v) for v in D[col]]
+
+    def _color(col):
+        if col[1] not in ("증감율", "편차"):
+            return ["" for _ in D[col]]
+        return ["color:#c62828;font-weight:600" if (pd.notnull(v) and v < 0)
+                else ("color:#1f8a4c;font-weight:600" if (pd.notnull(v) and v > 0) else "") for v in D[col]]
+    sty = disp.style
+    for col in D.columns:
+        if col[1] in ("증감율", "편차"):
+            sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
+    sty = sty.set_properties(**{"text-align": "right"})
+
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()}~{asof.date()} · 누계 {y_start.date()}~{asof.date()})")
+    buf = io.BytesIO()
+    xls = disp.copy()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        xls.to_excel(w, sheet_name="주간보고")
+    h2.download_button("⬇ 엑셀", buf.getvalue(), file_name=f"주간보고_{asof.date()}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key="wk_dl", use_container_width=True)
+    st.dataframe(sty, use_container_width=True, height=560)
+    st.caption("※ 유통별 5개는 주요 채널만 (직영몰·특수채널·K2K이관 등은 G.TOTAL엔 포함, 유통 행엔 미표기). "
+               "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
+    
+    def main():
     st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
     st.title("📊 온라인팀 미니 ERP · 매출 분석")
 
@@ -758,22 +977,38 @@ def main():
                 st.success(f"적재 완료 ✅ 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
         st.divider()
         st.metric("현재 DB 누적", f"{db_row_count():,} 건")
-        if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
-            load_db.clear(); st.rerun()
+       if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
+            load_db.clear(); load_master.clear(); st.rerun()
+
+        st.divider()
+        st.caption(f"🏬 매장 기준정보(태그): 현재 **{master_row_count():,}개** 매장")
+        mup = st.file_uploader("매장 기준정보 업로드 (담당자·유통성격·채널소유·채널스토리)",
+                               type=["xlsx", "xls", "csv"], accept_multiple_files=False, key="master_up")
+        if mup is not None:
+            if st.button("🏬 매장 기준정보 적용(전체 교체)", use_container_width=True):
+                try:
+                    n = replace_master(read_master_file(mup))
+                    load_master.clear()
+                    st.success(f"매장 기준정보 갱신 완료 ✅ {n}개 매장")
+                except Exception as ex:
+                    st.error(f"매장 기준정보 오류: {ex}")
 
     df = load_db()
     if df.empty:
         st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요.")
         return
 
-    tab1, tab2, tab3 = st.tabs(["📅 연차·아이템 세부분석 (플래그십)",
-                                "📈 유통채널·브랜드 주간현황",
-                                "📊 종합 대시보드"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 주간회의 보고자료",
+                                      "📅 연차·아이템 세부분석 (플래그십)",
+                                      "📈 유통채널·브랜드 주간현황",
+                                      "📊 종합 대시보드"])
     with tab1:
-        render_flagship(df)
+        render_weekly_report(df)
     with tab2:
-        render_channel_brand(df)
+        render_flagship(df)
     with tab3:
+        render_channel_brand(df)
+    with tab4:
         render_dashboard(df, df)
 
 
