@@ -862,6 +862,64 @@ def _wk_fmt(block, sub, v):
     return v
 
 
+def weekly_excel_bytes(rows, bm, by, asof, cy, py):
+    """팀 주간보고 양식(weekly_template.xlsx)을 템플릿으로 열어 매출현황·마감일·특이사항만 채워 반환."""
+    import os
+    from openpyxl import load_workbook
+    tpl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weekly_template.xlsx")
+    wb = load_workbook(tpl)
+    ws = wb["주간보고"] if "주간보고" in wb.sheetnames else wb.active
+
+    ws["P1"] = f"마감일: {str(cy)[-2:]}년 {asof.month:02d}월 {asof.day:02d}일"
+
+    row_map = {
+        ("전체", "G.TOTAL", "합계"): 12,
+        ("유통별", "통합몰", "합계"): 13, ("유통별", "네이버스토어", "합계"): 14,
+        ("유통별", "원래직입점", "합계"): 15, ("유통별", "웹뜰이관", "합계"): 16,
+        ("유통별", "웍스바이이관", "합계"): 17,
+        ("브랜드별", "S/D/L", "합계"): 18, ("브랜드별", "S/D/L", "신상"): 19,
+        ("브랜드별", "S/D/L", "1년차"): 20, ("브랜드별", "S/D/L", "2년차"): 21,
+        ("브랜드별", "S/D/L", "3년차"): 22,
+        ("브랜드별", "A (CODI GALLERY)", "합계"): 23, ("브랜드별", "0 (ZERO LOUNGE)", "합계"): 24,
+        ("브랜드별", "J (GENTLEMENS)", "합계"): 25, ("브랜드별", "N (NORATED)", "합계"): 26,
+    }
+
+    def setc(r, col, v):
+        c = ws.cell(r, col)
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            c.value = "–"
+        else:
+            c.value = float(v)
+
+    for key, r in row_map.items():
+        m = bm.get(key, {}); y = by.get(key, {})
+        setc(r, 4, m.get("py실판가")); setc(r, 5, m.get("py판가율")); setc(r, 6, m.get("cy실판가"))
+        setc(r, 7, m.get("증감율")); setc(r, 8, m.get("비중")); setc(r, 9, m.get("cy판가율"))
+        setc(r, 10, m.get("편차"))
+        setc(r, 11, y.get("py실판가")); setc(r, 12, y.get("py판가율")); setc(r, 14, y.get("cy실판가"))
+        setc(r, 16, y.get("증감율")); setc(r, 17, y.get("비중")); setc(r, 18, y.get("cy판가율"))
+        setc(r, 19, y.get("편차"))
+
+    def pc(v):
+        return "N/A" if (v is None or (isinstance(v, float) and pd.isna(v))) else f"{v*100:+.0f}%"
+    G = bm.get(("전체", "G.TOTAL", "합계"), {})
+    TM = bm.get(("유통별", "통합몰", "합계"), {}); NV = bm.get(("유통별", "네이버스토어", "합계"), {})
+    j26 = (TM.get("cy실판가") or 0) + (NV.get("cy실판가") or 0)
+    j25 = (TM.get("py실판가") or 0) + (NV.get("py실판가") or 0)
+    jasa = ((j26 - j25) / j25) if j25 else None
+    OW = bm.get(("유통별", "원래직입점", "합계"), {}); WT = bm.get(("유통별", "웹뜰이관", "합계"), {})
+    WK = bm.get(("유통별", "웍스바이이관", "합계"), {})
+    gt = G.get("증감율")
+    trend = "상승" if (gt or 0) >= 0 else "하락"
+    ws["A29"] = (f"1. 당월실적 전년대비 {pc(gt)} {trend} 추세\n"
+                 f"2. 통합몰은 {pc(TM.get('증감율'))} , 네이버스토어 {pc(NV.get('증감율'))}. "
+                 f"자사채널 전체는 {pc(jasa)} 추세\n"
+                 f"3. 원래직입점 {pc(OW.get('증감율'))} , 웹뜰이관 {pc(WT.get('증감율'))}, "
+                 f"웍스바이이관 {pc(WK.get('증감율'))} 추세")
+
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
 def render_weekly_report(df):
     st.subheader("📋 주간회의 보고자료 (당월 · 연간누계, 전년 동기간 비교)")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
@@ -934,11 +992,8 @@ def render_weekly_report(df):
 
     h1, h2 = st.columns([5, 1])
     h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()}~{asof.date()} · 누계 {y_start.date()}~{asof.date()})")
-    buf = io.BytesIO()
-    xls = disp.copy()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        xls.to_excel(w, sheet_name="주간보고")
-    h2.download_button("⬇ 엑셀", buf.getvalue(), file_name=f"주간보고_{asof.date()}.xlsx",
+    xls_bytes = weekly_excel_bytes(rows, bm, by, asof, cy, py)
+    h2.download_button("⬇ 엑셀", xls_bytes, file_name=f"주간보고_{asof.date()}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="wk_dl", use_container_width=True)
     st.dataframe(sty, use_container_width=True, height=560)
