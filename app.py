@@ -164,6 +164,10 @@ def read_raw_file(uploaded_file):
     df.columns = header
     df = df.reset_index(drop=True).dropna(how="all")
     df = df[~df.apply(lambda r: all((str(v).strip() == "" or str(v) == "nan") for v in r), axis=1)]
+    # ERP 다운로드 맨 아래 '전체 합계' 행 제거 — 날짜 없는(숫자만) 행은 실제 거래가 아님
+    if "판매일자" in df.columns:
+        dd = df["판매일자"].astype(str).str.strip().str.lower()
+        df = df[dd.ne("") & ~dd.isin(["nan", "none", "nat"])]
     return df
 
 
