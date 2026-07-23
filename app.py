@@ -421,6 +421,7 @@ def load_db():
     df["_채널"] = df["매장명"] if "매장명" in df.columns else df.get("매장코드", "기타")
     if "판매일자" in df.columns:
         df["_판매일"] = pd.to_datetime(df["판매일자"], errors="coerce")
+        df = df[df["_판매일"].notna()].copy()   # 합계행 등 날짜 없는 행 제외
     # 비즈니스 규칙(아이템그룹·연차)은 저장값 대신 항상 최신 기준으로 재계산
     #  → 그룹 정의를 바꿔도 재적재 없이 즉시 반영됨
     if "아이템" in df.columns:
