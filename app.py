@@ -945,7 +945,7 @@ def render_weekly_report(df):
     st.caption("※ 유통별 5개는 주요 채널만 (직영몰·특수채널·K2K이관 등은 G.TOTAL엔 포함, 유통 행엔 미표기). "
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
     
- def main():
+def main():
     st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
     st.title("📊 온라인팀 미니 ERP · 매출 분석")
 
@@ -976,7 +976,7 @@ def render_weekly_report(df):
                 load_db.clear()
                 st.success(f"적재 완료 ✅ 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
         st.divider()
-        st.metric("현재 DB 누적", f"{db_row_count():,} 건")if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
+        st.metric("현재 DB 누적", f"{db_row_count():,} 건")
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
             load_db.clear(); load_master.clear(); st.rerun()
 
