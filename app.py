@@ -1276,13 +1276,12 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py):
     render_styled_table(sty)
 
 
-def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, store_code, store_label, cy, py):
-    """선택한 매장의 아이템그룹별 상세표 — 주간보고와 동일 프레임(당월+누계). 비중=해당 매장 내."""
-    sm = lambda x: x["매장코드"].astype(str).str.strip() == store_code
-    cm, pm = cur_m[sm(cur_m)], prev_m[sm(prev_m)]
-    cyd, pyd = cur_y[sm(cur_y)], prev_y[sm(prev_y)]
+def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py):
+    """선택한 매장(또는 담당자 전체매장)의 아이템그룹별 상세표 — 주간보고 동일 프레임. 비중=해당 그룹 내."""
+    cm, pm = cur_m[mask(cur_m)], prev_m[mask(prev_m)]
+    cyd, pyd = cur_y[mask(cur_y)], prev_y[mask(prev_y)]
     if cm.empty and cyd.empty and pm.empty and pyd.empty:
-        st.info(f"'{store_label}' 매장 데이터가 없어요.")
+        st.info(f"'{label}' 데이터가 없어요.")
         return
     present = set(pd.concat([cyd["아이템그룹"], pyd["아이템그룹"], cm["아이템그룹"], pm["아이템그룹"]]).astype(str))
     groups = [g for g in ITEMGROUP_ORDER if g in present] + [g for g in present if g not in ITEMGROUP_ORDER]
@@ -1293,8 +1292,8 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, store_code, store
     bm = _wk_block(cm, pm, rows)
     by = _wk_block(cyd, pyd, rows)
     sty = _wk_style_table(bm, by, [k for k, _ in rows], cy, py)
-    st.markdown(f"**🔍 {store_label} · 아이템그룹별 상세**  "
-                f"<span style='color:#888;font-size:0.8rem;'>(비중=해당 매장 내 · G.TOTAL=매장 전체)</span>",
+    st.markdown(f"**🔍 {label} · 아이템그룹별 상세**  "
+                f"<span style='color:#888;font-size:0.8rem;'>(비중=해당 그룹 내 · G.TOTAL=선택 전체)</span>",
                 unsafe_allow_html=True)
     _money_note()
     render_styled_table(sty)
@@ -1391,15 +1390,26 @@ def render_weekly_report(df):
         render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, _mask, cy, py)
 
     st.divider()
-    st.markdown("##### 🔍 (드릴다운 2) 매장별 아이템 분석")
+    st.markdown("##### 🔍 (드릴다운 2) 매장별/담당별 아이템분석")
     sv = cur_y.assign(_c=cur_y["매장코드"].astype(str).str.strip()).groupby("_c")["_매출액"].sum().sort_values(ascending=False)
     nmap = dict(zip(d["매장코드"].astype(str).str.strip(), d["매장명"].astype(str)))
     labels = [f"{nmap.get(c, c)} ({c})" for c in sv.index]
     code_of = dict(zip(labels, sv.index))
-    ssel = st.selectbox("매장을 선택하면 그 매장의 아이템그룹별 지표가 같은 형식으로 펼쳐져요. (매출 큰 순)",
-                        ["(선택 안 함)"] + labels, key="wk_item_drill")
-    if ssel != "(선택 안 함)":
-        render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, code_of[ssel], ssel, cy, py)
+    I_NONE, I_HM, I_HS = "(선택 안 함)", "─ 담당별 ─", "─ 매장별 ─"
+    iopts = [I_NONE]
+    if managers:
+        iopts += [I_HM] + managers
+    iopts += [I_HS] + labels
+    isel = st.selectbox("담당자(담당 전체매장 기준) 또는 매장을 선택하면 아이템그룹별 지표가 같은 형식으로 펼쳐져요.",
+                        iopts, key="wk_item_drill")
+    if isel not in (I_NONE, I_HM, I_HS):
+        if isel in managers:
+            imask = (lambda nm: (lambda x: x["_담당자"].astype(str).str.strip() == nm))(isel)
+            render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, f"{isel} (담당 전체매장)", imask, cy, py)
+        else:
+            code = code_of[isel]
+            imask = (lambda c: (lambda x: x["매장코드"].astype(str).str.strip() == c))(code)
+            render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, isel, imask, cy, py)
 
 
 def main():
