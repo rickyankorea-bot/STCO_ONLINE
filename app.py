@@ -570,6 +570,28 @@ def _money_note():
         "[금액: 백만원 / VAT+]</div>", unsafe_allow_html=True)
 
 
+# 공통 표 CSS: 옵션A 여백(3px 9px) + 헤더·구분 검정 + G.TOTAL(첫 행) 노란 강조 + 증감 색 유지
+_TBL_CSS = """
+<style>
+.erp-wrap{overflow-x:auto;margin:2px 0 6px;}
+table.erp-tbl{border-collapse:collapse;font-size:0.82rem;}
+table.erp-tbl th, table.erp-tbl td{padding:3px 9px;border:1px solid #e6e6e6;white-space:nowrap;}
+table.erp-tbl thead th{color:#111;font-weight:700;background:#f4f4f6;text-align:center;}
+table.erp-tbl tbody th{color:#111;font-weight:600;text-align:left;background:#fafafa;}
+table.erp-tbl td{color:#111;text-align:right;}
+table.erp-tbl tbody tr:first-child th, table.erp-tbl tbody tr:first-child td{
+    background:#fff2b8 !important;font-weight:700;}
+</style>
+"""
+
+
+def render_styled_table(sty):
+    """Styler를 HTML 표로 렌더(가로여백 축소·헤더검정·G.TOTAL 노란강조). 증감 빨강/초록은 Styler가 유지."""
+    sty = sty.set_table_attributes('class="erp-tbl"')
+    st.markdown(_TBL_CSS + f'<div class="erp-wrap">{sty.to_html()}</div>',
+                unsafe_allow_html=True)
+
+
 def perf_table(cur, prev, dim, order_list, title, key):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더."""
     D = yoy_frame(cur, prev, dim, order_list)
@@ -580,7 +602,7 @@ def perf_table(cur, prev, dim, order_list, title, key):
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key=f"dl_{key}", use_container_width=True)
     _money_note()   # 룰1
-    st.dataframe(style_yoy(D), use_container_width=True, row_height=22)   # 룰4: 행높이 축소
+    render_styled_table(style_yoy(D))   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
 
 
 def render_flagship(df):
@@ -1012,7 +1034,7 @@ def render_weekly_report(df):
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="wk_dl", use_container_width=True)
     _money_note()   # 룰1
-    st.dataframe(sty, use_container_width=True, height=560, row_height=22)   # 룰4: 행높이 축소
+    render_styled_table(sty)   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
     st.caption("※ 유통별 5개는 주요 채널만 (직영몰·특수채널·K2K이관 등은 G.TOTAL엔 포함, 유통 행엔 미표기). "
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
 
