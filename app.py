@@ -566,14 +566,14 @@ def yoy_excel_bytes(D, sheet="분석"):
 def _money_note():
     """룰1: 표 오른쪽 상단 [금액: 백만원 / VAT+] 표기."""
     st.markdown(
-        "<div style='text-align:right;color:#888;font-size:0.78rem;margin:-4px 0 -2px 0;'>"
+        "<div style='text-align:right;color:#888;font-size:0.78rem;margin:-16px 0 -6px 0;'>"
         "[금액: 백만원 / VAT+]</div>", unsafe_allow_html=True)
 
 
 # 공통 표 CSS: 옵션A 여백(3px 9px) + 헤더·구분 검정 + G.TOTAL(첫 행) 노란 강조 + 증감 색 유지
 _TBL_CSS = """
 <style>
-.erp-wrap{overflow-x:auto;margin:2px 0 6px;}
+.erp-wrap{overflow-x:auto;margin:-2px 0 6px;}
 table.erp-tbl{border-collapse:collapse;font-size:0.82rem;}
 table.erp-tbl th, table.erp-tbl td{padding:3px 9px;border:1px solid #e6e6e6;white-space:nowrap;}
 table.erp-tbl thead th{color:#111;font-weight:700;background:#f4f4f6;text-align:center;}
@@ -962,6 +962,44 @@ def weekly_excel_bytes(rows, bm, by, asof, cy, py):
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
+def _wk_style_table(bm, by, idx, cy, py):
+    """주간보고 프레임(당월+누계 · 동일 컬럼)으로 (bm,by,idx)를 스타일 표(Styler)로 변환. 메인표·담당별표 공용."""
+    MON, YTD = "당월 실적", "연간누계"
+    sy, sc = str(py)[-2:], str(cy)[-2:]   # 룰2: 연도 2자리
+    mcols = [(MON, f"{sy}실판가"), (MON, f"{sy}판가율"), (MON, f"{sc}실판가"),
+             (MON, "증감율"), (MON, "비중"), (MON, f"{sc}판가율"), (MON, "편차")]
+    ycols = [(YTD, f"{sy}실판가"), (YTD, f"{sy}판가율"), (YTD, "사업계획"), (YTD, f"{sc}실판가"),
+             (YTD, "진도율"), (YTD, "증감율"), (YTD, "비중"), (YTD, f"{sc}판가율"), (YTD, "편차")]
+
+    def cellval(block_res, key, sub):
+        r = block_res[key]
+        if "실판가" in sub:
+            return r["py실판가"] if sub.startswith(sy) else r["cy실판가"]
+        if "판가율" in sub:
+            return r["py판가율"] if sub.startswith(sy) else r["cy판가율"]
+        if sub in ("사업계획", "진도율"):
+            return None
+        return r[sub]
+
+    data = [[cellval(bm, k, s[1]) for s in mcols] + [cellval(by, k, s[1]) for s in ycols] for k in idx]
+    D = pd.DataFrame(data, index=pd.MultiIndex.from_tuples(idx),
+                     columns=pd.MultiIndex.from_tuples(mcols + ycols))
+    disp = D.copy()
+    for col in disp.columns:
+        disp[col] = [_wk_fmt(col[0], col[1], v) for v in D[col]]
+
+    def _color(col):
+        if col[1] not in ("증감율", "편차"):
+            return ["" for _ in D[col]]
+        return ["color:#c62828;font-weight:600" if (pd.notnull(v) and v < 0)
+                else ("color:#1f8a4c;font-weight:600" if (pd.notnull(v) and v > 0) else "") for v in D[col]]
+    sty = disp.style
+    for col in D.columns:
+        if col[1] in ("증감율", "편차"):
+            sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
+    return sty.set_properties(**{"text-align": "right"})
+
+
 def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py):
     """선택한 그룹(유통 또는 담당자)의 매장별 상세표 — 주간보고와 동일 형식(당월+누계). 비중=해당 그룹 내."""
     cm, pm = cur_m[mask(cur_m)], prev_m[mask(prev_m)]
@@ -1075,46 +1113,9 @@ def render_weekly_report(df):
     bm = _wk_block(cur_m, prev_m, rows)   # 당월
     by = _wk_block(cur_y, prev_y, rows)   # 누계
 
-    # 표 구성: 행(섹션/구분/세부) × 열(블록×지표)
+    # 표 구성: 행(섹션/구분/세부) × 열(블록×지표) — 공용 프레임 함수
     idx = [k for k, _ in rows]
-    MON = "당월 실적"; YTD = "연간누계"
-    sy, sc = str(py)[-2:], str(cy)[-2:]   # 룰2: 연도 2자리 축약
-    mcols = [(MON, f"{sy}실판가"), (MON, f"{sy}판가율"), (MON, f"{sc}실판가"),
-             (MON, "증감율"), (MON, "비중"), (MON, f"{sc}판가율"), (MON, "편차")]
-    ycols = [(YTD, f"{sy}실판가"), (YTD, f"{sy}판가율"), (YTD, "사업계획"), (YTD, f"{sc}실판가"),
-             (YTD, "진도율"), (YTD, "증감율"), (YTD, "비중"), (YTD, f"{sc}판가율"), (YTD, "편차")]
-
-    def cellval(block_res, key, sub):
-        r = block_res[key]
-        if "실판가" in sub:
-            return r["py실판가"] if sub.startswith(str(py)[-2:]) else r["cy실판가"]
-        if "판가율" in sub:
-            return r["py판가율"] if sub.startswith(str(py)[-2:]) else r["cy판가율"]
-        if sub in ("사업계획", "진도율"):
-            return None
-        return r[sub]
-
-    data = []
-    for key in idx:
-        row = [cellval(bm, key, s[1]) for s in mcols] + [cellval(by, key, s[1]) for s in ycols]
-        data.append(row)
-    D = pd.DataFrame(data, index=pd.MultiIndex.from_tuples(idx), columns=pd.MultiIndex.from_tuples(mcols + ycols))
-
-    # 표시용 포맷
-    disp = D.copy()
-    for col in disp.columns:
-        disp[col] = [_wk_fmt(col[0], col[1], v) for v in D[col]]
-
-    def _color(col):
-        if col[1] not in ("증감율", "편차"):
-            return ["" for _ in D[col]]
-        return ["color:#c62828;font-weight:600" if (pd.notnull(v) and v < 0)
-                else ("color:#1f8a4c;font-weight:600" if (pd.notnull(v) and v > 0) else "") for v in D[col]]
-    sty = disp.style
-    for col in D.columns:
-        if col[1] in ("증감율", "편차"):
-            sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
-    sty = sty.set_properties(**{"text-align": "right"})
+    sty = _wk_style_table(bm, by, idx, cy, py)
 
     h1, h2 = st.columns([5, 1])
     h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()}~{asof.date()} · 누계 {y_start.date()}~{asof.date()})")
@@ -1128,12 +1129,27 @@ def render_weekly_report(df):
     st.caption("※ 유통별 5개는 주요 채널만 (직영몰·특수채널·K2K이관 등은 G.TOTAL엔 포함, 유통 행엔 미표기). "
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
 
-    st.divider()
-    st.markdown("##### 🔍 유통별/담당별 매장 상세 (드릴다운)")
+    # ── 매장 담당별 분석 (위 표와 동일 프레임, 행만 담당자) ──
     managers = []
     if "_담당자" in d.columns:
         managers = sorted({m for m in d["_담당자"].dropna().astype(str).str.strip()
                            if m and m.lower() not in ("nan", "none")})
+    if managers:
+        st.divider()
+        st.markdown("##### 👤 매장 담당별 분석")
+        mrows = [(("전체", "G.TOTAL", "합계"), lambda x: pd.Series(True, index=x.index))]
+        for nm in managers:
+            mrows.append((("담당별", nm, "합계"),
+                          (lambda name: (lambda x: x["_담당자"].astype(str).str.strip() == name))(nm)))
+        bm2 = _wk_block(cur_m, prev_m, mrows)
+        by2 = _wk_block(cur_y, prev_y, mrows)
+        sty2 = _wk_style_table(bm2, by2, [k for k, _ in mrows], cy, py)
+        _money_note()
+        render_styled_table(sty2)
+        st.caption("※ 담당별 = 매장 마스터의 담당자 기준. 담당 미지정 매장은 담당 행엔 미포함(G.TOTAL엔 포함). 비중=행÷전체.")
+
+    st.divider()
+    st.markdown("##### 🔍 (드릴다운)유통별/담당별 매장 상세 보기")
     NONE, HEAD_C, HEAD_M = "(선택 안 함)", "─ 유통별 ─", "─ 담당별 ─"
     opts = [NONE, HEAD_C] + list(_CHANNEL_MASKS.keys())
     if managers:
@@ -1150,6 +1166,13 @@ def render_weekly_report(df):
 
 def main():
     st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
+    # 전역 여백 축소: 요소 간격·헤더 하단여백을 줄여 타이틀을 표에 바짝 붙임
+    st.markdown("""
+        <style>
+        [data-testid="stVerticalBlock"]{gap:0.4rem;}
+        [data-testid="stMarkdownContainer"] h3,
+        [data-testid="stMarkdownContainer"] h5{margin-bottom:0.1rem;padding-bottom:0;}
+        </style>""", unsafe_allow_html=True)
     st.title("📊 온라인팀 미니 ERP · 매출 분석")
     fresh_slot = st.container()   # 타이틀 바로 아래: 매출 데이터 최종 업데이트 일자 표기 자리
 
