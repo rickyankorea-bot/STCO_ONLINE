@@ -566,14 +566,14 @@ def yoy_excel_bytes(D, sheet="분석"):
 def _money_note():
     """룰1: 표 오른쪽 상단 [금액: 백만원 / VAT+] 표기."""
     st.markdown(
-        "<div style='text-align:right;color:#888;font-size:0.78rem;margin:-16px 0 -6px 0;'>"
+        "<div style='text-align:right;color:#888;font-size:0.78rem;margin:-6px 0 0 0;'>"
         "[금액: 백만원 / VAT+]</div>", unsafe_allow_html=True)
 
 
 # 공통 표 CSS: 옵션A 여백(3px 9px) + 헤더·구분 검정 + G.TOTAL(첫 행) 노란 강조 + 증감 색 유지
 _TBL_CSS = """
 <style>
-.erp-wrap{overflow-x:auto;margin:-2px 0 6px;}
+.erp-wrap{overflow-x:auto;margin:2px 0 8px;}
 table.erp-tbl{border-collapse:collapse;font-size:0.82rem;}
 table.erp-tbl th, table.erp-tbl td{padding:3px 9px;border:1px solid #e6e6e6;white-space:nowrap;}
 table.erp-tbl thead th{color:#111;font-weight:700;background:#f4f4f6;text-align:center;}
@@ -1075,6 +1075,30 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py):
     render_styled_table(sty)
 
 
+def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, store_code, store_label, cy, py):
+    """선택한 매장의 아이템그룹별 상세표 — 주간보고와 동일 프레임(당월+누계). 비중=해당 매장 내."""
+    sm = lambda x: x["매장코드"].astype(str).str.strip() == store_code
+    cm, pm = cur_m[sm(cur_m)], prev_m[sm(prev_m)]
+    cyd, pyd = cur_y[sm(cur_y)], prev_y[sm(prev_y)]
+    if cm.empty and cyd.empty and pm.empty and pyd.empty:
+        st.info(f"'{store_label}' 매장 데이터가 없어요.")
+        return
+    present = set(pd.concat([cyd["아이템그룹"], pyd["아이템그룹"], cm["아이템그룹"], pm["아이템그룹"]]).astype(str))
+    groups = [g for g in ITEMGROUP_ORDER if g in present] + [g for g in present if g not in ITEMGROUP_ORDER]
+    rows = [(("전체", "G.TOTAL", "합계"), lambda x: pd.Series(True, index=x.index))]
+    for g in groups:
+        rows.append((("아이템", g, "합계"),
+                     (lambda gg: (lambda x: x["아이템그룹"].astype(str) == gg))(g)))
+    bm = _wk_block(cm, pm, rows)
+    by = _wk_block(cyd, pyd, rows)
+    sty = _wk_style_table(bm, by, [k for k, _ in rows], cy, py)
+    st.markdown(f"**🔍 {store_label} · 아이템그룹별 상세**  "
+                f"<span style='color:#888;font-size:0.8rem;'>(비중=해당 매장 내 · G.TOTAL=매장 전체)</span>",
+                unsafe_allow_html=True)
+    _money_note()
+    render_styled_table(sty)
+
+
 def render_weekly_report(df):
     st.subheader("📋 주간회의 보고자료 (당월 · 연간누계, 전년 동기간 비교)")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
@@ -1162,6 +1186,17 @@ def render_weekly_report(df):
         else:
             _mask = (lambda nm: (lambda x: x["_담당자"].astype(str).str.strip() == nm))(sel)
         render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, _mask, cy, py)
+
+    st.divider()
+    st.markdown("##### 🔍 (드릴다운 2) 매장별 아이템 분석")
+    sv = cur_y.assign(_c=cur_y["매장코드"].astype(str).str.strip()).groupby("_c")["_매출액"].sum().sort_values(ascending=False)
+    nmap = dict(zip(d["매장코드"].astype(str).str.strip(), d["매장명"].astype(str)))
+    labels = [f"{nmap.get(c, c)} ({c})" for c in sv.index]
+    code_of = dict(zip(labels, sv.index))
+    ssel = st.selectbox("매장을 선택하면 그 매장의 아이템그룹별 지표가 같은 형식으로 펼쳐져요. (매출 큰 순)",
+                        ["(선택 안 함)"] + labels, key="wk_item_drill")
+    if ssel != "(선택 안 함)":
+        render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, code_of[ssel], ssel, cy, py)
 
 
 def main():
