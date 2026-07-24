@@ -962,13 +962,12 @@ def weekly_excel_bytes(rows, bm, by, asof, cy, py):
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
-def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, channel, cy, py):
-    """선택한 유통(channel)의 매장별 상세표 — 주간보고와 동일 형식(당월+누계). 비중=해당 유통 내."""
-    mask = _CHANNEL_MASKS[channel]
+def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py):
+    """선택한 그룹(유통 또는 담당자)의 매장별 상세표 — 주간보고와 동일 형식(당월+누계). 비중=해당 그룹 내."""
     cm, pm = cur_m[mask(cur_m)], prev_m[mask(prev_m)]
     cyd, pyd = cur_y[mask(cur_y)], prev_y[mask(prev_y)]
     if cm.empty and cyd.empty and pm.empty and pyd.empty:
-        st.info(f"'{channel}'에 해당하는 매장 데이터가 없어요.")
+        st.info(f"'{label}'에 해당하는 매장 데이터가 없어요.")
         return
 
     tot_m = float(cm["_매출액"].sum())    # 당월 유통 total (비중 분모)
@@ -993,7 +992,7 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, channel, cy, py):
         store_rows.append((name_map.get(c, c) or c, m, y, rev_y))
     store_rows.sort(key=lambda t: -t[3])   # 누계 올해 매출 큰 순
 
-    entries = [(f"{channel} (합계)", _wk_metrics(cm, pm, tot_m), _wk_metrics(cyd, pyd, tot_y))]
+    entries = [(f"{label} (합계)", _wk_metrics(cm, pm, tot_m), _wk_metrics(cyd, pyd, tot_y))]
     entries += [(r[0], r[1], r[2]) for r in store_rows]
 
     sy, sc = str(py)[-2:], str(cy)[-2:]
@@ -1031,8 +1030,8 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, channel, cy, py):
             sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
     sty = sty.set_properties(**{"text-align": "right"})
 
-    st.markdown(f"**🔍 {channel} · 매장별 상세**  "
-                f"<span style='color:#888;font-size:0.8rem;'>(매장 {len(store_rows)}개 · 비중=해당 유통 내 · 매출 큰 순)</span>",
+    st.markdown(f"**🔍 {label} · 매장별 상세**  "
+                f"<span style='color:#888;font-size:0.8rem;'>(매장 {len(store_rows)}개 · 비중=해당 그룹 내 · 매출 큰 순)</span>",
                 unsafe_allow_html=True)
     _money_note()
     render_styled_table(sty)
@@ -1052,6 +1051,12 @@ def render_weekly_report(df):
         d["_채널스토리"] = None
         st.warning("매장 기준정보(채널스토리)가 없어 유통별 3개(원래직입점·웹뜰이관·웍스바이이관)는 0으로 나와요. "
                    "사이드바 **매장 기준정보 업로드**에 마스터 파일을 올리면 채워져요.")
+    # 담당자 매핑 (드릴다운 담당별용)
+    if not master.empty and "담당자" in master.columns:
+        mgr_map = dict(zip(master["매장코드"].astype(str).str.strip(), master["담당자"].astype(str).str.strip()))
+        d["_담당자"] = d["매장코드"].astype(str).str.strip().map(mgr_map)
+    else:
+        d["_담당자"] = None
 
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     asof = st.date_input("조회 기준일 (당월·누계의 끝 날짜)", value=dmax, min_value=dmin, max_value=dmax, key="wk_asof")
@@ -1124,11 +1129,23 @@ def render_weekly_report(df):
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
 
     st.divider()
-    st.markdown("##### 🔍 유통별 매장 상세 (드릴다운)")
-    sel = st.selectbox("유통을 선택하면 그 안의 매장별 지표가 같은 형식으로 펼쳐져요.",
-                       ["(선택 안 함)"] + list(_CHANNEL_MASKS.keys()), key="wk_drill")
-    if sel != "(선택 안 함)":
-        render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, cy, py)
+    st.markdown("##### 🔍 유통별/담당별 매장 상세 (드릴다운)")
+    managers = []
+    if "_담당자" in d.columns:
+        managers = sorted({m for m in d["_담당자"].dropna().astype(str).str.strip()
+                           if m and m.lower() not in ("nan", "none")})
+    NONE, HEAD_C, HEAD_M = "(선택 안 함)", "─ 유통별 ─", "─ 담당별 ─"
+    opts = [NONE, HEAD_C] + list(_CHANNEL_MASKS.keys())
+    if managers:
+        opts += [HEAD_M] + managers
+    sel = st.selectbox("유통 또는 담당자를 선택하면 그 그룹의 매장별 지표가 같은 형식으로 펼쳐져요.",
+                       opts, key="wk_drill")
+    if sel not in (NONE, HEAD_C, HEAD_M):
+        if sel in _CHANNEL_MASKS:
+            _mask = _CHANNEL_MASKS[sel]
+        else:
+            _mask = (lambda nm: (lambda x: x["_담당자"].astype(str).str.strip() == nm))(sel)
+        render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, _mask, cy, py)
 
 
 def main():
