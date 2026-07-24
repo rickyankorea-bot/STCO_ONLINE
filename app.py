@@ -824,6 +824,160 @@ def master_row_count():
         return 0
 
 
+# ── 사업계획(월별 목표) 마스터 : 매장별 + 브랜드별(연차 포함) ──
+PLAN_TABLE = "plan_master"
+
+
+def read_plan_file(uploaded_file):
+    """사업계획 엑셀(매장별 시트 + 브랜드별 시트) → long DF[dim, code, sub, month, amount]."""
+    import re
+    def _num(v):
+        try:
+            f = float(v)
+            return 0.0 if pd.isna(f) else f
+        except Exception:
+            return 0.0
+    xls = pd.read_excel(uploaded_file, sheet_name=None, header=None, dtype=object)
+    out = []
+    for _, raw in xls.items():
+        if raw is None or len(raw) == 0:
+            continue
+        hrow = kind = None
+        for i in range(min(10, len(raw))):
+            vals = [str(v).strip() for v in raw.iloc[i].tolist()]
+            if "매장코드" in vals:
+                hrow, kind = i, "store"; break
+            if "브랜드" in vals:
+                hrow, kind = i, "brand"; break
+        if hrow is None:
+            continue
+        header = [str(v).strip() for v in raw.iloc[hrow].tolist()]
+        mcols = {}
+        for ci, h in enumerate(header):
+            mm = re.match(r"(\d{1,2})\s*월", h)
+            if mm:
+                mcols[int(mm.group(1))] = ci
+        body = raw.iloc[hrow + 1:]
+        if kind == "store":
+            ci_code = header.index("매장코드")
+            for _, r in body.iterrows():
+                code = str(r.iloc[ci_code]).strip()
+                if code == "" or code.lower() in ("nan", "none"):
+                    continue
+                for m, ci in mcols.items():
+                    out.append(("store", code, "", m, _num(r.iloc[ci])))
+        else:
+            ci_b = header.index("브랜드")
+            ci_a = header.index("연차") if "연차" in header else None
+            for _, r in body.iterrows():
+                b = str(r.iloc[ci_b]).strip()
+                if b == "" or b.lower() in ("nan", "none"):
+                    continue
+                sub = str(r.iloc[ci_a]).strip() if ci_a is not None else "합계"
+                for m, ci in mcols.items():
+                    out.append(("brand", b, sub, m, _num(r.iloc[ci])))
+    return pd.DataFrame(out, columns=["dim", "code", "sub", "month", "amount"])
+
+
+def replace_plan(p):
+    eng = get_engine()
+    with eng.begin() as conn:
+        p.to_sql(PLAN_TABLE, conn, if_exists="replace", index=False)
+    return len(p)
+
+
+@st.cache_data(ttl=120)
+def load_plan():
+    eng = get_engine()
+    try:
+        with eng.connect() as conn:
+            exists = conn.exec_driver_sql(
+                "SELECT 1 FROM information_schema.tables WHERE table_name=%s"
+                if eng.dialect.name == "postgresql" else
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (PLAN_TABLE,)).fetchone()
+            if not exists:
+                return pd.DataFrame()
+            p = pd.read_sql(f'SELECT * FROM "{PLAN_TABLE}"', conn)
+    except Exception:
+        return pd.DataFrame()
+    if not p.empty:
+        p["month"] = pd.to_numeric(p["month"], errors="coerce")
+        p["amount"] = pd.to_numeric(p["amount"], errors="coerce").fillna(0.0)
+        p["code"] = p["code"].astype(str).str.strip()
+        p["sub"] = p["sub"].astype(str).str.strip()
+    return p
+
+
+def plan_row_count():
+    try:
+        with get_engine().connect() as conn:
+            return conn.exec_driver_sql(f'SELECT COUNT(*) FROM "{PLAN_TABLE}"').scalar()
+    except Exception:
+        return 0
+
+
+# 사업계획 → 주간보고 행 매핑
+_PLAN_BRAND = {"S/D/L": "S/D/L", "A (CODI GALLERY)": "A", "0 (ZERO LOUNGE)": "0",
+               "J (GENTLEMENS)": "J", "N (NORATED)": "N"}
+_PLAN_SUB = {"합계": "합계", "신상": "신상+내년신상", "1년차": "1년차", "2년차": "2년차", "3년차": "3년차"}
+_PLAN_CH_KW = {"원래직입점": "원래", "웹뜰이관": "웹뜰", "웍스바이이관": "웍스"}
+
+
+def _plan_cum(plan, master, month):
+    """조회월까지(1~month) 누계 사업계획. dict{store, brand, cs} 반환. 없으면 None."""
+    if plan is None or plan.empty:
+        return None
+    p = plan[plan["month"] <= month]
+    store = p[p["dim"] == "store"].groupby("code")["amount"].sum().to_dict()
+    brand = p[p["dim"] == "brand"].groupby(["code", "sub"])["amount"].sum().to_dict()
+    cs = {"원래": [], "웹뜰": [], "웍스": []}
+    if master is not None and not master.empty and "채널스토리" in master.columns:
+        for _, mr in master.iterrows():
+            story = str(mr.get("채널스토리", ""))
+            code = str(mr.get("매장코드", "")).strip()
+            for kw in cs:
+                if kw in story:
+                    cs[kw].append(code)
+    return {"store": store, "brand": brand, "cs": cs}
+
+
+def _plan_for(key, cum):
+    if cum is None:
+        return None
+    sec, mid, sub = key
+    store, brand, cs = cum["store"], cum["brand"], cum["cs"]
+    if mid == "G.TOTAL":
+        return store.get("G.TOTAL")
+    if sec == "유통별":
+        if mid == "통합몰":
+            return store.get("SD065")
+        if mid == "네이버스토어":
+            return (store.get("SD165") or 0) + (store.get("SD174") or 0)
+        kw = _PLAN_CH_KW.get(mid)
+        if kw:
+            codes = cs.get(kw, [])
+            return sum(store.get(c, 0) for c in codes) if codes else None
+    if sec == "브랜드별":
+        b = _PLAN_BRAND.get(mid); s = _PLAN_SUB.get(sub)
+        if b and s:
+            return brand.get((b, s))
+    return None
+
+
+def inject_plan(by, idx, month, master):
+    """누계 블록 by[key]에 '사업계획'·'진도율' 주입. 진도율 = 26누계실적 ÷ 누계계획."""
+    cum = _plan_cum(load_plan(), master, month)
+    for key in idx:
+        p = _plan_for(key, cum)
+        r = by.get(key)
+        if r is None:
+            continue
+        r["사업계획"] = p
+        act = r.get("cy실판가")
+        r["진도율"] = (act / p) if (p and act is not None) else None
+
+
 # ==============================================================================
 # 주간회의 보고자료  ─ 당월실적 / 연간누계 (전년 동기간 비교)
 # ==============================================================================
@@ -889,8 +1043,10 @@ def _wk_rows():
 def _wk_fmt(block, sub, v):
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return "–"
-    if sub == "사업계획" or sub == "진도율":
-        return "–"
+    if sub == "사업계획":
+        return f"{v/1e6:,.0f}"   # 백만원
+    if sub == "진도율":
+        return f"{v*100:.0f}%"
     if "실판가" in sub:
         return f"{v/1e6:,.0f}"   # 룰1: 백만원 단위
     if "판가율" in sub:
@@ -978,7 +1134,7 @@ def _wk_style_table(bm, by, idx, cy, py):
         if "판가율" in sub:
             return r["py판가율"] if sub.startswith(sy) else r["cy판가율"]
         if sub in ("사업계획", "진도율"):
-            return None
+            return r.get(sub)
         return r[sub]
 
     data = [[cellval(bm, k, s[1]) for s in mcols] + [cellval(by, k, s[1]) for s in ycols] for k in idx]
@@ -1139,6 +1295,7 @@ def render_weekly_report(df):
 
     # 표 구성: 행(섹션/구분/세부) × 열(블록×지표) — 공용 프레임 함수
     idx = [k for k, _ in rows]
+    inject_plan(by, idx, asof.month, master)   # 누계 사업계획·진도율 주입
     sty = _wk_style_table(bm, by, idx, cy, py)
 
     h1, h2 = st.columns([5, 1])
@@ -1254,6 +1411,19 @@ def main():
                     st.success(f"매장 기준정보 갱신 완료 ✅ {n}개 매장")
                 except Exception as ex:
                     st.error(f"매장 기준정보 오류: {ex}")
+
+        st.divider()
+        st.caption(f"🎯 사업계획(월별 목표): 현재 **{plan_row_count():,}행**")
+        pup = st.file_uploader("사업계획 업로드 (매장별·브랜드별 월별 목표)",
+                               type=["xlsx", "xls"], accept_multiple_files=False, key="plan_up")
+        if pup is not None:
+            if st.button("🎯 사업계획 적용(전체 교체)", use_container_width=True):
+                try:
+                    n = replace_plan(read_plan_file(pup))
+                    load_plan.clear()
+                    st.success(f"사업계획 갱신 완료 ✅ {n:,}행")
+                except Exception as ex:
+                    st.error(f"사업계획 오류: {ex}")
 
     df = load_db()
     # 타이틀 아래 최종 업데이트 일자 (매출 로우데이터의 마지막 판매일자 = 데이터가 채워진 마지막 날)
