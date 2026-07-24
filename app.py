@@ -830,6 +830,15 @@ def master_row_count():
 SDL_BRANDS = ["STCO", "DIEMS", "GENDERLESS"]
 WK_MONEY = ["실판가", "사업계획"]
 
+# 유통별 5개 분류 기준 (요약행 + 매장 드릴다운 공용 · 단일 소스)
+_CHANNEL_MASKS = {
+    "통합몰":      lambda x: x["매장코드"].astype(str).str.strip().isin(["SD065"]),
+    "네이버스토어": lambda x: x["매장코드"].astype(str).str.strip().isin(["SD165", "SD174"]),
+    "원래직입점":   lambda x: x["_채널스토리"].astype(str).str.contains("원래", na=False),
+    "웹뜰이관":     lambda x: x["_채널스토리"].astype(str).str.contains("웹뜰", na=False),
+    "웍스바이이관": lambda x: x["_채널스토리"].astype(str).str.contains("웍스", na=False),
+}
+
 
 def _wk_metrics(cur_sub, prev_sub, total_c):
     r26 = float(cur_sub["_매출액"].sum()); r25 = float(prev_sub["_매출액"].sum())
@@ -860,11 +869,11 @@ def _wk_rows():
     def age(x, a): return x["연차"].isin(a)
     return [
         (("전체", "G.TOTAL", "합계"), lambda x: pd.Series(True, index=x.index)),
-        (("유통별", "통합몰", "합계"), lambda x: code(x, ["SD065"])),
-        (("유통별", "네이버스토어", "합계"), lambda x: code(x, ["SD165", "SD174"])),
-        (("유통별", "원래직입점", "합계"), lambda x: story(x, "원래")),
-        (("유통별", "웹뜰이관", "합계"), lambda x: story(x, "웹뜰")),
-        (("유통별", "웍스바이이관", "합계"), lambda x: story(x, "웍스")),
+        (("유통별", "통합몰", "합계"), _CHANNEL_MASKS["통합몰"]),
+        (("유통별", "네이버스토어", "합계"), _CHANNEL_MASKS["네이버스토어"]),
+        (("유통별", "원래직입점", "합계"), _CHANNEL_MASKS["원래직입점"]),
+        (("유통별", "웹뜰이관", "합계"), _CHANNEL_MASKS["웹뜰이관"]),
+        (("유통별", "웍스바이이관", "합계"), _CHANNEL_MASKS["웍스바이이관"]),
         (("브랜드별", "S/D/L", "합계"), lambda x: brand(x, SDL_BRANDS)),
         (("브랜드별", "S/D/L", "신상"), lambda x: brand(x, SDL_BRANDS) & age(x, ["신상", "내년신상"])),
         (("브랜드별", "S/D/L", "1년차"), lambda x: brand(x, SDL_BRANDS) & age(x, ["1년차"])),
@@ -953,6 +962,82 @@ def weekly_excel_bytes(rows, bm, by, asof, cy, py):
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
+def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, channel, cy, py):
+    """선택한 유통(channel)의 매장별 상세표 — 주간보고와 동일 형식(당월+누계). 비중=해당 유통 내."""
+    mask = _CHANNEL_MASKS[channel]
+    cm, pm = cur_m[mask(cur_m)], prev_m[mask(prev_m)]
+    cyd, pyd = cur_y[mask(cur_y)], prev_y[mask(prev_y)]
+    if cm.empty and cyd.empty and pm.empty and pyd.empty:
+        st.info(f"'{channel}'에 해당하는 매장 데이터가 없어요.")
+        return
+
+    tot_m = float(cm["_매출액"].sum())    # 당월 유통 total (비중 분모)
+    tot_y = float(cyd["_매출액"].sum())   # 누계 유통 total
+
+    codes = pd.Index(pd.concat([cyd["매장코드"], pyd["매장코드"]])
+                     .astype(str).str.strip().replace({"nan": None, "none": None}).dropna().unique())
+    lbl_src = pd.concat([cur_y, prev_y])
+    name_map = {}
+    if "매장명" in lbl_src.columns:
+        tmp = lbl_src[["매장코드", "매장명"]].astype(str)
+        name_map = dict(zip(tmp["매장코드"].str.strip(), tmp["매장명"]))
+
+    def sub(frame, c):
+        return frame[frame["매장코드"].astype(str).str.strip() == c]
+
+    store_rows = []
+    for c in codes:
+        m = _wk_metrics(sub(cm, c), sub(pm, c), tot_m)
+        y = _wk_metrics(sub(cyd, c), sub(pyd, c), tot_y)
+        rev_y = float(sub(cyd, c)["_매출액"].sum())
+        store_rows.append((name_map.get(c, c) or c, m, y, rev_y))
+    store_rows.sort(key=lambda t: -t[3])   # 누계 올해 매출 큰 순
+
+    entries = [(f"{channel} (합계)", _wk_metrics(cm, pm, tot_m), _wk_metrics(cyd, pyd, tot_y))]
+    entries += [(r[0], r[1], r[2]) for r in store_rows]
+
+    sy, sc = str(py)[-2:], str(cy)[-2:]
+    MON, YTD = "당월 실적", "연간누계"
+    mcols = [(MON, f"{sy}실판가"), (MON, f"{sy}판가율"), (MON, f"{sc}실판가"),
+             (MON, "증감율"), (MON, "비중"), (MON, f"{sc}판가율"), (MON, "편차")]
+    ycols = [(YTD, f"{sy}실판가"), (YTD, f"{sy}판가율"), (YTD, f"{sc}실판가"),
+             (YTD, "증감율"), (YTD, "비중"), (YTD, f"{sc}판가율"), (YTD, "편차")]
+
+    def val(metrics, s):
+        if "실판가" in s:
+            return metrics["py실판가"] if s.startswith(sy) else metrics["cy실판가"]
+        if "판가율" in s:
+            return metrics["py판가율"] if s.startswith(sy) else metrics["cy판가율"]
+        return metrics.get(s)
+
+    idx, data = [], []
+    for label, m, y in entries:
+        idx.append(label)
+        data.append([val(m, s[1]) for s in mcols] + [val(y, s[1]) for s in ycols])
+    D = pd.DataFrame(data, index=idx, columns=pd.MultiIndex.from_tuples(mcols + ycols))
+
+    disp = D.copy()
+    for col in disp.columns:
+        disp[col] = [_wk_fmt(col[0], col[1], v) for v in D[col]]
+
+    def _color(col):
+        if col[1] not in ("증감율", "편차"):
+            return ["" for _ in D[col]]
+        return ["color:#c62828;font-weight:600" if (pd.notnull(v) and v < 0)
+                else ("color:#1f8a4c;font-weight:600" if (pd.notnull(v) and v > 0) else "") for v in D[col]]
+    sty = disp.style
+    for col in D.columns:
+        if col[1] in ("증감율", "편차"):
+            sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
+    sty = sty.set_properties(**{"text-align": "right"})
+
+    st.markdown(f"**🔍 {channel} · 매장별 상세**  "
+                f"<span style='color:#888;font-size:0.8rem;'>(매장 {len(store_rows)}개 · 비중=해당 유통 내 · 매출 큰 순)</span>",
+                unsafe_allow_html=True)
+    _money_note()
+    render_styled_table(sty)
+
+
 def render_weekly_report(df):
     st.subheader("📋 주간회의 보고자료 (당월 · 연간누계, 전년 동기간 비교)")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
@@ -1037,6 +1122,13 @@ def render_weekly_report(df):
     render_styled_table(sty)   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
     st.caption("※ 유통별 5개는 주요 채널만 (직영몰·특수채널·K2K이관 등은 G.TOTAL엔 포함, 유통 행엔 미표기). "
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
+
+    st.divider()
+    st.markdown("##### 🔍 유통별 매장 상세 (드릴다운)")
+    sel = st.selectbox("유통을 선택하면 그 안의 매장별 지표가 같은 형식으로 펼쳐져요.",
+                       ["(선택 안 함)"] + list(_CHANNEL_MASKS.keys()), key="wk_drill")
+    if sel != "(선택 안 함)":
+        render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, cy, py)
 
 
 def main():
