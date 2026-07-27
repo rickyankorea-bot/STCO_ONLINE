@@ -375,6 +375,34 @@ def append_to_db(df):
     return {"inserted": n_new, "skipped": len(out) - n_new, "total_after": after}
 
 
+def delete_dates(date_isos):
+    """덮어쓰기 모드용: 지정한 날짜(['YYYY-MM-DD', ...])의 기존 행을 sales에서 삭제하고 삭제 건수 반환.
+
+    저장된 '판매일자' 텍스트의 구분자(-, /, .)를 제거해 'YYYYMMDD'로 정규화한 뒤 매칭하므로,
+    2026-07-27 / 2026/07/27 / 20260727 / 뒤에 시간이 붙은 형태까지 모두 같은 날로 잡아 삭제한다.
+    """
+    if not date_isos:
+        return 0
+    eng = get_engine()
+    total = 0
+    with eng.begin() as conn:
+        exists = conn.exec_driver_sql(
+            "SELECT 1 FROM information_schema.tables WHERE table_name=%s"
+            if eng.dialect.name == "postgresql" else
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (TABLE,)).fetchone()
+        if not exists:
+            return 0
+        for d in date_isos:
+            compact = str(d).replace("-", "") + "%"   # 'YYYYMMDD%'
+            r = conn.execute(
+                text(f'DELETE FROM "{TABLE}" '
+                     f'WHERE replace(replace(replace("판매일자", \'-\', \'\'), \'/\', \'\'), \'.\', \'\') LIKE :c'),
+                {"c": compact})
+            total += (r.rowcount or 0)
+    return total
+
+
 # 분석 화면이 실제로 쓰는 컬럼만 로드 (49만 행 × 60여 컬럼 전체 로드 시 메모리 초과 → OOM)
 LOAD_COLS = ["판매일자", "브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명",
              "연도", "판매연도", "년월", "최초판매금액", "실판매금액", "현판매금액",
@@ -1448,14 +1476,27 @@ def main():
                                type=["xlsx", "xls", "csv"], accept_multiple_files=True)
         if ups:
             st.caption(f"{len(ups)}개 파일 선택됨")
+            overwrite = st.checkbox(
+                "♻️ 덮어쓰기 모드 (파일에 있는 날짜는 먼저 삭제 후 적재)",
+                help="당일 매출처럼 ERP 값이 바뀌는 경우 켜세요. 업로드한 파일에 포함된 '날짜'의 "
+                     "기존 데이터를 먼저 지우고 새로 넣습니다(수정·취소분까지 정확히 교체). "
+                     "파일에 없는 다른 날짜는 그대로 둡니다. 끄면 기존 방식(중복 건너뛰고 추가만).")
             if st.button("② DB에 적재하기", type="primary", use_container_width=True):
-                tn = ts = 0; last = db_row_count()
+                tn = ts = dn = 0; last = db_row_count()
+                deleted_dates = set()
                 prog = st.progress(0.0)
                 status = st.empty()
                 for i, f in enumerate(ups):
                     try:
                         status.caption(f"⏳ ({i+1}/{len(ups)}) {f.name} 처리 중…")
                         clean = add_row_key(enrich(read_raw_file(f)))
+                        if overwrite and "_판매일" in clean.columns:
+                            # 이 파일에 들어있는 날짜만 골라, 이번 적재에서 아직 안 지운 날짜를 삭제
+                            fdates = sorted(clean["_판매일"].dropna().dt.strftime("%Y-%m-%d").unique())
+                            todo = [d for d in fdates if d not in deleted_dates]
+                            if todo:
+                                dn += delete_dates(todo)
+                                deleted_dates.update(todo)
                         res = append_to_db(clean)
                         tn += res["inserted"]; ts += res["skipped"]; last = res["total_after"]
                         del clean, res            # 파일별 메모리 즉시 해제 (OOM 방지)
@@ -1466,7 +1507,12 @@ def main():
                     prog.progress((i + 1) / len(ups))
                 status.empty()
                 load_db.clear()
-                st.success(f"적재 완료 ✅ 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
+                if overwrite:
+                    st.success(f"덮어쓰기 적재 완료 ✅ 삭제 {dn:,} · 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
+                    if deleted_dates:
+                        st.caption("교체된 날짜: " + ", ".join(sorted(deleted_dates)))
+                else:
+                    st.success(f"적재 완료 ✅ 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
         st.divider()
         st.metric("현재 DB 누적", f"{db_row_count():,} 건")
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
