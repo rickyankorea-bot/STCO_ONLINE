@@ -152,6 +152,20 @@ def _find_header_row(raw):
     return 0
 
 
+# ── 보안: 고객 개인정보 컬럼 차단 ─────────────────────────────────────
+# 고객코드 등 '고객' 관련 컬럼은 개인정보라 DB 적재·외부반출 금지.
+# 로우데이터를 읽는 즉시 제거하여, 실수로 포함돼 올라와도 저장소·화면에 절대 남지 않게 한다.
+PII_KEYWORDS = ("고객",)
+
+
+def _drop_pii_cols(df):
+    """컬럼명에 PII 키워드('고객' 등)가 들어간 컬럼을 모두 제거."""
+    pii = [c for c in df.columns if any(k in str(c) for k in PII_KEYWORDS)]
+    if pii:
+        df = df.drop(columns=pii)
+    return df
+
+
 def read_raw_file(uploaded_file):
     name = uploaded_file.name.lower()
     if name.endswith(".csv"):
@@ -168,6 +182,7 @@ def read_raw_file(uploaded_file):
     if "판매일자" in df.columns:
         dd = df["판매일자"].astype(str).str.strip().str.lower()
         df = df[dd.ne("") & ~dd.isin(["nan", "none", "nat"])]
+    df = _drop_pii_cols(df)   # 보안: 고객코드 등 개인정보 컬럼은 읽는 즉시 제거
     return df
 
 
@@ -340,7 +355,9 @@ def append_to_db(df):
     메모리 최적화: 저장 대상 컬럼만 추린 뒤 파일 내 중복부터 제거하고,
     실제 신규 행에 대해서만 문자열화/적재를 수행한다.
     """
-    save = [c for c in df.columns if not c.startswith("_") or c == ROW_KEY]
+    save = [c for c in df.columns
+            if (not c.startswith("_") or c == ROW_KEY)
+            and not any(k in str(c) for k in PII_KEYWORDS)]   # 보안: 고객 개인정보 컬럼 적재 제외
     out = df[save].drop_duplicates(subset=[ROW_KEY])
     eng = get_engine()
     with eng.begin() as conn:
