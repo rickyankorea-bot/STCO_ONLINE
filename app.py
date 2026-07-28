@@ -573,8 +573,8 @@ def _money_note():
 # 공통 표 CSS: 옵션A 여백(3px 9px) + 헤더·구분 검정 + G.TOTAL(첫 행) 노란 강조 + 증감 색 유지
 _TBL_CSS = """
 <style>
-.erp-wrap{overflow-x:auto;margin:0 0 8px;text-align:right;}
-table.erp-tbl{border-collapse:collapse;font-size:0.82rem;display:inline-block;max-width:100%;}
+.erp-wrap{overflow-x:auto;margin:0 0 8px;}
+table.erp-tbl{border-collapse:collapse;font-size:0.82rem;}
 table.erp-tbl th, table.erp-tbl td{padding:3px 9px;border:1px solid #e6e6e6;white-space:nowrap;}
 table.erp-tbl thead th{color:#111;font-weight:700;background:#f4f4f6;text-align:center;}
 table.erp-tbl tbody th{color:#111;font-weight:600;text-align:left;background:#fafafa;}
