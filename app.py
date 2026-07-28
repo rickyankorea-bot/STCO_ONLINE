@@ -21,7 +21,6 @@
 import io
 import os
 import gc
-import hmac
 import hashlib
 from datetime import datetime
 from urllib.parse import quote_plus
@@ -153,20 +152,6 @@ def _find_header_row(raw):
     return 0
 
 
-# ── 보안: 고객 개인정보 컬럼 차단 ─────────────────────────────────────
-# 고객코드 등 '고객' 관련 컬럼은 개인정보라 DB 적재·외부반출 금지.
-# 로우데이터를 읽는 즉시 제거하여, 실수로 포함돼 올라와도 저장소·화면에 절대 남지 않게 한다.
-PII_KEYWORDS = ("고객",)
-
-
-def _drop_pii_cols(df):
-    """컬럼명에 PII 키워드('고객' 등)가 들어간 컬럼을 모두 제거."""
-    pii = [c for c in df.columns if any(k in str(c) for k in PII_KEYWORDS)]
-    if pii:
-        df = df.drop(columns=pii)
-    return df
-
-
 def read_raw_file(uploaded_file):
     name = uploaded_file.name.lower()
     if name.endswith(".csv"):
@@ -183,7 +168,6 @@ def read_raw_file(uploaded_file):
     if "판매일자" in df.columns:
         dd = df["판매일자"].astype(str).str.strip().str.lower()
         df = df[dd.ne("") & ~dd.isin(["nan", "none", "nat"])]
-    df = _drop_pii_cols(df)   # 보안: 고객코드 등 개인정보 컬럼은 읽는 즉시 제거
     return df
 
 
@@ -356,9 +340,7 @@ def append_to_db(df):
     메모리 최적화: 저장 대상 컬럼만 추린 뒤 파일 내 중복부터 제거하고,
     실제 신규 행에 대해서만 문자열화/적재를 수행한다.
     """
-    save = [c for c in df.columns
-            if (not c.startswith("_") or c == ROW_KEY)
-            and not any(k in str(c) for k in PII_KEYWORDS)]   # 보안: 고객 개인정보 컬럼 적재 제외
+    save = [c for c in df.columns if not c.startswith("_") or c == ROW_KEY]
     out = df[save].drop_duplicates(subset=[ROW_KEY])
     eng = get_engine()
     with eng.begin() as conn:
@@ -374,34 +356,6 @@ def append_to_db(df):
             new.to_sql(TABLE, conn, if_exists="append", index=False, method="multi", chunksize=chunk)
         after = before + n_new
     return {"inserted": n_new, "skipped": len(out) - n_new, "total_after": after}
-
-
-def delete_dates(date_isos):
-    """덮어쓰기 모드용: 지정한 날짜(['YYYY-MM-DD', ...])의 기존 행을 sales에서 삭제하고 삭제 건수 반환.
-
-    저장된 '판매일자' 텍스트의 구분자(-, /, .)를 제거해 'YYYYMMDD'로 정규화한 뒤 매칭하므로,
-    2026-07-27 / 2026/07/27 / 20260727 / 뒤에 시간이 붙은 형태까지 모두 같은 날로 잡아 삭제한다.
-    """
-    if not date_isos:
-        return 0
-    eng = get_engine()
-    total = 0
-    with eng.begin() as conn:
-        exists = conn.exec_driver_sql(
-            "SELECT 1 FROM information_schema.tables WHERE table_name=%s"
-            if eng.dialect.name == "postgresql" else
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (TABLE,)).fetchone()
-        if not exists:
-            return 0
-        for d in date_isos:
-            compact = str(d).replace("-", "") + "%"   # 'YYYYMMDD%'
-            r = conn.execute(
-                text(f'DELETE FROM "{TABLE}" '
-                     f'WHERE replace(replace(replace("판매일자", \'-\', \'\'), \'/\', \'\'), \'.\', \'\') LIKE :c'),
-                {"c": compact})
-            total += (r.rowcount or 0)
-    return total
 
 
 # 분석 화면이 실제로 쓰는 컬럼만 로드 (49만 행 × 60여 컬럼 전체 로드 시 메모리 초과 → OOM)
@@ -1236,7 +1190,7 @@ def _wk_style_table(bm, by, idx, cy, py):
     return sty.set_properties(**{"text-align": "right"})
 
 
-def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py):
+def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, show_plan=True):
     """선택한 그룹(유통 또는 담당자)의 매장별 상세표 — 주간보고와 동일 형식(당월+누계). 비중=해당 그룹 내."""
     cm, pm = cur_m[mask(cur_m)], prev_m[mask(prev_m)]
     cyd, pyd = cur_y[mask(cur_y)], prev_y[mask(prev_y)]
@@ -1258,7 +1212,7 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py):
     def sub(frame, c):
         return frame[frame["매장코드"].astype(str).str.strip() == c]
 
-    store_ann = _store_annual()   # 매장코드 → 연간 사업계획
+    store_ann = _store_annual() if show_plan else {}   # 매장코드 → 연간 사업계획 (필터 시 생략)
 
     def _addplan(y, pl):
         y["사업계획"] = pl
@@ -1372,12 +1326,32 @@ def render_weekly_report(df):
     cy, py = asof.year, asof.year - 1
     st.caption(f"올해({cy}) vs 전년({py}) 동기간 · 실판가=실매출(백만원) · 판가율=실판가÷최초가(가중) · 비중=행÷전체")
 
+    # ── 공통 필터 (이 페이지 모든 표에 적용) — 브랜드별 → 연차별 → 시즌별 ──
+    fc1, fc2, fc3 = st.columns(3)
+    _brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
+    _ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
+    _seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
+    selb = fc1.multiselect("브랜드별", _brands, default=[], placeholder="전체", key="wk_fb")
+    sela = fc2.multiselect("연차별", _ages, default=[], placeholder="전체", key="wk_fa")
+    sels = fc3.multiselect("시즌별", _seasons, default=[], placeholder="전체", key="wk_fs")
+    fd = d
+    if selb:
+        fd = fd[fd["브랜드명"].isin(selb)]
+    if sela:
+        fd = fd[fd["연차"].isin(sela)]
+    if sels:
+        fd = fd[fd["시즌명"].isin(sels)]
+    _filtered = bool(selb or sela or sels)
+    if _filtered:
+        st.caption("🔎 필터 적용 중 — 실적·판가율·증감·비중은 선택 조건 기준. "
+                   "**사업계획·진도율은 시즌/연차 세분화가 없어 필터 시 '–'로 표시**(전체일 때만 계획 표시).")
+
     m_start = asof.replace(day=1)
     y_start = asof.replace(month=1, day=1)
-    cur_m = d[(d["_판매일"] >= m_start) & (d["_판매일"] <= asof)]
-    prev_m = d[(d["_판매일"] >= m_start - pd.DateOffset(years=1)) & (d["_판매일"] <= asof - pd.DateOffset(years=1))]
-    cur_y = d[(d["_판매일"] >= y_start) & (d["_판매일"] <= asof)]
-    prev_y = d[(d["_판매일"] >= y_start - pd.DateOffset(years=1)) & (d["_판매일"] <= asof - pd.DateOffset(years=1))]
+    cur_m = fd[(fd["_판매일"] >= m_start) & (fd["_판매일"] <= asof)]
+    prev_m = fd[(fd["_판매일"] >= m_start - pd.DateOffset(years=1)) & (fd["_판매일"] <= asof - pd.DateOffset(years=1))]
+    cur_y = fd[(fd["_판매일"] >= y_start) & (fd["_판매일"] <= asof)]
+    prev_y = fd[(fd["_판매일"] >= y_start - pd.DateOffset(years=1)) & (fd["_판매일"] <= asof - pd.DateOffset(years=1))]
 
     rows = _wk_rows()
     bm = _wk_block(cur_m, prev_m, rows)   # 당월
@@ -1385,11 +1359,12 @@ def render_weekly_report(df):
 
     # 표 구성: 행(섹션/구분/세부) × 열(블록×지표) — 공용 프레임 함수
     idx = [k for k, _ in rows]
-    inject_plan(by, idx, master)   # 연간 사업계획·진도율 주입
+    if not _filtered:
+        inject_plan(by, idx, master)   # 연간 사업계획·진도율 주입 (필터 없을 때만)
     sty = _wk_style_table(bm, by, idx, cy, py)
 
     h1, h2 = st.columns([5, 1])
-    h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()}~{asof.date()} · 누계 {y_start.date()}~{asof.date()})")
+    h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()} → {asof.date()} · 누계 {y_start.date()} → {asof.date()})")
     # 엑셀 다운로드
     xls_bytes = weekly_excel_bytes(rows, bm, by, asof, cy, py)
     h2.download_button("⬇ 엑셀", xls_bytes, file_name=f"주간보고_{asof.date()}.xlsx",
@@ -1401,10 +1376,12 @@ def render_weekly_report(df):
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
 
     # ── 매장 담당별 분석 (위 표와 동일 프레임, 행만 담당자) ──
+    _MGR_BOTTOM = ["없음", "26년 미운영", "직원구매"]   # 비담당 라벨 → 맨 아래(이 순서)
     managers = []
     if "_담당자" in d.columns:
-        managers = sorted({m for m in d["_담당자"].dropna().astype(str).str.strip()
-                           if m and m.lower() not in ("nan", "none")})
+        _mset = {m for m in d["_담당자"].dropna().astype(str).str.strip()
+                 if m and m.lower() not in ("nan", "none")}
+        managers = sorted(m for m in _mset if m not in _MGR_BOTTOM) + [m for m in _MGR_BOTTOM if m in _mset]
     if managers:
         st.divider()
         st.markdown("##### 👤 매장 담당별 분석")
@@ -1414,7 +1391,8 @@ def render_weekly_report(df):
                           (lambda name: (lambda x: x["_담당자"].astype(str).str.strip() == name))(nm)))
         bm2 = _wk_block(cur_m, prev_m, mrows)
         by2 = _wk_block(cur_y, prev_y, mrows)
-        inject_plan_manager(by2, [k for k, _ in mrows], master)   # 담당자 매장 연간계획 합
+        if not _filtered:
+            inject_plan_manager(by2, [k for k, _ in mrows], master)   # 담당자 매장 연간계획 합
         sty2 = _wk_style_table(bm2, by2, [k for k, _ in mrows], cy, py)
         _money_note()
         render_styled_table(sty2)
@@ -1433,7 +1411,7 @@ def render_weekly_report(df):
             _mask = _CHANNEL_MASKS[sel]
         else:
             _mask = (lambda nm: (lambda x: x["_담당자"].astype(str).str.strip() == nm))(sel)
-        render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, _mask, cy, py)
+        render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, _mask, cy, py, show_plan=not _filtered)
 
     st.divider()
     st.markdown("##### 🔍 (드릴다운 2) 매장별/담당별 아이템분석")
@@ -1458,163 +1436,6 @@ def render_weekly_report(df):
             render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, isel, imask, cy, py)
 
 
-# ==============================================================================
-# 로그인 / 사용자 관리  ─ 개인 계정 + 역할(admin=관리자 / viewer=뷰어)
-# ==============================================================================
-USERS_TABLE = "app_users"
-
-
-def _make_hash(password):
-    """PBKDF2-SHA256 해시 문자열 'pbkdf2$iter$salt$hash' 생성. 평문 비번은 저장하지 않는다."""
-    salt = os.urandom(16).hex()
-    it = 200_000
-    h = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), bytes.fromhex(salt), it).hex()
-    return f"pbkdf2${it}${salt}${h}"
-
-
-def _verify_pw(password, stored):
-    try:
-        _algo, it, salt, h = str(stored).split("$")
-        calc = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), bytes.fromhex(salt), int(it)).hex()
-        return hmac.compare_digest(calc, h)
-    except Exception:
-        return False
-
-
-def ensure_users_table():
-    eng = get_engine()
-    with eng.begin() as conn:
-        conn.exec_driver_sql(
-            f'CREATE TABLE IF NOT EXISTS "{USERS_TABLE}" ('
-            '"username" TEXT PRIMARY KEY, "display_name" TEXT, "pw" TEXT, '
-            '"role" TEXT DEFAULT \'viewer\', "active" TEXT DEFAULT \'Y\', "created_at" TEXT)')
-
-
-def get_user(username):
-    eng = get_engine()
-    with eng.connect() as conn:
-        r = conn.execute(text(
-            f'SELECT "username","display_name","pw","role","active" FROM "{USERS_TABLE}" WHERE "username"=:u'),
-            {"u": username}).fetchone()
-    if not r:
-        return None
-    return {"username": r[0], "display_name": r[1], "pw": r[2], "role": r[3], "active": r[4]}
-
-
-def list_users():
-    eng = get_engine()
-    try:
-        with eng.connect() as conn:
-            rows = conn.execute(text(
-                f'SELECT "username","display_name","role","active" FROM "{USERS_TABLE}" ORDER BY "role","username"')).fetchall()
-    except Exception:
-        return []
-    return [{"username": r[0], "display_name": r[1], "role": r[2], "active": r[3]} for r in rows]
-
-
-def user_count():
-    ensure_users_table()
-    with get_engine().connect() as conn:
-        return conn.exec_driver_sql(f'SELECT COUNT(*) FROM "{USERS_TABLE}"').scalar()
-
-
-def upsert_user(username, display_name, password, role, active="Y"):
-    """계정 생성/수정. password가 비어 있으면(None) 비번은 그대로 두고 나머지만 갱신."""
-    ensure_users_table()
-    eng = get_engine()
-    exists = get_user(username) is not None
-    with eng.begin() as conn:
-        if exists:
-            if password:
-                conn.execute(text(f'UPDATE "{USERS_TABLE}" SET "display_name"=:d,"pw"=:p,"role"=:r,"active"=:a WHERE "username"=:u'),
-                             {"d": display_name, "p": _make_hash(password), "r": role, "a": active, "u": username})
-            else:
-                conn.execute(text(f'UPDATE "{USERS_TABLE}" SET "display_name"=:d,"role"=:r,"active"=:a WHERE "username"=:u'),
-                             {"d": display_name, "r": role, "a": active, "u": username})
-        else:
-            conn.execute(text(f'INSERT INTO "{USERS_TABLE}" ("username","display_name","pw","role","active","created_at") '
-                              'VALUES (:u,:d,:p,:r,:a,:c)'),
-                         {"u": username, "d": display_name, "p": _make_hash(password or os.urandom(8).hex()),
-                          "r": role, "a": active, "c": datetime.now().strftime("%Y-%m-%d")})
-
-
-def delete_user(username):
-    with get_engine().begin() as conn:
-        conn.execute(text(f'DELETE FROM "{USERS_TABLE}" WHERE "username"=:u'), {"u": username})
-
-
-def _render_login():
-    st.title("🔐 온라인팀 미니 ERP")
-    if user_count() == 0:
-        st.info("최초 관리자 계정을 만들어 주세요. (계정이 하나도 없을 때만 나오는 화면이에요)")
-        with st.form("bootstrap_admin"):
-            u = st.text_input("관리자 ID")
-            dn = st.text_input("이름 (표시용)")
-            p1 = st.text_input("비밀번호", type="password")
-            p2 = st.text_input("비밀번호 확인", type="password")
-            ok = st.form_submit_button("관리자 계정 만들기", type="primary")
-        if ok:
-            if not u.strip() or not p1:
-                st.error("ID와 비밀번호를 입력하세요.")
-            elif p1 != p2:
-                st.error("비밀번호가 일치하지 않아요.")
-            else:
-                upsert_user(u.strip(), dn.strip() or u.strip(), p1, "admin")
-                st.success("관리자 계정 생성 완료! 이제 아래에서 로그인하세요.")
-                st.rerun()
-        return
-    with st.form("login"):
-        u = st.text_input("ID")
-        p = st.text_input("비밀번호", type="password")
-        ok = st.form_submit_button("로그인", type="primary")
-    if ok:
-        rec = get_user(u.strip())
-        if rec and str(rec["active"]).upper() != "N" and _verify_pw(p, rec["pw"]):
-            st.session_state["auth_user"] = rec["username"]
-            st.session_state["auth_name"] = rec["display_name"] or rec["username"]
-            st.session_state["auth_role"] = rec["role"]
-            st.rerun()
-        else:
-            st.error("ID·비밀번호가 올바르지 않거나 비활성화된 계정이에요.")
-    st.caption("계정이 필요하면 관리자(팀장)에게 요청하세요.")
-
-
-def render_user_admin():
-    """관리자용 사용자 관리: 목록/활성토글/삭제 + 추가·비번 재설정."""
-    me = st.session_state.get("auth_user")
-    for us in list_users():
-        act = str(us["active"]).upper() != "N"
-        c = st.columns([3, 1.1, 0.9])
-        c[0].caption(f"{'🟢' if act else '⚪'} **{us['display_name']}** ({us['username']}) · "
-                     f"{'관리자' if us['role'] == 'admin' else '뷰어'}")
-        if c[1].button("비활성" if act else "활성화", key=f"tgl_{us['username']}", use_container_width=True):
-            upsert_user(us["username"], us["display_name"], None, us["role"], "N" if act else "Y")
-            st.rerun()
-        if c[2].button("삭제", key=f"del_{us['username']}", use_container_width=True):
-            if us["username"] == me:
-                st.warning("본인 계정은 삭제할 수 없어요.")
-            else:
-                delete_user(us["username"])
-                st.rerun()
-    st.caption("— 계정 추가 / 비밀번호 재설정 (기존 ID면 갱신) —")
-    with st.form("add_user", clear_on_submit=True):
-        nu = st.text_input("ID")
-        nn = st.text_input("이름")
-        npw = st.text_input("비밀번호", type="password")
-        nr = st.selectbox("역할", ["viewer", "admin"],
-                          format_func=lambda x: "관리자" if x == "admin" else "뷰어")
-        ok = st.form_submit_button("저장", use_container_width=True)
-    if ok:
-        if not nu.strip():
-            st.error("ID를 입력하세요.")
-        elif get_user(nu.strip()) is None and not npw:
-            st.error("새 계정은 비밀번호가 필요해요.")
-        else:
-            upsert_user(nu.strip(), nn.strip() or nu.strip(), npw or None, nr)
-            st.success(f"저장 완료 ✅ {nu.strip()}")
-            st.rerun()
-
-
 def main():
     st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
     # 전역 여백 축소: 요소 간격·헤더 하단여백을 줄여 타이틀을 표에 바짝 붙임
@@ -1624,107 +1445,65 @@ def main():
         [data-testid="stMarkdownContainer"] h3,
         [data-testid="stMarkdownContainer"] h5{margin-bottom:0.1rem;padding-bottom:0;}
         </style>""", unsafe_allow_html=True)
-
-    # ── 로그인 게이트 ──────────────────────────────────────────────
-    ensure_users_table()
-    if not st.session_state.get("auth_user"):
-        _render_login()
-        return
-    is_admin = st.session_state.get("auth_role") == "admin"
-
     st.title("📊 온라인팀 미니 ERP · 매출 분석")
     fresh_slot = st.container()   # 타이틀 바로 아래: 매출 데이터 최종 업데이트 일자 표기 자리
 
     with st.sidebar:
-        st.caption(f"👋 **{st.session_state.get('auth_name','')}**님 "
-                   f"· {'관리자' if is_admin else '뷰어'}")
-        if st.button("🚪 로그아웃", use_container_width=True):
-            for _k in ("auth_user", "auth_name", "auth_role"):
-                st.session_state.pop(_k, None)
-            st.rerun()
+        st.header("⚙️ 데이터 관리")
+        st.caption(f"저장소: **{backend_name()}**")
+        ups = st.file_uploader("① 로우데이터 업로드 (여러 개 한 번에 가능)",
+                               type=["xlsx", "xls", "csv"], accept_multiple_files=True)
+        if ups:
+            st.caption(f"{len(ups)}개 파일 선택됨")
+            if st.button("② DB에 적재하기", type="primary", use_container_width=True):
+                tn = ts = 0; last = db_row_count()
+                prog = st.progress(0.0)
+                status = st.empty()
+                for i, f in enumerate(ups):
+                    try:
+                        status.caption(f"⏳ ({i+1}/{len(ups)}) {f.name} 처리 중…")
+                        clean = add_row_key(enrich(read_raw_file(f)))
+                        res = append_to_db(clean)
+                        tn += res["inserted"]; ts += res["skipped"]; last = res["total_after"]
+                        del clean, res            # 파일별 메모리 즉시 해제 (OOM 방지)
+                        gc.collect()
+                    except Exception as ex:
+                        st.error(f"{f.name} 오류: {ex}")
+                        gc.collect()
+                    prog.progress((i + 1) / len(ups))
+                status.empty()
+                load_db.clear()
+                st.success(f"적재 완료 ✅ 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
+        st.divider()
         st.metric("현재 DB 누적", f"{db_row_count():,} 건")
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
             load_db.clear(); load_master.clear(); st.rerun()
 
-        if not is_admin:
-            st.divider()
-            st.caption("🔒 조회 전용(뷰어) 계정이에요. 데이터 업로드·적재·삭제는 관리자만 할 수 있어요.")
+        st.divider()
+        st.caption(f"🏬 매장 기준정보(태그): 현재 **{master_row_count():,}개** 매장")
+        mup = st.file_uploader("매장 기준정보 업로드 (담당자·유통성격·채널소유·채널스토리)",
+                               type=["xlsx", "xls", "csv"], accept_multiple_files=False, key="master_up")
+        if mup is not None:
+            if st.button("🏬 매장 기준정보 적용(전체 교체)", use_container_width=True):
+                try:
+                    n = replace_master(read_master_file(mup))
+                    load_master.clear()
+                    st.success(f"매장 기준정보 갱신 완료 ✅ {n}개 매장")
+                except Exception as ex:
+                    st.error(f"매장 기준정보 오류: {ex}")
 
-        if is_admin:
-            st.divider()
-            st.header("⚙️ 데이터 관리")
-            st.caption(f"저장소: **{backend_name()}**")
-            ups = st.file_uploader("① 로우데이터 업로드 (여러 개 한 번에 가능)",
-                                   type=["xlsx", "xls", "csv"], accept_multiple_files=True)
-            if ups:
-                st.caption(f"{len(ups)}개 파일 선택됨")
-                overwrite = st.checkbox(
-                    "♻️ 덮어쓰기 모드 (파일에 있는 날짜는 먼저 삭제 후 적재)",
-                    help="당일 매출처럼 ERP 값이 바뀌는 경우 켜세요. 업로드한 파일에 포함된 '날짜'의 "
-                         "기존 데이터를 먼저 지우고 새로 넣습니다(수정·취소분까지 정확히 교체). "
-                         "파일에 없는 다른 날짜는 그대로 둡니다. 끄면 기존 방식(중복 건너뛰고 추가만).")
-                if st.button("② DB에 적재하기", type="primary", use_container_width=True):
-                    tn = ts = dn = 0; last = db_row_count()
-                    deleted_dates = set()
-                    prog = st.progress(0.0)
-                    status = st.empty()
-                    for i, f in enumerate(ups):
-                        try:
-                            status.caption(f"⏳ ({i+1}/{len(ups)}) {f.name} 처리 중…")
-                            clean = add_row_key(enrich(read_raw_file(f)))
-                            if overwrite and "_판매일" in clean.columns:
-                                # 이 파일에 들어있는 날짜만 골라, 이번 적재에서 아직 안 지운 날짜를 삭제
-                                fdates = sorted(clean["_판매일"].dropna().dt.strftime("%Y-%m-%d").unique())
-                                todo = [d for d in fdates if d not in deleted_dates]
-                                if todo:
-                                    dn += delete_dates(todo)
-                                    deleted_dates.update(todo)
-                            res = append_to_db(clean)
-                            tn += res["inserted"]; ts += res["skipped"]; last = res["total_after"]
-                            del clean, res            # 파일별 메모리 즉시 해제 (OOM 방지)
-                            gc.collect()
-                        except Exception as ex:
-                            st.error(f"{f.name} 오류: {ex}")
-                            gc.collect()
-                        prog.progress((i + 1) / len(ups))
-                    status.empty()
-                    load_db.clear()
-                    if overwrite:
-                        st.success(f"덮어쓰기 적재 완료 ✅ 삭제 {dn:,} · 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
-                        if deleted_dates:
-                            st.caption("교체된 날짜: " + ", ".join(sorted(deleted_dates)))
-                    else:
-                        st.success(f"적재 완료 ✅ 신규 {tn:,} / 중복 {ts:,} · DB 총 {last:,}건")
-
-            st.divider()
-            st.caption(f"🏬 매장 기준정보(태그): 현재 **{master_row_count():,}개** 매장")
-            mup = st.file_uploader("매장 기준정보 업로드 (담당자·유통성격·채널소유·채널스토리)",
-                                   type=["xlsx", "xls", "csv"], accept_multiple_files=False, key="master_up")
-            if mup is not None:
-                if st.button("🏬 매장 기준정보 적용(전체 교체)", use_container_width=True):
-                    try:
-                        n = replace_master(read_master_file(mup))
-                        load_master.clear()
-                        st.success(f"매장 기준정보 갱신 완료 ✅ {n}개 매장")
-                    except Exception as ex:
-                        st.error(f"매장 기준정보 오류: {ex}")
-
-            st.divider()
-            st.caption(f"🎯 사업계획(월별 목표): 현재 **{plan_row_count():,}행**")
-            pup = st.file_uploader("사업계획 업로드 (매장별·브랜드별 월별 목표)",
-                                   type=["xlsx", "xls"], accept_multiple_files=False, key="plan_up")
-            if pup is not None:
-                if st.button("🎯 사업계획 적용(전체 교체)", use_container_width=True):
-                    try:
-                        n = replace_plan(read_plan_file(pup))
-                        load_plan.clear()
-                        st.success(f"사업계획 갱신 완료 ✅ {n:,}행")
-                    except Exception as ex:
-                        st.error(f"사업계획 오류: {ex}")
-
-            st.divider()
-            with st.expander("👤 사용자 관리 (계정 추가·권한·비활성)"):
-                render_user_admin()
+        st.divider()
+        st.caption(f"🎯 사업계획(월별 목표): 현재 **{plan_row_count():,}행**")
+        pup = st.file_uploader("사업계획 업로드 (매장별·브랜드별 월별 목표)",
+                               type=["xlsx", "xls"], accept_multiple_files=False, key="plan_up")
+        if pup is not None:
+            if st.button("🎯 사업계획 적용(전체 교체)", use_container_width=True):
+                try:
+                    n = replace_plan(read_plan_file(pup))
+                    load_plan.clear()
+                    st.success(f"사업계획 갱신 완료 ✅ {n:,}행")
+                except Exception as ex:
+                    st.error(f"사업계획 오류: {ex}")
 
     df = load_db()
     # 타이틀 아래 최종 업데이트 일자 (매출 로우데이터의 마지막 판매일자 = 데이터가 채워진 마지막 날)
