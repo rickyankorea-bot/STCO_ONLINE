@@ -566,15 +566,15 @@ def yoy_excel_bytes(D, sheet="분석"):
 def _money_note():
     """룰1: 표 오른쪽 상단 [금액: 백만원 / VAT+] 표기."""
     st.markdown(
-        "<div style='text-align:right;color:#888;font-size:0.78rem;margin:-6px 0 0 0;'>"
+        "<div style='text-align:right;color:#888;font-size:0.78rem;margin:8px 0 3px 0;'>"
         "[금액: 백만원 / VAT+]</div>", unsafe_allow_html=True)
 
 
 # 공통 표 CSS: 옵션A 여백(3px 9px) + 헤더·구분 검정 + G.TOTAL(첫 행) 노란 강조 + 증감 색 유지
 _TBL_CSS = """
 <style>
-.erp-wrap{overflow-x:auto;margin:2px 0 8px;}
-table.erp-tbl{border-collapse:collapse;font-size:0.82rem;}
+.erp-wrap{overflow-x:auto;margin:0 0 8px;text-align:right;}
+table.erp-tbl{border-collapse:collapse;font-size:0.82rem;display:inline-block;max-width:100%;}
 table.erp-tbl th, table.erp-tbl td{padding:3px 9px;border:1px solid #e6e6e6;white-space:nowrap;}
 table.erp-tbl thead th{color:#111;font-weight:700;background:#f4f4f6;text-align:center;}
 table.erp-tbl tbody th{color:#111;font-weight:600;text-align:left;background:#fafafa;}
@@ -614,7 +614,7 @@ def render_flagship(df):
     years = sorted(d["_판매일"].dt.year.dropna().astype(int).unique(), reverse=True)
 
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 단위 백만원 · 판가율=실판가÷최초가(가중)")
-    f1, f2, f3, f4 = st.columns([1, 1.7, 1.2, 1.2])
+    f1, f2 = st.columns([1, 2.4])
     with f1:
         cy = st.selectbox("기준연도", years, index=0)
     cur_all = d[d["_판매일"].dt.year == cy]
@@ -622,14 +622,16 @@ def render_flagship(df):
     with f2:
         rng = st.date_input(f"기준기간 (전년 {cy-1} 동기간 자동)", value=(dmin, dmax),
                             min_value=d["_판매일"].min().date(), max_value=d["_판매일"].max().date())
-    with f3:
-        brands = sorted([b for b in d["브랜드명"].dropna().unique()]) if "브랜드명" in d.columns else []
-        selb = st.multiselect("브랜드", brands, default=brands)
-    with f4:
-        seasons = sorted([s for s in d["시즌명"].dropna().unique()]) if "시즌명" in d.columns else []
-        sels = st.multiselect("시즌", seasons, default=seasons)
-    chans = sorted([c for c in d["_채널"].dropna().unique()]) if "_채널" in d.columns else []
-    selc = st.multiselect("매장/채널", chans, default=chans)
+    # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 · 빈칸=전체
+    fb1, fb2, fb3 = st.columns(3)
+    brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
+    ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
+    seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
+    selb = fb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="fs_b")
+    sela = fb2.multiselect("연차별", ages, default=[], placeholder="전체", key="fs_a")
+    sels = fb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="fs_s")
+    chans = sorted(d["_채널"].dropna().unique()) if "_채널" in d.columns else []
+    selc = st.multiselect("매장/채널", chans, default=[], placeholder="전체", key="fs_c")
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
         st.info("기간(시작~끝)을 선택하세요.")
@@ -638,6 +640,8 @@ def render_flagship(df):
     base = d.copy()
     if selb and "브랜드명" in base:
         base = base[base["브랜드명"].isin(selb)]
+    if sela and "연차" in base:
+        base = base[base["연차"].isin(sela)]
     if sels and "시즌명" in base:
         base = base[base["시즌명"].isin(sels)]
     if selc and "_채널" in base:
@@ -721,13 +725,16 @@ def render_channel_brand(df):
     default_start = (pd.to_datetime(dmax) - pd.Timedelta(days=6)).date()
 
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 백만원 · 판가율=실판가÷최초가(가중) · 기본기간=최근 1주")
-    c1, c2 = st.columns([2, 2])
-    with c1:
-        rng = st.date_input("조회기간 (기본: 최근 1주)", value=(default_start, dmax),
-                            min_value=dmin, max_value=dmax, key="cb_rng")
-    with c2:
-        brands = sorted([b for b in d["브랜드명"].dropna().unique()]) if "브랜드명" in d.columns else []
-        selb = st.multiselect("브랜드 필터", brands, default=brands, key="cb_brand")
+    rng = st.date_input("조회기간 (기본: 최근 1주)", value=(default_start, dmax),
+                        min_value=dmin, max_value=dmax, key="cb_rng")
+    # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 · 빈칸=전체
+    cb1, cb2, cb3 = st.columns(3)
+    brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
+    ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
+    seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
+    selb = cb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cb_brand")
+    sela = cb2.multiselect("연차별", ages, default=[], placeholder="전체", key="cb_age")
+    sels = cb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cb_season")
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
         st.info("기간(시작~끝)을 선택하세요.")
@@ -736,6 +743,10 @@ def render_channel_brand(df):
     base = d
     if selb and "브랜드명" in base.columns:
         base = base[base["브랜드명"].isin(selb)]
+    if sela and "연차" in base.columns:
+        base = base[base["연차"].isin(sela)]
+    if sels and "시즌명" in base.columns:
+        base = base[base["시즌명"].isin(sels)]
     cur = base[(base["_판매일"] >= s) & (base["_판매일"] <= e)]
     prev = base[(base["_판매일"] >= s - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
 
@@ -1399,7 +1410,7 @@ def render_weekly_report(df):
         st.caption("※ 담당별 = 매장 마스터의 담당자 기준. 담당 미지정 매장은 담당 행엔 미포함(G.TOTAL엔 포함). 비중=행÷전체.")
 
     st.divider()
-    st.markdown("##### 🔍 (드릴다운)유통별/담당별 매장 상세 보기")
+    st.markdown("##### 🔍 (드릴다운 1) 유통별/담당별 매장 상세 보기")
     NONE, HEAD_C, HEAD_M = "(선택 안 함)", "─ 유통별 ─", "─ 담당별 ─"
     opts = [NONE, HEAD_C] + list(_CHANNEL_MASKS.keys())
     if managers:
@@ -1443,7 +1454,7 @@ def main():
         <style>
         [data-testid="stVerticalBlock"]{gap:0.4rem;}
         [data-testid="stMarkdownContainer"] h3,
-        [data-testid="stMarkdownContainer"] h5{margin-bottom:0.1rem;padding-bottom:0;}
+        [data-testid="stMarkdownContainer"] h5{margin-bottom:0.35rem;padding-bottom:0;}
         </style>""", unsafe_allow_html=True)
     st.title("📊 온라인팀 미니 ERP · 매출 분석")
     fresh_slot = st.container()   # 타이틀 바로 아래: 매출 데이터 최종 업데이트 일자 표기 자리
