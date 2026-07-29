@@ -1310,8 +1310,8 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
         return metrics.get(s)
 
     idx, data = [], []
-    for label, m, y in entries:
-        idx.append(label)
+    for _row_lbl, m, y in entries:   # ← label(선택 그룹명)을 덮어쓰지 않도록 별도 변수 사용
+        idx.append(_row_lbl)
         data.append([val(m, s[1]) for s in mcols] + [val(y, s[1]) for s in ycols])
     D = pd.DataFrame(data, index=idx, columns=pd.MultiIndex.from_tuples(mcols + ycols))
 
