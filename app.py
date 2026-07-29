@@ -610,10 +610,15 @@ def yoy_excel_bytes(D, sheet="분석"):
 
 
 def _money_note():
-    """룰1: 표 오른쪽 상단 [금액: 백만원 / VAT+] 표기."""
+    """룰1: 표 오른쪽 상단 [금액: 백만원 / VAT+] 표기. (레거시 — 현재는 _NOTE_FLOAT를 제목 줄에 붙임)"""
     st.markdown(
         "<div style='text-align:right;color:#888;font-size:0.78rem;margin:8px 0 3px 0;'>"
         "[금액: 백만원 / VAT+]</div>", unsafe_allow_html=True)
+
+
+# 룰1 표기를 '표 제목 줄 오른쪽'에 붙여, 제목과 표 사이에 별도 줄이 안 생기게 함(여백 축소).
+_NOTE_FLOAT = ("<span style='float:right;color:#888;font-weight:400;font-size:0.78rem;"
+               "white-space:nowrap;'>[금액: 백만원 / VAT+]</span>")
 
 
 # 공통 표 CSS: 옵션A 여백(3px 9px) + 헤더·구분 검정 + G.TOTAL(첫 행) 노란 강조 + 증감 색 유지
@@ -621,7 +626,7 @@ _TBL_CSS = """
 <style>
 .erp-wrap{overflow-x:auto;margin:0 0 8px;}
 table.erp-tbl{border-collapse:collapse;font-size:0.82rem;}
-table.erp-tbl th, table.erp-tbl td{padding:3px 9px;border:1px solid #e6e6e6;white-space:nowrap;}
+table.erp-tbl th, table.erp-tbl td{padding:3px 6px;border:1px solid #e6e6e6;white-space:nowrap;}
 table.erp-tbl thead th{color:#111;font-weight:700;background:#f4f4f6;text-align:center;}
 table.erp-tbl tbody th{color:#111;font-weight:600;text-align:left;background:#fafafa;}
 table.erp-tbl td{color:#111;text-align:right;}
@@ -642,12 +647,11 @@ def perf_table(cur, prev, dim, order_list, title, key):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더."""
     D = yoy_frame(cur, prev, dim, order_list)
     h1, h2 = st.columns([4, 1])
-    h1.markdown(f"**{title}**")
+    h1.markdown(f"**{title}**{_NOTE_FLOAT}", unsafe_allow_html=True)
     h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28]),
                        file_name=f"{title[:24]}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key=f"dl_{key}", use_container_width=True)
-    _money_note()   # 룰1
     render_styled_table(style_yoy(D))   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
 
 
@@ -1327,9 +1331,8 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
     sty = sty.set_properties(**{"text-align": "right"})
 
     st.markdown(f"**🔍 {label} · 매장별 상세**  "
-                f"<span style='color:#888;font-size:0.8rem;'>(매장 {len(store_rows)}개 · 비중=해당 그룹 내 · 매출 큰 순)</span>",
-                unsafe_allow_html=True)
-    _money_note()
+                f"<span style='color:#888;font-size:0.8rem;'>(매장 {len(store_rows)}개 · 비중=해당 그룹 내 · 매출 큰 순)</span>"
+                f"{_NOTE_FLOAT}", unsafe_allow_html=True)
     render_styled_table(sty)
 
 
@@ -1350,9 +1353,8 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
     by = _wk_block(cyd, pyd, rows)
     sty = _wk_style_table(bm, by, [k for k, _ in rows], cy, py)
     st.markdown(f"**🔍 {label} · 아이템그룹별 상세**  "
-                f"<span style='color:#888;font-size:0.8rem;'>(비중=해당 그룹 내 · G.TOTAL=선택 전체)</span>",
-                unsafe_allow_html=True)
-    _money_note()
+                f"<span style='color:#888;font-size:0.8rem;'>(비중=해당 그룹 내 · G.TOTAL=선택 전체)</span>"
+                f"{_NOTE_FLOAT}", unsafe_allow_html=True)
     render_styled_table(sty)
 
 
@@ -1421,13 +1423,13 @@ def render_weekly_report(df):
     sty = _wk_style_table(bm, by, idx, cy, py)
 
     h1, h2 = st.columns([5, 1])
-    h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()} → {asof.date()} · 누계 {y_start.date()} → {asof.date()})")
+    h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()} → {asof.date()} · 누계 {y_start.date()} → {asof.date()})"
+                f"{_NOTE_FLOAT}", unsafe_allow_html=True)
     # 엑셀 다운로드
     xls_bytes = weekly_excel_bytes(rows, bm, by, asof, cy, py)
     h2.download_button("⬇ 엑셀", xls_bytes, file_name=f"주간보고_{asof.date()}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="wk_dl", use_container_width=True)
-    _money_note()   # 룰1
     render_styled_table(sty)   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
     st.caption("※ 유통별 5개는 주요 채널만 (직영몰·특수채널·K2K이관 등은 G.TOTAL엔 포함, 유통 행엔 미표기). "
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
@@ -1441,7 +1443,7 @@ def render_weekly_report(df):
         managers = sorted(m for m in _mset if m not in _MGR_BOTTOM) + [m for m in _MGR_BOTTOM if m in _mset]
     if managers:
         st.divider()
-        st.markdown("##### 👤 매장 담당별 분석")
+        st.markdown("##### 👤 매장 담당별 분석" + _NOTE_FLOAT, unsafe_allow_html=True)
         mrows = [(("전체", "G.TOTAL", "합계"), lambda x: pd.Series(True, index=x.index))]
         for nm in managers:
             mrows.append((("담당별", nm, "합계"),
@@ -1451,7 +1453,6 @@ def render_weekly_report(df):
         if not _filtered:
             inject_plan_manager(by2, [k for k, _ in mrows], master)   # 담당자 매장 연간계획 합
         sty2 = _wk_style_table(bm2, by2, [k for k, _ in mrows], cy, py)
-        _money_note()
         render_styled_table(sty2)
         st.caption("※ 담당별 = 매장 마스터의 담당자 기준. 담당 미지정 매장은 담당 행엔 미포함(G.TOTAL엔 포함). 비중=행÷전체.")
 
