@@ -571,7 +571,7 @@ def _fmt_cell(col, v):
         return "–"
     top, sub = col
     if top == "실판매금액(백만)":
-        return f"{v:,.0f}" if sub != "증감율" else f"{v*100:+.0f}%"
+        return f"{v:,.1f}" if sub != "증감율" else f"{v*100:+.0f}%"
     if top == "판가율":
         return f"{v*100:.0f}%" if sub != "증감" else f"{v*100:+.1f}%p"
     if top == "비중":
@@ -1139,11 +1139,11 @@ def _wk_fmt(block, sub, v):
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return "–"
     if sub == "사업계획":
-        return f"{v/1e6:,.0f}"   # 백만원
+        return f"{v/1e6:,.1f}"   # 백만원 · 소수1자리
     if sub == "진도율":
         return f"{v*100:.0f}%"
     if "실판가" in sub:
-        return f"{v/1e6:,.0f}"   # 룰1: 백만원 단위
+        return f"{v/1e6:,.1f}"   # 룰1: 백만원 · 소수1자리
     if "판가율" in sub:
         return f"{v*100:.1f}%"
     if sub == "증감율":
