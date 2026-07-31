@@ -597,10 +597,28 @@ def yoy_frame(cur, prev, dim, order_list=None, season_rows=False):
     return D
 
 
+def yoy_frame2(cur_m, prev_m, cur_y, prev_y, dim, order_list=None, season_rows=False,
+               blk_labels=("당월누계", "연간누계")):
+    """플래그십 2블록 프레임 (2026-07-31 목업 v2 컨펌): 당월누계 + 연간누계.
+
+    현재 헤더 12개 컬럼(실판매금액·판가율·비중·평균단가 × 25/26/증감)을 기간별로 복제해
+    최상단에 기간 블록(당월누계·연간누계)을 얹는다. 비중은 각 블록 안에서 행÷전체.
+    행 순서는 연간누계 기준(당월에만 있는 행은 뒤에 추가, 없는 칸은 '–').
+    """
+    Dm = yoy_frame(cur_m, prev_m, dim, order_list, season_rows=season_rows)
+    Dy = yoy_frame(cur_y, prev_y, dim, order_list, season_rows=season_rows)
+    idx = list(Dy.index) + [k for k in Dm.index if k not in Dy.index]
+    Dm = Dm.reindex(idx)
+    Dy = Dy.reindex(idx)
+    D = pd.concat([Dm, Dy], axis=1, keys=list(blk_labels))
+    D.index.name = dim
+    return D
+
+
 def _fmt_cell(col, v):
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return "–"
-    top, sub = col
+    top, sub = col[-2], col[-1]   # 2단(그룹·항목)/3단(기간·그룹·항목) 컬럼 모두 지원
     if top == "실판매금액(백만)":
         return f"{v:,.1f}" if sub != "증감율" else f"{v*100:+.0f}%"
     if top == "판가율":
@@ -616,7 +634,7 @@ def style_yoy(D):
     disp = D.copy()
     for col in disp.columns:
         disp[col] = [_fmt_cell(col, v) for v in disp[col]]
-    delta_cols = [c for c in D.columns if c[1] in ("증감율", "증감")]
+    delta_cols = [c for c in D.columns if c[-1] in ("증감율", "증감")]
 
     def color(col):
         vals = D[col]
@@ -636,7 +654,7 @@ def yoy_excel_bytes(D, sheet="분석"):
         disp[col] = [_fmt_cell(col, v) for v in disp[col]]
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        disp.to_excel(w, sheet_name=sheet)
+        disp.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "분석")   # 시트명 금지문자('/' 등) 치환
     return buf.getvalue()
 
 
@@ -710,14 +728,21 @@ def render_styled_table(sty, extra_class="", extra_css=""):
                 unsafe_allow_html=True)
 
 
-def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False):
+def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False,
+               month=None, blk_labels=("당월누계", "연간누계")):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
 
     extra=(컬럼명, {행라벨: 값})이면 표 맨 앞(행이름 바로 옆)에 텍스트 컬럼을 삽입
-    — 예: 유통채널별 표의 '담당자'. 엑셀 다운로드에도 그대로 포함된다.
-    season_rows=True면 G.TOTAL 아래 시즌 7행(S/S·F/W TOTAL + Z·A·B·C·D) 삽입 — 연차별 성과표 전용.
+    — 예: 유통채널별 표의 '담당자'. 엑셀 다운로드에도 그대로 포함된다. (month와 병용 불가)
+    season_rows=True면 G.TOTAL 아래 시즌 7행(S/S·F/W TOTAL + Z·A·B·C·D) 삽입.
+    month=(cur_m, prev_m)이면 당월누계+연간누계 2블록 표(플래그십 탭 전용, 2026-07-31).
     """
-    D = yoy_frame(cur, prev, dim, order_list, season_rows=season_rows)
+    if month is not None:
+        cur_m, prev_m = month
+        D = yoy_frame2(cur_m, prev_m, cur, prev, dim, order_list,
+                       season_rows=season_rows, blk_labels=blk_labels)
+    else:
+        D = yoy_frame(cur, prev, dim, order_list, season_rows=season_rows)
     if extra:
         _name, _map = extra
         D.insert(0, (_name, ""),
@@ -725,7 +750,7 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     h1, h2 = st.columns([4, 1])
     h1.markdown(f"**{title}**{_NOTE_FLOAT}", unsafe_allow_html=True)
     h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28]),
-                       file_name=f"{title[:24]}.xlsx",
+                       file_name=f"{_safe_name(title)[:24]}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key=f"dl_{key}", use_container_width=True)
     if season_rows:
@@ -777,6 +802,12 @@ def render_flagship(df):
         base = base[base["_채널"].isin(selc)]
     cur = base[(base["_판매일"] >= s) & (base["_판매일"] <= e)]
     prev = base[(base["_판매일"] >= s - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
+    # 당월누계 (2026-07-31 목업 v2 컨펌): 기준기간 끝날짜가 속한 달의 1일 → 끝날짜 · 전년 동범위 비교
+    ms = e.replace(day=1)
+    cur_m = base[(base["_판매일"] >= ms) & (base["_판매일"] <= e)]
+    prev_m = base[(base["_판매일"] >= ms - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
+    blk = (f"당월누계 ({ms.month:02d}/{ms.day:02d}→{e.month:02d}/{e.day:02d})",
+           f"연간누계 ({s.month:02d}/{s.day:02d}→{e.month:02d}/{e.day:02d})")
 
     tot_c = cur["_매출액"].sum()
     tot_p = prev["_매출액"].sum()
@@ -790,12 +821,15 @@ def render_flagship(df):
 
     # 연차 순서
     age_order = sorted([a for a in base["연차"].dropna().unique()], key=_age_sort_key)
-    st.markdown("### 연차별 성과표")
-    # 시즌 7행 포함 (2026-07-31 목업 v3 컨펌): S/S TOTAL · F/W TOTAL + Z·A·B·C·D
-    perf_table(cur, prev, "연차", age_order, "연차별 성과표", "age", season_rows=True)
+    # 표 이름 변경 (2026-07-31 컨펌): "연차별 성과표" → "시즌별/연차별 한눈에 보기"
+    # 시즌 7행 포함 (목업 v3 컨펌): S/S TOTAL · F/W TOTAL + Z·A·B·C·D
+    st.markdown("### 시즌별/연차별 한눈에 보기")
+    perf_table(cur, prev, "연차", age_order, "시즌별/연차별 한눈에 보기", "age",
+               season_rows=True, month=(cur_m, prev_m), blk_labels=blk)
 
     st.markdown("### 아이템그룹별 성과표 (전연차 토탈 + 연차별)")
-    perf_table(cur, prev, "아이템그룹", ITEMGROUP_ORDER, "아이템그룹별 성과표 (전연차)", "grp_all")
+    perf_table(cur, prev, "아이템그룹", ITEMGROUP_ORDER, "아이템그룹별 성과표 (전연차)", "grp_all",
+               month=(cur_m, prev_m), blk_labels=blk)
     # 연차별 버킷
     buckets = []
     sinsang = [a for a in ["신상", "내년신상"] if a in age_order]
@@ -807,8 +841,11 @@ def render_flagship(df):
     for name, ages in buckets:
         curb = cur[cur["연차"].isin(ages)]
         prevb = prev[prev["연차"].isin(ages)]
+        curb_m = cur_m[cur_m["연차"].isin(ages)]
+        prevb_m = prev_m[prev_m["연차"].isin(ages)]
         perf_table(curb, prevb, "아이템그룹", ITEMGROUP_ORDER,
-                   f"아이템그룹별 성과표 ({name})", f"grp_{name}")
+                   f"아이템그룹별 성과표 ({name})", f"grp_{name}",
+                   month=(curb_m, prevb_m), blk_labels=blk)
 
 
 def render_dashboard(q, df):
