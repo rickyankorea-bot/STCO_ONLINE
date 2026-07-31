@@ -1218,10 +1218,12 @@ def _wk_style_table(bm, by, idx, cy, py):
     """주간보고 프레임(당월+누계 · 동일 컬럼)으로 (bm,by,idx)를 스타일 표(Styler)로 변환. 메인표·담당별표 공용."""
     MON, YTD = "당월 실적", "연간누계"
     sy, sc = str(py)[-2:], str(cy)[-2:]   # 룰2: 연도 2자리
-    mcols = [(MON, f"{sy}실판가"), (MON, f"{sy}판가율"), (MON, f"{sc}실판가"),
-             (MON, "증감율"), (MON, "비중"), (MON, f"{sc}판가율"), (MON, "편차")]
-    ycols = [(YTD, f"{sy}실판가"), (YTD, f"{sy}판가율"), (YTD, "사업계획"), (YTD, f"{sc}실판가"),
-             (YTD, "진도율"), (YTD, "증감율"), (YTD, "비중"), (YTD, f"{sc}판가율"), (YTD, "편차")]
+    # 컬럼 순서 (2026-07-31 팀장님 지정): 실판가 25→26 → 증감율 → 비중 → (누계: 사업계획→진도율) → 판가율 25→26 → 편차
+    mcols = [(MON, f"{sy}실판가"), (MON, f"{sc}실판가"), (MON, "증감율"), (MON, "비중"),
+             (MON, f"{sy}판가율"), (MON, f"{sc}판가율"), (MON, "편차")]
+    ycols = [(YTD, f"{sy}실판가"), (YTD, f"{sc}실판가"), (YTD, "증감율"), (YTD, "비중"),
+             (YTD, "사업계획"), (YTD, "진도율"),
+             (YTD, f"{sy}판가율"), (YTD, f"{sc}판가율"), (YTD, "편차")]
 
     def cellval(block_res, key, sub):
         r = block_res[key]
@@ -1298,10 +1300,12 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
 
     sy, sc = str(py)[-2:], str(cy)[-2:]
     MON, YTD = "당월 실적", "연간누계"
-    mcols = [(MON, f"{sy}실판가"), (MON, f"{sy}판가율"), (MON, f"{sc}실판가"),
-             (MON, "증감율"), (MON, "비중"), (MON, f"{sc}판가율"), (MON, "편차")]
-    ycols = [(YTD, f"{sy}실판가"), (YTD, f"{sy}판가율"), (YTD, "사업계획"), (YTD, f"{sc}실판가"),
-             (YTD, "진도율"), (YTD, "증감율"), (YTD, "비중"), (YTD, f"{sc}판가율"), (YTD, "편차")]
+    # 컬럼 순서 (2026-07-31 팀장님 지정): 실판가 25→26 → 증감율 → 비중 → (누계: 사업계획→진도율) → 판가율 25→26 → 편차
+    mcols = [(MON, f"{sy}실판가"), (MON, f"{sc}실판가"), (MON, "증감율"), (MON, "비중"),
+             (MON, f"{sy}판가율"), (MON, f"{sc}판가율"), (MON, "편차")]
+    ycols = [(YTD, f"{sy}실판가"), (YTD, f"{sc}실판가"), (YTD, "증감율"), (YTD, "비중"),
+             (YTD, "사업계획"), (YTD, "진도율"),
+             (YTD, f"{sy}판가율"), (YTD, f"{sc}판가율"), (YTD, "편차")]
 
     def val(metrics, s):
         if "실판가" in s:
