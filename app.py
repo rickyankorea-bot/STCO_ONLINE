@@ -35,6 +35,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 import plotly.express as px
+import plotly.graph_objects as go
 from sqlalchemy import create_engine, text
 
 DB_PATH = "sales_data.db"
@@ -937,37 +938,212 @@ def render_flagship(df):
                    month=(curb_m, prevb_m), blk_labels=blk)
 
 
-def render_dashboard(q, df):
-    if q is None or q.empty:
-        st.warning("선택한 조건에 데이터가 없습니다.")
+def render_dashboard(df):
+    """종합 대시보드 (2026-07-31 전면 개편 · 목업 컨펌) — 전체 그림 + 자동 인사이트.
+
+    ① KPI 5장: 누계 매출 전년비 · 연간 진도율(vs 시간진도) · 당월 매출 전년비 · 당월 진도율 · 누계 판가율
+    ② 월별 매출(올해 vs 전년 vs 사업계획 점선) ③ 자동 인사이트(성장/부진 채널·아이템·신상 비중·판가율)
+    ④ 아이템그룹 증감액 + 연차 구성 변화 ⑤ 채널 TOP10(색=전년비).
+    필터 없음 = 회사 전체 기준(사업계획 진도율 정합성). 금액 백만원(룰1)·연도 2자리(룰2).
+    """
+    if df is None or df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
+        st.info("데이터를 먼저 적재하세요.")
         return
-    rev = q["_매출액"].sum(); qty = q["_수량"].sum()
-    orig = q["_최초가매출"].sum() if "_최초가매출" in q else 0
-    k = st.columns(5)
-    k[0].metric("총 매출액(실판가)", _won(rev))
-    k[1].metric("총 판매수량", f"{int(qty):,} 개")
-    k[2].metric("평균 단가", _won(rev / qty) if qty else "-")
-    k[3].metric("판가율", f"{rev/orig*100:.1f}%" if orig else "-")
-    k[4].metric("거래 건수", f"{len(q):,} 건")
+    d = df[df["_판매일"].notna()]
+    asof = d["_판매일"].max()
+    cy, py = int(asof.year), int(asof.year) - 1
+    sy, sc = str(py)[-2:], str(cy)[-2:]
+    y_start = asof.replace(month=1, day=1)
+    m_start = asof.replace(day=1)
+    cur_y = d[(d["_판매일"] >= y_start) & (d["_판매일"] <= asof)]
+    prev_y = d[(d["_판매일"] >= y_start - pd.DateOffset(years=1)) & (d["_판매일"] <= asof - pd.DateOffset(years=1))]
+    cur_m = d[(d["_판매일"] >= m_start) & (d["_판매일"] <= asof)]
+    prev_m = d[(d["_판매일"] >= m_start - pd.DateOffset(years=1)) & (d["_판매일"] <= asof - pd.DateOffset(years=1))]
+
+    st.caption(f"기준일 **{asof.date()}** (데이터 마지막 날) · 올해({sc}) vs 전년({sy}) 동기간 · "
+               "필터 없음 = 회사 전체 그림 · [금액: 백만원 / VAT+]")
+
+    # ── 사업계획 (매장 시트의 G.TOTAL 월별 목표) ──
+    plan = load_plan()
+    pmon = {}
+    if plan is not None and not plan.empty:
+        pg = plan[(plan["dim"] == "store") & (plan["code"] == "G.TOTAL")]
+        pmon = {int(k): float(v) for k, v in pg.groupby("month")["amount"].sum().to_dict().items()}
+    plan_annual = sum(pmon.values()) if pmon else None
+    plan_month = pmon.get(int(asof.month)) if pmon else None
+
+    ry, rpy = float(cur_y["_매출액"].sum()), float(prev_y["_매출액"].sum())
+    rm, rpm = float(cur_m["_매출액"].sum()), float(prev_m["_매출액"].sum())
+    oy, opy = float(cur_y["_최초가매출"].sum()), float(prev_y["_최초가매출"].sum())
+    pg26 = (ry / oy) if oy else None
+    pg25 = (rpy / opy) if opy else None
+
+    # ── ① KPI 5장 ──
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric(f"{sc}년 누계 매출(백만)", f"{_mm(ry):,.0f}",
+              f"{(ry-rpy)/rpy*100:+.1f}% vs 전년 {_mm(rpy):,.0f}" if rpy else None)
+    tprog_y = float(asof.dayofyear) / (366.0 if asof.is_leap_year else 365.0)
+    if plan_annual:
+        prog_y = ry / plan_annual
+        k2.metric("연간 사업계획 진도율", f"{prog_y*100:.0f}%",
+                  f"{(prog_y-tprog_y)*100:+.1f}%p vs 시간진도 {tprog_y*100:.0f}%")
+        k2.progress(min(prog_y, 1.0))
+        k2.caption(f"계획 {plan_annual/1e6:,.0f} · 잔여 {max(plan_annual-ry, 0)/1e6:,.0f}")
+    else:
+        k2.metric("연간 사업계획 진도율", "–")
+        k2.caption("사업계획 업로드 시 표시돼요")
+    k3.metric(f"당월({asof.month}월) 매출(백만)", f"{_mm(rm):,.1f}",
+              f"{(rm-rpm)/rpm*100:+.1f}% vs 전년 {_mm(rpm):,.1f}" if rpm else None)
+    tprog_m = float(asof.day) / float(asof.days_in_month)
+    if plan_month:
+        prog_m = rm / plan_month
+        k4.metric("당월 계획 진도율", f"{prog_m*100:.0f}%",
+                  f"{(prog_m-tprog_m)*100:+.1f}%p vs 시간진도 {tprog_m*100:.0f}%")
+        k4.progress(min(prog_m, 1.0))
+        k4.caption(f"{asof.month}월 계획 {plan_month/1e6:,.1f}")
+    else:
+        k4.metric("당월 계획 진도율", "–")
+        k4.caption("사업계획 업로드 시 표시돼요")
+    k5.metric("누계 판가율", f"{pg26*100:.1f}%" if pg26 is not None else "–",
+              f"{(pg26-pg25)*100:+.1f}%p vs 전년 {pg25*100:.1f}%"
+              if (pg26 is not None and pg25 is not None) else None)
+
+    # ── ② 월별 매출: 올해 vs 전년 vs 사업계획 ──
+    st.markdown(f"### 월별 매출 — {sc}년 vs {sy}년 vs 사업계획")
+    dm = d[d["_판매일"].dt.year.isin([cy, py])]
+    gsum = dm.groupby([dm["_판매일"].dt.year, dm["_판매일"].dt.month])["_매출액"].sum().to_dict()
+    months = list(range(1, 13))
+    xlab = [f"{m}월" for m in months]
+    v25 = [gsum.get((py, m), 0.0) / 1e6 for m in months]
+    v26 = [(gsum.get((cy, m), 0.0) / 1e6) if m <= asof.month else None for m in months]
+    fig = go.Figure()
+    fig.add_bar(x=xlab, y=v25, name=f"{sy}년 실적", marker_color="#b8bec7")
+    fig.add_bar(x=xlab, y=v26, name=f"{sc}년 실적", marker_color="#2f6bb0")
+    if pmon:
+        fig.add_scatter(x=xlab, y=[pmon.get(m, 0.0) / 1e6 for m in months],
+                        name=f"{sc} 사업계획", mode="lines",
+                        line=dict(color="#444444", width=2.5, dash="dash"))
+    fig.update_layout(barmode="group", height=330, margin=dict(t=10, b=0, l=0, r=0),
+                      legend=dict(orientation="h", y=1.1), yaxis_title="백만원")
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("※ 남은 달은 계획 점선만 보여요 — 앞으로 채울 목표. 막대에 마우스를 올리면 값이 떠요.")
+
+    # ── ③ 자동 인사이트 ──
+    def _topdiff(cur, prev, col):
+        a = cur.groupby(col, observed=True)["_매출액"].sum()
+        b = prev.groupby(col, observed=True)["_매출액"].sum()
+        m = pd.concat([a, b], axis=1, keys=["c", "p"]).fillna(0.0)
+        m = m[(m["c"] != 0) | (m["p"] != 0)]
+        m["d"] = m["c"] - m["p"]
+        return m.sort_values("d", ascending=False)
+
+    def _ent(name, r):
+        pct = f" ({r['d']/r['p']*100:+.1f}%)" if r["p"] else " (신규)"
+        color = "#1f8a4c" if r["d"] >= 0 else "#c62828"
+        return f"<b>{name}</b> <span style='color:{color};font-weight:700'>{r['d']/1e6:+,.1f}</span>{pct}"
+
+    lines = []
+    if not prev_y.empty and "_채널" in d.columns:
+        ch = _topdiff(cur_y, prev_y, "_채널")
+        ups = ch[ch["d"] > 0].head(2)
+        dns = ch[ch["d"] < 0].tail(2).iloc[::-1]
+        if not ups.empty:
+            lines.append("<b>성장 견인 채널</b>: " + " · ".join(_ent(str(i), r) for i, r in ups.iterrows()))
+        if not dns.empty:
+            lines.append("<b>부진 채널</b>: " + " · ".join(_ent(str(i), r) for i, r in dns.iterrows()))
+    ig = _topdiff(cur_y, prev_y, "아이템그룹") if (not prev_y.empty and "아이템그룹" in d.columns) else pd.DataFrame()
+    if not ig.empty:
+        top, bot = ig.iloc[0], ig.iloc[-1]
+        seg = "<b>아이템</b>: " + _ent(str(ig.index[0]), top) + " 성장 1위"
+        if bot["d"] < 0:
+            seg += " / " + _ent(str(ig.index[-1]), bot) + " 부진 1위"
+        lines.append(seg)
+    if "연차" in d.columns and ry and rpy:
+        s26 = float(cur_y[cur_y["연차"].isin(["신상", "내년신상"])]["_매출액"].sum()) / ry
+        s25 = float(prev_y[prev_y["연차"].isin(["신상", "내년신상"])]["_매출액"].sum()) / rpy
+        lines.append(f"<b>연차 구성</b>: 신상 비중 <b>{s26*100:.1f}%</b> "
+                     f"(전년 {s25*100:.1f}%, {(s26-s25)*100:+.1f}%p)")
+    if pg26 is not None and pg25 is not None:
+        dv = (pg26 - pg25) * 100
+        if dv <= -1:
+            lines.append(f"<b>주의</b>: 누계 판가율 <span style='color:#c62828;font-weight:700'>{dv:+.1f}%p</span>"
+                         " — 매출 대비 할인 폭이 커지는 추세")
+        else:
+            lines.append(f"<b>판가율</b>: 전년비 {dv:+.1f}%p")
+    if lines:
+        st.markdown("### 📌 자동 인사이트")
+        body = "<br>".join(f"{i+1}. {t}" for i, t in enumerate(lines))
+        st.markdown("<div style='background:#f7f9fc;border:1px solid #dde6f0;border-radius:8px;"
+                    f"padding:12px 16px;font-size:0.9rem;line-height:1.9;'>{body}</div>",
+                    unsafe_allow_html=True)
+
+    # ── ④ 아이템그룹 증감액 + 연차 구성 변화 ──
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**월별 매출 추이**")
-        if "년월" in q:
-            t = q.groupby("년월", as_index=False)["_매출액"].sum().sort_values("년월")
-            fig = px.line(t, x="년월", y="_매출액", markers=True, labels={"_매출액": "매출액"})
-            fig.update_layout(height=320, margin=dict(t=10, b=0)); st.plotly_chart(fig, use_container_width=True)
+        st.markdown(f"**아이템그룹별 전년비 증감액 (누계 · {sc} vs {sy})**")
+        if not ig.empty:
+            names = [str(i) for i in ig.index]
+            vals = [float(v) / 1e6 for v in ig["d"]]
+            txt = [f"{v:+,.1f}" + (f" ({r['d']/r['p']*100:+.1f}%)" if r["p"] else "")
+                   for v, (_, r) in zip(vals, ig.iterrows())]
+            figb = go.Figure(go.Bar(
+                x=vals[::-1], y=names[::-1], orientation="h",
+                marker_color=["#1f8a4c" if v >= 0 else "#c62828" for v in vals[::-1]],
+                text=txt[::-1], textposition="outside"))
+            figb.update_layout(height=340, margin=dict(t=10, b=0, l=0, r=10), xaxis_title="증감액(백만)")
+            st.plotly_chart(figb, use_container_width=True)
+        else:
+            st.info("전년 데이터가 있어야 증감 분석이 가능해요.")
     with c2:
-        st.markdown("**아이템그룹별 매출 비중**")
-        if "아이템그룹" in q:
-            comp = q.groupby("아이템그룹", as_index=False)["_매출액"].sum().sort_values("_매출액", ascending=False)
-            fig = px.pie(comp, names="아이템그룹", values="_매출액", hole=0.5)
-            fig.update_layout(height=320, margin=dict(t=10, b=0)); st.plotly_chart(fig, use_container_width=True)
-    st.markdown("**채널별 매출 TOP 10**")
-    if "_채널" in q:
-        ch = q.groupby("_채널", as_index=False)["_매출액"].sum().sort_values("_매출액", ascending=False).head(10)
-        fig = px.bar(ch, x="_매출액", y="_채널", orientation="h", labels={"_매출액": "매출액", "_채널": "채널"})
-        fig.update_layout(height=340, margin=dict(t=10, b=0), yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig, use_container_width=True)
+        st.markdown("**연차 구성 변화 (매출 비중)**")
+
+        def _bucket(a):
+            if a is None or (isinstance(a, float) and pd.isna(a)):
+                return None
+            if a in ("신상", "내년신상"):
+                return "신상"
+            if a in ("1년차", "2년차"):
+                return a
+            return "3년차↑"
+
+        rows = []
+        for lbl, f, tot in ((f"{sy}년", prev_y, rpy), (f"{sc}년", cur_y, ry)):
+            if tot and "연차" in f.columns:
+                sser = f.assign(_b=f["연차"].map(_bucket)).groupby("_b")["_매출액"].sum() / tot
+                rows.append((lbl, sser))
+        if rows:
+            order = ["신상", "1년차", "2년차", "3년차↑"]
+            colors = {"신상": "#2f6bb0", "1년차": "#5a8ec7", "2년차": "#8fb3d9", "3년차↑": "#c3d4e6"}
+            figc = go.Figure()
+            for bkt in order:
+                figc.add_bar(y=[r[0] for r in rows],
+                             x=[float(r[1].get(bkt, 0)) * 100 for r in rows],
+                             name=bkt, orientation="h", marker_color=colors[bkt],
+                             text=[f"{float(r[1].get(bkt, 0))*100:.1f}%" for r in rows],
+                             textposition="inside")
+            figc.update_layout(barmode="stack", height=340, margin=dict(t=10, b=0, l=0, r=0),
+                               legend=dict(orientation="h", y=1.15), xaxis_title="비중(%)")
+            st.plotly_chart(figc, use_container_width=True)
+        else:
+            st.info("전년 데이터가 있어야 구성 비교가 가능해요.")
+
+    # ── ⑤ 채널 TOP10 (색=전년비) ──
+    st.markdown(f"**채널 TOP10 ({sc}년 누계 매출 · 색=전년비)**")
+    if "_채널" in d.columns:
+        cc = cur_y.groupby("_채널", observed=True)["_매출액"].sum().sort_values(ascending=False).head(10)
+        ppv = prev_y.groupby("_채널", observed=True)["_매출액"].sum()
+        names = [str(x) for x in cc.index]
+        grow = [((float(cc[i]) - float(ppv.get(i, 0))) / float(ppv.get(i, 0))) if float(ppv.get(i, 0)) else None
+                for i in cc.index]
+        txt = [f"{float(v)/1e6:,.1f}" + (f" ({g*100:+.1f}%)" if g is not None else " (신규)")
+               for v, g in zip(cc.values, grow)]
+        colsig = ["#1f8a4c" if (g is None or g >= 0) else "#c62828" for g in grow]
+        figd = go.Figure(go.Bar(x=[float(v) / 1e6 for v in cc.values][::-1], y=names[::-1],
+                                orientation="h", marker_color=colsig[::-1],
+                                text=txt[::-1], textposition="outside"))
+        figd.update_layout(height=380, margin=dict(t=10, b=0, l=0, r=10),
+                           xaxis_title=f"{sc}년 누계(백만)")
+        st.plotly_chart(figd, use_container_width=True)
 
 
 def render_channel_brand(df):
@@ -2187,7 +2363,7 @@ def main():
     with tab3:
         render_channel_brand(df)
     with tab4:
-        render_dashboard(df, df)
+        render_dashboard(df)
 
 
 if __name__ == "__main__":
