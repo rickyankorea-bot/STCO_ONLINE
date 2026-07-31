@@ -526,8 +526,21 @@ def _age_sort_key(a):
 # ---- 전년비교 성과표 (연차 / 아이템그룹 공용) ----
 GROUPS = [("실판매금액(백만)", "실판매"), ("판가율", "판가율"), ("비중", "비중"), ("평균단가(원)", "평균단가")]
 
+# 시즌 7행 (2026-07-31 중태님 지시 · 연차별 성과표 전용): G.TOTAL 바로 아래.
+#  1~2행 = 시즌그룹 합계(S/S=공통+봄+여름 · F/W=가을+겨울), 3~7행 = 개별 시즌 Z→A→B→C→D.
+#  E(RUNNING)는 별도 행 없이 G.TOTAL에만 포함. 비중 분모는 전체(G.TOTAL).
+SEASON_ROW_DEFS = [
+    ("S/S TOTAL", ["공통", "봄", "여름"]),
+    ("F/W TOTAL", ["가을", "겨울"]),
+    ("Z (공통)", ["공통"]),
+    ("A (봄)", ["봄"]),
+    ("B (여름)", ["여름"]),
+    ("C (가을)", ["가을"]),
+    ("D (겨울)", ["겨울"]),
+]
 
-def yoy_frame(cur, prev, dim, order_list=None):
+
+def yoy_frame(cur, prev, dim, order_list=None, season_rows=False):
     """올해(cur)·전년(prev)을 dim으로 묶어 전년비교 numeric DataFrame(멀티헤더) 반환. G.TOTAL 상단."""
     def agg(f):
         if f is None or f.empty:
@@ -560,6 +573,19 @@ def yoy_frame(cur, prev, dim, order_list=None):
     rows.append(metrics(tot_c, tot_p, float(c["orig"].sum()), float(p["orig"].sum()),
                         float(c["qty"].sum()), float(p["qty"].sum()), tot_c, tot_p))
     index.append("G.TOTAL")
+    # 시즌 7행 (연차별 성과표 전용) — G.TOTAL 다음, 연차 행들 앞
+    if season_rows:
+        def _ssum(f, sns):
+            if f is None or f.empty or "시즌명" not in f.columns:
+                return 0.0, 0.0, 0.0
+            sub = f[f["시즌명"].astype(str).isin(sns)]
+            return (float(sub["_매출액"].sum()), float(sub["_최초가매출"].sum()),
+                    float(sub["_수량"].sum()))
+        for lbl, sns in SEASON_ROW_DEFS:
+            r26, o26, q26 = _ssum(cur, sns)
+            r25, o25, q25 = _ssum(prev, sns)
+            rows.append(metrics(r26, r25, o26, o25, q26, q25, tot_c, tot_p))
+            index.append(lbl)
     for k in keys:
         rows.append(metrics(float(c["rev"].get(k, 0)), float(p["rev"].get(k, 0)),
                             float(c["orig"].get(k, 0)), float(p["orig"].get(k, 0)),
@@ -662,20 +688,36 @@ table.erp-tbl tbody tr:first-child th, table.erp-tbl tbody tr:first-child td{
 """
 
 
-def render_styled_table(sty):
+# 시즌 7행 강조 CSS (연차별 성과표 전용 — erp-season 클래스가 붙은 표에만 적용)
+#  2~3행(S/S·F/W TOTAL)=진한 블루그레이+볼드 · 4~8행(개별 시즌)=연한 톤+들여쓰기
+_SEASON_ROW_CSS = """
+<style>
+table.erp-season tbody tr:nth-child(2) th, table.erp-season tbody tr:nth-child(2) td,
+table.erp-season tbody tr:nth-child(3) th, table.erp-season tbody tr:nth-child(3) td{
+    background:#e3ecf7 !important;font-weight:700;}
+table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) th,
+table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) td{background:#f4f8fc !important;}
+table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) th{padding-left:18px;font-weight:500;}
+</style>
+"""
+
+
+def render_styled_table(sty, extra_class="", extra_css=""):
     """Styler를 HTML 표로 렌더(가로여백 축소·헤더검정·G.TOTAL 노란강조). 증감 빨강/초록은 Styler가 유지."""
-    sty = sty.set_table_attributes('class="erp-tbl"')
-    st.markdown(_TBL_CSS + f'<div class="erp-wrap">{sty.to_html()}</div>',
+    cls = ("erp-tbl " + extra_class).strip()
+    sty = sty.set_table_attributes(f'class="{cls}"')
+    st.markdown(_TBL_CSS + extra_css + f'<div class="erp-wrap">{sty.to_html()}</div>',
                 unsafe_allow_html=True)
 
 
-def perf_table(cur, prev, dim, order_list, title, key, extra=None):
+def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
 
     extra=(컬럼명, {행라벨: 값})이면 표 맨 앞(행이름 바로 옆)에 텍스트 컬럼을 삽입
     — 예: 유통채널별 표의 '담당자'. 엑셀 다운로드에도 그대로 포함된다.
+    season_rows=True면 G.TOTAL 아래 시즌 7행(S/S·F/W TOTAL + Z·A·B·C·D) 삽입 — 연차별 성과표 전용.
     """
-    D = yoy_frame(cur, prev, dim, order_list)
+    D = yoy_frame(cur, prev, dim, order_list, season_rows=season_rows)
     if extra:
         _name, _map = extra
         D.insert(0, (_name, ""),
@@ -686,7 +728,10 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None):
                        file_name=f"{title[:24]}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key=f"dl_{key}", use_container_width=True)
-    render_styled_table(style_yoy(D))   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
+    if season_rows:
+        render_styled_table(style_yoy(D), extra_class="erp-season", extra_css=_SEASON_ROW_CSS)
+    else:
+        render_styled_table(style_yoy(D))   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
 
 
 def render_flagship(df):
@@ -746,7 +791,8 @@ def render_flagship(df):
     # 연차 순서
     age_order = sorted([a for a in base["연차"].dropna().unique()], key=_age_sort_key)
     st.markdown("### 연차별 성과표")
-    perf_table(cur, prev, "연차", age_order, "연차별 성과표", "age")
+    # 시즌 7행 포함 (2026-07-31 목업 v3 컨펌): S/S TOTAL · F/W TOTAL + Z·A·B·C·D
+    perf_table(cur, prev, "연차", age_order, "연차별 성과표", "age", season_rows=True)
 
     st.markdown("### 아이템그룹별 성과표 (전연차 토탈 + 연차별)")
     perf_table(cur, prev, "아이템그룹", ITEMGROUP_ORDER, "아이템그룹별 성과표 (전연차)", "grp_all")
