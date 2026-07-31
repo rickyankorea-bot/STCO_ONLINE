@@ -14,6 +14,10 @@
   [B] DATABASE : SQLAlchemy 누적적재 + 스키마 자동확장 + 중복방지 (Postgres/SQLite 공용)
   [C] ANALYSIS : 종합 대시보드 + 플래그십(연차·아이템별 전년비교)
 
+공통룰(2026-07-31 추가 · 룰11): 모든 조회 표에는 엑셀 다운로드 버튼을 기본 제공한다.
+  · 예외: 주간회의 보고자료 '메인 표'는 팀 주간보고 양식(weekly_template.xlsx)
+    특별 템플릿 다운로드를 그대로 유지(변경 금지).
+
 실행:  streamlit run app.py
 ================================================================================
 """
@@ -607,6 +611,27 @@ def yoy_excel_bytes(D, sheet="분석"):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         disp.to_excel(w, sheet_name=sheet)
+    return buf.getvalue()
+
+
+# ── 공통(룰11 · 2026-07-31): 모든 조회 표 엑셀 다운로드 기본 제공 ──────────────
+# 주간회의 보고자료 '메인 표'만 예외(팀 주간보고 양식 템플릿 다운로드 유지 — weekly_excel_bytes).
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _safe_name(s):
+    """엑셀 시트명·파일명에 못 쓰는 문자를 '-'로 치환."""
+    s = str(s)
+    for ch in '\\/:*?"<>|[]':
+        s = s.replace(ch, "-")
+    return s.strip()
+
+
+def table_excel_bytes(disp, sheet="표"):
+    """화면 표시용(포맷된) DataFrame을 그대로 엑셀로 변환 — 일반 표 공용 다운로드(룰11)."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        disp.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "표")
     return buf.getvalue()
 
 
@@ -1242,7 +1267,10 @@ def weekly_excel_bytes(rows, bm, by, asof, cy, py):
 
 
 def _wk_style_table(bm, by, idx, cy, py):
-    """주간보고 프레임(당월+누계 · 동일 컬럼)으로 (bm,by,idx)를 스타일 표(Styler)로 변환. 메인표·담당별표 공용."""
+    """주간보고 프레임(당월+누계 · 동일 컬럼)으로 (bm,by,idx)를 스타일 표로 변환. 메인표·담당별표 공용.
+
+    반환: (Styler, 표시용 DataFrame) — 표시용 DF는 엑셀 다운로드(룰11)에 사용.
+    """
     MON, YTD = "당월 실적", "연간누계"
     sy, sc = str(py)[-2:], str(cy)[-2:]   # 룰2: 연도 2자리
     # 컬럼 순서 (2026-07-31 팀장님 지정): 실판가 25→26 → 증감율 → 비중 → (누계: 사업계획→진도율) → 판가율 25→26 → 편차
@@ -1278,7 +1306,7 @@ def _wk_style_table(bm, by, idx, cy, py):
     for col in D.columns:
         if col[1] in ("증감율", "편차"):
             sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
-    return sty.set_properties(**{"text-align": "right"})
+    return sty.set_properties(**{"text-align": "right"}), disp
 
 
 def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, show_plan=True):
@@ -1362,9 +1390,14 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
             sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
     sty = sty.set_properties(**{"text-align": "right"})
 
-    st.markdown(f"**🔍 {label} · 매장별 상세**  "
+    # 룰11: 제목 + 우측 일반 엑셀 다운로드 버튼 (2026-07-31)
+    d1, d2 = st.columns([5, 1])
+    d1.markdown(f"**🔍 {label} · 매장별 상세**  "
                 f"<span style='color:#888;font-size:0.8rem;'>(매장 {len(store_rows)}개 · 비중=해당 그룹 내 · 매출 큰 순)</span>"
                 f"{_NOTE_FLOAT}", unsafe_allow_html=True)
+    d2.download_button("⬇ 엑셀", table_excel_bytes(disp, f"{label} 매장별"),
+                       file_name=f"{_safe_name(label)}_매장별상세.xlsx", mime=XLSX_MIME,
+                       key=f"wk_dl_drill_{label}", use_container_width=True)
     render_styled_table(sty)
 
 
@@ -1383,10 +1416,15 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
                      (lambda gg: (lambda x: x["아이템그룹"].astype(str) == gg))(g)))
     bm = _wk_block(cm, pm, rows)
     by = _wk_block(cyd, pyd, rows)
-    sty = _wk_style_table(bm, by, [k for k, _ in rows], cy, py)
-    st.markdown(f"**🔍 {label} · 아이템그룹별 상세**  "
+    sty, disp = _wk_style_table(bm, by, [k for k, _ in rows], cy, py)
+    # 룰11: 제목 + 우측 일반 엑셀 다운로드 버튼 (2026-07-31)
+    i1, i2 = st.columns([5, 1])
+    i1.markdown(f"**🔍 {label} · 아이템그룹별 상세**  "
                 f"<span style='color:#888;font-size:0.8rem;'>(비중=해당 그룹 내 · G.TOTAL=선택 전체)</span>"
                 f"{_NOTE_FLOAT}", unsafe_allow_html=True)
+    i2.download_button("⬇ 엑셀", table_excel_bytes(disp, f"{label} 아이템"),
+                       file_name=f"{_safe_name(label)}_아이템그룹별상세.xlsx", mime=XLSX_MIME,
+                       key=f"wk_dl_item_{label}", use_container_width=True)
     render_styled_table(sty)
 
 
@@ -1452,12 +1490,13 @@ def render_weekly_report(df):
     idx = [k for k, _ in rows]
     if not _filtered:
         inject_plan(by, idx, master)   # 연간 사업계획·진도율 주입 (필터 없을 때만)
-    sty = _wk_style_table(bm, by, idx, cy, py)
+    sty, _disp_main = _wk_style_table(bm, by, idx, cy, py)
 
     h1, h2 = st.columns([5, 1])
     h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()} → {asof.date()} · 누계 {y_start.date()} → {asof.date()})"
                 f"{_NOTE_FLOAT}", unsafe_allow_html=True)
-    # 엑셀 다운로드
+    # 엑셀 다운로드 — ⚠️ 메인 표 전용 '특별 조건': 팀 주간보고 양식(weekly_template.xlsx) 템플릿에
+    # 값을 채워 내려받는 방식. 룰11(일반 엑셀 버튼)의 예외이므로 절대 일반 방식으로 바꾸지 말 것.
     xls_bytes = weekly_excel_bytes(rows, bm, by, asof, cy, py)
     h2.download_button("⬇ 엑셀", xls_bytes, file_name=f"주간보고_{asof.date()}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1475,7 +1514,6 @@ def render_weekly_report(df):
         managers = sorted(m for m in _mset if m not in _MGR_BOTTOM) + [m for m in _MGR_BOTTOM if m in _mset]
     if managers:
         st.divider()
-        st.markdown("##### 👤 매장 담당별 분석" + _NOTE_FLOAT, unsafe_allow_html=True)
         mrows = [(("전체", "G.TOTAL", "합계"), lambda x: pd.Series(True, index=x.index))]
         for nm in managers:
             mrows.append((("담당별", nm, "합계"),
@@ -1484,7 +1522,13 @@ def render_weekly_report(df):
         by2 = _wk_block(cur_y, prev_y, mrows)
         if not _filtered:
             inject_plan_manager(by2, [k for k, _ in mrows], master)   # 담당자 매장 연간계획 합
-        sty2 = _wk_style_table(bm2, by2, [k for k, _ in mrows], cy, py)
+        sty2, disp2 = _wk_style_table(bm2, by2, [k for k, _ in mrows], cy, py)
+        # 룰11: 제목 + 우측 일반 엑셀 다운로드 버튼 (2026-07-31)
+        g1, g2 = st.columns([5, 1])
+        g1.markdown("##### 👤 매장 담당별 분석" + _NOTE_FLOAT, unsafe_allow_html=True)
+        g2.download_button("⬇ 엑셀", table_excel_bytes(disp2, "매장 담당별 분석"),
+                           file_name=f"매장담당별분석_{asof.date()}.xlsx", mime=XLSX_MIME,
+                           key="wk_dl_mgr", use_container_width=True)
         render_styled_table(sty2)
         st.caption("※ 담당별 = 매장 마스터의 담당자 기준. 담당 미지정 매장은 담당 행엔 미포함(G.TOTAL엔 포함). 비중=행÷전체.")
 
