@@ -29,6 +29,7 @@ from urllib.parse import quote_plus
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.express as px
 from sqlalchemy import create_engine, text
 
@@ -1579,6 +1580,112 @@ def delete_user(username):
         conn.execute(text(f'DELETE FROM "{USERS_TABLE}" WHERE "username"=:u'), {"u": username})
 
 
+# ── 로그인 유지(쿠키 세션) ────────────────────────────────────────────
+# 로그인 상태를 브라우저 메모리(st.session_state)에만 두면 새로고침·잠깐 방치로
+# 바로 재로그인이 필요했음 → 로그인 시 토큰을 발급해 브라우저 쿠키 + DB(app_sessions,
+# 해시만 저장)에 두고, '마지막 사용 후 2시간'까지는 자동으로 로그인을 이어준다.
+SESSIONS_TABLE = "app_sessions"
+AUTH_COOKIE = "erp_auth"
+IDLE_LIMIT_HOURS = 2          # 이 시간 동안 사용이 없으면 자동 만료 → 재로그인
+_TS_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _hash_token(token):
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def ensure_sessions_table():
+    with get_engine().begin() as conn:
+        conn.exec_driver_sql(
+            f'CREATE TABLE IF NOT EXISTS "{SESSIONS_TABLE}" ('
+            '"token_hash" TEXT PRIMARY KEY, "username" TEXT, "last_seen" TEXT)')
+
+
+def create_session(username):
+    """새 로그인 토큰 발급. DB에는 해시만 저장(유출 대비). 오래된 세션은 청소."""
+    ensure_sessions_table()
+    token = os.urandom(32).hex()
+    now = datetime.now()
+    with get_engine().begin() as conn:
+        cutoff = (now - pd.Timedelta(days=7)).strftime(_TS_FMT)
+        conn.execute(text(f'DELETE FROM "{SESSIONS_TABLE}" WHERE "last_seen" < :c'), {"c": cutoff})
+        conn.execute(text(f'INSERT INTO "{SESSIONS_TABLE}" ("token_hash","username","last_seen") '
+                          'VALUES (:t,:u,:s)'),
+                     {"t": _hash_token(token), "u": username, "s": now.strftime(_TS_FMT)})
+    return token
+
+
+def _session_user(token):
+    """쿠키 토큰 검증: 마지막 사용이 2시간 이내면 사용자명 반환(+시간 갱신), 아니면 None."""
+    if not token:
+        return None
+    th = _hash_token(token)
+    now = datetime.now()
+    try:
+        ensure_sessions_table()
+        with get_engine().begin() as conn:
+            r = conn.execute(text(
+                f'SELECT "username","last_seen" FROM "{SESSIONS_TABLE}" WHERE "token_hash"=:t'),
+                {"t": th}).fetchone()
+            if not r:
+                return None
+            try:
+                last = datetime.strptime(str(r[1]), _TS_FMT)
+            except Exception:
+                last = None
+            if last is None or (now - last).total_seconds() > IDLE_LIMIT_HOURS * 3600:
+                conn.execute(text(f'DELETE FROM "{SESSIONS_TABLE}" WHERE "token_hash"=:t'), {"t": th})
+                return None
+            conn.execute(text(f'UPDATE "{SESSIONS_TABLE}" SET "last_seen"=:s WHERE "token_hash"=:t'),
+                         {"s": now.strftime(_TS_FMT), "t": th})
+        return r[0]
+    except Exception:
+        return None
+
+
+def touch_session():
+    """화면을 쓸 때마다 마지막 사용시간 갱신 → 2시간 카운트가 계속 리셋됨."""
+    tok = st.session_state.get("auth_token")
+    if not tok:
+        return
+    try:
+        with get_engine().begin() as conn:
+            conn.execute(text(f'UPDATE "{SESSIONS_TABLE}" SET "last_seen"=:s WHERE "token_hash"=:t'),
+                         {"s": datetime.now().strftime(_TS_FMT), "t": _hash_token(tok)})
+    except Exception:
+        pass
+
+
+def drop_session():
+    """로그아웃: DB 세션 즉시 삭제(쿠키가 남아 있어도 더 이상 못 씀)."""
+    tok = st.session_state.get("auth_token")
+    if not tok:
+        return
+    try:
+        with get_engine().begin() as conn:
+            conn.execute(text(f'DELETE FROM "{SESSIONS_TABLE}" WHERE "token_hash"=:t'), {"t": _hash_token(tok)})
+    except Exception:
+        pass
+
+
+def _set_cookie_and_reload(value, max_age):
+    """브라우저 쿠키를 기록/삭제한 뒤 페이지를 새로고침(로그인 유지·로그아웃 공용)."""
+    components.html(
+        "<script>"
+        f'document.cookie = "{AUTH_COOKIE}={value}; path=/; max-age={int(max_age)}; SameSite=Lax";'
+        "window.parent.location.reload();"
+        "</script>", height=0)
+    st.stop()
+
+
+def _cookie_token():
+    """브라우저가 보낸 로그인 유지 쿠키 읽기(구버전 Streamlit이면 None)."""
+    try:
+        return st.context.cookies.get(AUTH_COOKIE)
+    except Exception:
+        return None
+
+
 def _render_login():
     st.title("🔐 온라인팀 미니 ERP")
     if user_count() == 0:
@@ -1606,10 +1713,9 @@ def _render_login():
     if ok:
         rec = get_user(u.strip())
         if rec and str(rec["active"]).upper() != "N" and _verify_pw(p, rec["pw"]):
-            st.session_state["auth_user"] = rec["username"]
-            st.session_state["auth_name"] = rec["display_name"] or rec["username"]
-            st.session_state["auth_role"] = rec["role"]
-            st.rerun()
+            token = create_session(rec["username"])
+            # 쿠키 수명은 넉넉히 30일 — 실제 만료는 서버가 '마지막 사용 2시간'으로 판정
+            _set_cookie_and_reload(token, 30 * 24 * 3600)
         else:
             st.error("ID·비밀번호가 올바르지 않거나 비활성화된 계정이에요.")
     st.caption("계정이 필요하면 관리자(팀장)에게 요청하세요.")
@@ -1618,14 +1724,23 @@ def _render_login():
 def render_user_admin():
     """관리자용 사용자 관리: 목록/활성토글/삭제 + 추가·비번 재설정."""
     me = st.session_state.get("auth_user")
-    for us in list_users():
+    users = list_users()
+    n_admin_active = sum(1 for u in users
+                         if u["role"] == "admin" and str(u["active"]).upper() != "N")
+    for us in users:
         act = str(us["active"]).upper() != "N"
         c = st.columns([3, 1.1, 0.9])
         c[0].caption(f"{'🟢' if act else '⚪'} **{us['display_name']}** ({us['username']}) · "
                      f"{'관리자' if us['role'] == 'admin' else '뷰어'}")
         if c[1].button("비활성" if act else "활성화", key=f"tgl_{us['username']}", use_container_width=True):
-            upsert_user(us["username"], us["display_name"], None, us["role"], "N" if act else "Y")
-            st.rerun()
+            # 잠금 사고 방지: 본인 계정·마지막 관리자 계정은 비활성 불가 (2026-07-31 잠금 사고 재발 방지)
+            if act and us["username"] == me:
+                st.warning("본인 계정은 비활성화할 수 없어요. (잠금 사고 방지)")
+            elif act and us["role"] == "admin" and n_admin_active <= 1:
+                st.warning("마지막 관리자 계정은 비활성화할 수 없어요.")
+            else:
+                upsert_user(us["username"], us["display_name"], None, us["role"], "N" if act else "Y")
+                st.rerun()
         if c[2].button("삭제", key=f"del_{us['username']}", use_container_width=True):
             if us["username"] == me:
                 st.warning("본인 계정은 삭제할 수 없어요.")
@@ -1645,6 +1760,8 @@ def render_user_admin():
             st.error("ID를 입력하세요.")
         elif get_user(nu.strip()) is None and not npw:
             st.error("새 계정은 비밀번호가 필요해요.")
+        elif nu.strip() == me and nr != "admin":
+            st.error("본인 계정의 역할은 뷰어로 바꿀 수 없어요. (관리자 잠금 방지)")
         else:
             upsert_user(nu.strip(), nn.strip() or nu.strip(), npw or None, nr)
             st.success(f"저장 완료 ✅ {nu.strip()}")
@@ -1663,8 +1780,20 @@ def main():
     # ── 로그인 게이트 ──────────────────────────────────────────────
     ensure_users_table()
     if not st.session_state.get("auth_user"):
-        _render_login()
-        return
+        # 1) 쿠키(로그인 유지 토큰)로 자동 로그인 — 마지막 사용 2시간 이내면 유지
+        tok = _cookie_token()
+        uname = _session_user(tok) if tok else None
+        rec = get_user(uname) if uname else None
+        if rec and str(rec["active"]).upper() != "N":
+            st.session_state["auth_user"] = rec["username"]
+            st.session_state["auth_name"] = rec["display_name"] or rec["username"]
+            st.session_state["auth_role"] = rec["role"]
+            st.session_state["auth_token"] = tok
+        else:
+            # 2) 유효한 토큰이 없으면 로그인 화면
+            _render_login()
+            return
+    touch_session()   # 사용 중엔 매 동작마다 2시간 카운트 리셋
     is_admin = st.session_state.get("auth_role") == "admin"
 
     st.title("📊 온라인팀 미니 ERP · 매출 분석")
@@ -1674,9 +1803,10 @@ def main():
         st.caption(f"👋 **{st.session_state.get('auth_name','')}**님 "
                    f"· {'관리자' if is_admin else '뷰어'}")
         if st.button("🚪 로그아웃", use_container_width=True):
-            for _k in ("auth_user", "auth_name", "auth_role"):
+            drop_session()
+            for _k in ("auth_user", "auth_name", "auth_role", "auth_token"):
                 st.session_state.pop(_k, None)
-            st.rerun()
+            _set_cookie_and_reload("", 0)   # 쿠키 삭제 + 새로고침 → 로그인 화면
         st.metric("현재 DB 누적", f"{db_row_count():,} 건")
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
             load_db.clear(); load_master.clear(); st.rerun()
