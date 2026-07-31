@@ -648,14 +648,89 @@ def style_yoy(D):
     return sty
 
 
-def yoy_excel_bytes(D, sheet="분석"):
+# ── 룰13 (2026-07-31): 엑셀 다운로드 = 화면에 보이는 컬러·셀서식 그대로 ──────
+_XL_SEASON_BOLD = {"S/S TOTAL", "F/W TOTAL"}
+_XL_SEASON_SUB = {"Z (공통)", "A (봄)", "B (여름)", "C (가을)", "D (겨울)"}
+_XL_DELTA_SUBS = ("증감율", "증감", "편차")
+
+
+def styled_excel_bytes(disp, sheet="표", first_block_cols=None):
+    """표시용(포맷 문자열) DataFrame을 화면 서식 그대로 엑셀로 변환 (룰13).
+
+    화면과 동일: 헤더 회색+볼드, 구분(인덱스) 연회색, 첫 행 노란 강조(G.TOTAL),
+    시즌 TOTAL 블루그레이 / 개별 시즌 연블루, 증감·편차 +초록/-빨강, 숫자 우측정렬,
+    전셀 얇은 테두리. first_block_cols=첫 기간블록 컬럼 수 → 경계 두꺼운 세로선(룰12).
+    """
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        disp.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "표")
+        ws = w.book.worksheets[0]
+        n_idx = disp.index.nlevels
+        n_rows = len(disp)
+        data_start = ws.max_row - n_rows + 1          # 헤더/빈줄 이후 첫 데이터 행
+        thin = Side(style="thin", color="D9D9D9")
+        thick = Side(style="medium", color="555555")
+        head_fill = PatternFill("solid", fgColor="F4F4F6")
+        idx_fill = PatternFill("solid", fgColor="FAFAFA")
+        gt_fill = PatternFill("solid", fgColor="FFF2B8")
+        sg_fill = PatternFill("solid", fgColor="E3ECF7")
+        ss_fill = PatternFill("solid", fgColor="F4F8FC")
+        bcol = (n_idx + first_block_cols + 1) if first_block_cols else None
+        subs = [c[-1] if isinstance(c, tuple) else str(c) for c in disp.columns]
+
+        # 1) 헤더 영역 (병합 셀 포함 전체)
+        for r in range(1, data_start):
+            for k in range(1, ws.max_column + 1):
+                cell = ws.cell(r, k)
+                cell.fill = head_fill
+                cell.font = Font(bold=True, color="111111")
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+        # 2) 데이터 영역 — 행 성격(첫행 노랑·시즌 블루)과 증감 색
+        for ri in range(n_rows):
+            r = data_start + ri
+            ilab = disp.index[ri]
+            labs = [str(x) for x in (ilab if isinstance(ilab, tuple) else (ilab,))]
+            if ri == 0:                                # 룰6: 첫 행(G.TOTAL/합계) 노란 강조
+                fill, bold = gt_fill, True
+            elif any(x in _XL_SEASON_BOLD for x in labs):
+                fill, bold = sg_fill, True
+            elif any(x in _XL_SEASON_SUB for x in labs):
+                fill, bold = ss_fill, False
+            else:
+                fill, bold = None, False
+            for k in range(1, n_idx + 1):              # 구분(인덱스) 셀
+                c = ws.cell(r, k)
+                c.fill = fill or idx_fill
+                c.font = Font(bold=True, color="111111")
+                c.alignment = Alignment(horizontal="left", vertical="center")
+            for cj in range(len(disp.columns)):        # 데이터 셀
+                c = ws.cell(r, n_idx + 1 + cj)
+                c.alignment = Alignment(horizontal="right", vertical="center")
+                if fill:
+                    c.fill = fill
+                v = disp.iat[ri, cj]
+                if subs[cj] in _XL_DELTA_SUBS and isinstance(v, str) and v[:1] in "+-":
+                    c.font = Font(bold=True, color="C62828" if v.startswith("-") else "1F8A4C")
+                elif bold:
+                    c.font = Font(bold=True, color="111111")
+        # 3) 테두리 (경계 컬럼은 왼쪽 두꺼운 선 — 룰12) + 컬럼 폭
+        for r in range(1, ws.max_row + 1):
+            for k in range(1, ws.max_column + 1):
+                ws.cell(r, k).border = Border(
+                    left=(thick if (bcol and k == bcol) else thin),
+                    right=thin, top=thin, bottom=thin)
+        for k in range(1, ws.max_column + 1):
+            ws.column_dimensions[get_column_letter(k)].width = 14 if k <= n_idx else 10.5
+    return buf.getvalue()
+
+
+def yoy_excel_bytes(D, sheet="분석", first_block_cols=None):
     disp = D.copy()
     for col in disp.columns:
         disp[col] = [_fmt_cell(col, v) for v in disp[col]]
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        disp.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "분석")   # 시트명 금지문자('/' 등) 치환
-    return buf.getvalue()
+    return styled_excel_bytes(disp, sheet, first_block_cols)   # 룰13: 화면 서식 그대로
 
 
 # ── 공통(룰11 · 2026-07-31): 모든 조회 표 엑셀 다운로드 기본 제공 ──────────────
@@ -671,12 +746,10 @@ def _safe_name(s):
     return s.strip()
 
 
-def table_excel_bytes(disp, sheet="표"):
-    """화면 표시용(포맷된) DataFrame을 그대로 엑셀로 변환 — 일반 표 공용 다운로드(룰11)."""
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        disp.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "표")
-    return buf.getvalue()
+def table_excel_bytes(disp, sheet="표", first_block_cols=None):
+    """화면 표시용(포맷된) DataFrame을 엑셀로 변환 — 일반 표 공용 다운로드(룰11).
+    룰13: 화면 서식(색·볼드·정렬·테두리·블록 경계선) 그대로 반영."""
+    return styled_excel_bytes(disp, sheet, first_block_cols)
 
 
 def _money_note():
@@ -720,6 +793,18 @@ table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) th{padding-left:18px;fo
 """
 
 
+def block_border(sty, n):
+    """룰12 (2026-07-31): 당월/연간 기간블록 경계에 두꺼운 세로선 — n=첫 블록 컬럼 수.
+
+    pandas Styler가 셀에 붙이는 col{n} 클래스(헤더 th·데이터 td 공통)를 이용해
+    해당 표에만 스코프된 CSS로 경계선을 그린다(다른 표 영향 없음).
+    """
+    return sty.set_table_styles(
+        [{"selector": f"th.col{n}", "props": [("border-left", "3px solid #555555")]},
+         {"selector": f"td.col{n}", "props": [("border-left", "3px solid #555555")]}],
+        overwrite=False)
+
+
 def render_styled_table(sty, extra_class="", extra_css=""):
     """Styler를 HTML 표로 렌더(가로여백 축소·헤더검정·G.TOTAL 노란강조). 증감 빨강/초록은 Styler가 유지."""
     cls = ("erp-tbl " + extra_class).strip()
@@ -747,16 +832,20 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
         _name, _map = extra
         D.insert(0, (_name, ""),
                  ["" if k == "G.TOTAL" else str(_map.get(str(k), "") or "") for k in D.index])
+    nblk = sum(1 for c in D.columns if c[0] == blk_labels[0]) if month is not None else None
     h1, h2 = st.columns([4, 1])
     h1.markdown(f"**{title}**{_NOTE_FLOAT}", unsafe_allow_html=True)
-    h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28]),
+    h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28], first_block_cols=nblk),
                        file_name=f"{_safe_name(title)[:24]}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key=f"dl_{key}", use_container_width=True)
+    sty = style_yoy(D)
+    if nblk:
+        sty = block_border(sty, nblk)   # 룰12: 당월/연간 경계 두꺼운 선
     if season_rows:
-        render_styled_table(style_yoy(D), extra_class="erp-season", extra_css=_SEASON_ROW_CSS)
+        render_styled_table(sty, extra_class="erp-season", extra_css=_SEASON_ROW_CSS)
     else:
-        render_styled_table(style_yoy(D))   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
+        render_styled_table(sty)   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
 
 
 def render_flagship(df):
@@ -1389,7 +1478,8 @@ def _wk_style_table(bm, by, idx, cy, py):
     for col in D.columns:
         if col[1] in ("증감율", "편차"):
             sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
-    return sty.set_properties(**{"text-align": "right"}), disp
+    sty = block_border(sty.set_properties(**{"text-align": "right"}), len(mcols))   # 룰12: 당월/누계 경계선
+    return sty, disp
 
 
 def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, show_plan=True):
@@ -1471,14 +1561,14 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
     for col in D.columns:
         if col[1] in ("증감율", "편차"):
             sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
-    sty = sty.set_properties(**{"text-align": "right"})
+    sty = block_border(sty.set_properties(**{"text-align": "right"}), len(mcols))   # 룰12: 당월/누계 경계선
 
     # 룰11: 제목 + 우측 일반 엑셀 다운로드 버튼 (2026-07-31)
     d1, d2 = st.columns([5, 1])
     d1.markdown(f"**🔍 {label} · 매장별 상세**  "
                 f"<span style='color:#888;font-size:0.8rem;'>(매장 {len(store_rows)}개 · 비중=해당 그룹 내 · 매출 큰 순)</span>"
                 f"{_NOTE_FLOAT}", unsafe_allow_html=True)
-    d2.download_button("⬇ 엑셀", table_excel_bytes(disp, f"{label} 매장별"),
+    d2.download_button("⬇ 엑셀", table_excel_bytes(disp, f"{label} 매장별", first_block_cols=len(mcols)),
                        file_name=f"{_safe_name(label)}_매장별상세.xlsx", mime=XLSX_MIME,
                        key=f"wk_dl_drill_{label}", use_container_width=True)
     render_styled_table(sty)
@@ -1505,7 +1595,8 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
     i1.markdown(f"**🔍 {label} · 아이템그룹별 상세**  "
                 f"<span style='color:#888;font-size:0.8rem;'>(비중=해당 그룹 내 · G.TOTAL=선택 전체)</span>"
                 f"{_NOTE_FLOAT}", unsafe_allow_html=True)
-    i2.download_button("⬇ 엑셀", table_excel_bytes(disp, f"{label} 아이템"),
+    _nm = sum(1 for c in disp.columns if c[0] == "당월 실적")   # 당월 블록 컬럼 수(7)
+    i2.download_button("⬇ 엑셀", table_excel_bytes(disp, f"{label} 아이템", first_block_cols=_nm),
                        file_name=f"{_safe_name(label)}_아이템그룹별상세.xlsx", mime=XLSX_MIME,
                        key=f"wk_dl_item_{label}", use_container_width=True)
     render_styled_table(sty)
@@ -1609,7 +1700,8 @@ def render_weekly_report(df):
         # 룰11: 제목 + 우측 일반 엑셀 다운로드 버튼 (2026-07-31)
         g1, g2 = st.columns([5, 1])
         g1.markdown("##### 👤 매장 담당별 분석" + _NOTE_FLOAT, unsafe_allow_html=True)
-        g2.download_button("⬇ 엑셀", table_excel_bytes(disp2, "매장 담당별 분석"),
+        _nm2 = sum(1 for c in disp2.columns if c[0] == "당월 실적")   # 당월 블록 컬럼 수(7)
+        g2.download_button("⬇ 엑셀", table_excel_bytes(disp2, "매장 담당별 분석", first_block_cols=_nm2),
                            file_name=f"매장담당별분석_{asof.date()}.xlsx", mime=XLSX_MIME,
                            key="wk_dl_mgr", use_container_width=True)
         render_styled_table(sty2)
