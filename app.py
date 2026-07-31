@@ -1672,14 +1672,16 @@ def drop_session():
         pass
 
 
-def _set_cookie_and_reload(value, max_age):
-    """브라우저 쿠키를 기록/삭제한 뒤 페이지를 새로고침(로그인 유지·로그아웃 공용)."""
+def _write_cookie(value, max_age):
+    """브라우저 쿠키 기록/삭제(로그인 유지용). 0높이 컴포넌트로 JS만 실행 — 화면·로그인 흐름에 영향 없음.
+
+    ※ 쿠키 기록이 실패해도 로그인은 st.session_state로 이미 성공한 상태라 사용엔 지장 없음
+      (그 경우 하드새로고침 때만 재로그인 — 기존과 동일).
+    """
     components.html(
         "<script>"
         f'document.cookie = "{AUTH_COOKIE}={value}; path=/; max-age={int(max_age)}; SameSite=Lax";'
-        "window.parent.location.reload();"
         "</script>", height=0)
-    st.stop()
 
 
 def _cookie_token():
@@ -1717,9 +1719,14 @@ def _render_login():
     if ok:
         rec = get_user(u.strip())
         if rec and str(rec["active"]).upper() != "N" and _verify_pw(p, rec["pw"]):
+            # 로그인은 세션에 즉시 반영(쿠키 성공 여부와 무관하게 항상 성공).
+            # 로그인 유지 쿠키는 로그인 후 화면(사이드바)에서 매 실행 기록/갱신.
             token = create_session(rec["username"])
-            # 쿠키 수명은 넉넉히 30일 — 실제 만료는 서버가 '마지막 사용 2시간'으로 판정
-            _set_cookie_and_reload(token, 30 * 24 * 3600)
+            st.session_state["auth_user"] = rec["username"]
+            st.session_state["auth_name"] = rec["display_name"] or rec["username"]
+            st.session_state["auth_role"] = rec["role"]
+            st.session_state["auth_token"] = token
+            st.rerun()
         else:
             st.error("ID·비밀번호가 올바르지 않거나 비활성화된 계정이에요.")
     st.caption("계정이 필요하면 관리자(팀장)에게 요청하세요.")
@@ -1733,19 +1740,30 @@ def render_user_admin():
                          if u["role"] == "admin" and str(u["active"]).upper() != "N")
     for us in users:
         act = str(us["active"]).upper() != "N"
-        c = st.columns([3, 1.1, 0.9])
+        is_adm = us["role"] == "admin"
+        c = st.columns([2.5, 1.2, 1.1, 0.9])
         c[0].caption(f"{'🟢' if act else '⚪'} **{us['display_name']}** ({us['username']}) · "
-                     f"{'관리자' if us['role'] == 'admin' else '뷰어'}")
-        if c[1].button("비활성" if act else "활성화", key=f"tgl_{us['username']}", use_container_width=True):
+                     f"{'관리자' if is_adm else '뷰어'}")
+        # 역할 전환 버튼 (2026-07-31 추가): 목록에서 바로 관리자↔뷰어 변경
+        if c[1].button("뷰어로" if is_adm else "관리자로", key=f"role_{us['username']}", use_container_width=True):
+            if is_adm and us["username"] == me:
+                st.warning("본인 계정의 역할은 스스로 낮출 수 없어요. (관리자 잠금 방지)")
+            elif is_adm and n_admin_active <= 1:
+                st.warning("마지막 관리자는 뷰어로 바꿀 수 없어요.")
+            else:
+                upsert_user(us["username"], us["display_name"], None,
+                            "viewer" if is_adm else "admin", us["active"])
+                st.rerun()
+        if c[2].button("비활성" if act else "활성화", key=f"tgl_{us['username']}", use_container_width=True):
             # 잠금 사고 방지: 본인 계정·마지막 관리자 계정은 비활성 불가 (2026-07-31 잠금 사고 재발 방지)
             if act and us["username"] == me:
                 st.warning("본인 계정은 비활성화할 수 없어요. (잠금 사고 방지)")
-            elif act and us["role"] == "admin" and n_admin_active <= 1:
+            elif act and is_adm and n_admin_active <= 1:
                 st.warning("마지막 관리자 계정은 비활성화할 수 없어요.")
             else:
                 upsert_user(us["username"], us["display_name"], None, us["role"], "N" if act else "Y")
                 st.rerun()
-        if c[2].button("삭제", key=f"del_{us['username']}", use_container_width=True):
+        if c[3].button("삭제", key=f"del_{us['username']}", use_container_width=True):
             if us["username"] == me:
                 st.warning("본인 계정은 삭제할 수 없어요.")
             else:
@@ -1767,7 +1785,10 @@ def render_user_admin():
         elif nu.strip() == me and nr != "admin":
             st.error("본인 계정의 역할은 뷰어로 바꿀 수 없어요. (관리자 잠금 방지)")
         else:
-            upsert_user(nu.strip(), nn.strip() or nu.strip(), npw or None, nr)
+            # 기존 계정 갱신 시 이름을 비워 두면 기존 표시 이름 유지 (ID로 덮어쓰지 않음)
+            prev = get_user(nu.strip())
+            keep_name = nn.strip() or (prev["display_name"] if prev else nu.strip())
+            upsert_user(nu.strip(), keep_name, npw or None, nr)
             st.success(f"저장 완료 ✅ {nu.strip()}")
             st.rerun()
 
@@ -1804,13 +1825,17 @@ def main():
     fresh_slot = st.container()   # 타이틀 바로 아래: 매출 데이터 최종 업데이트 일자 표기 자리
 
     with st.sidebar:
+        # 로그인 유지 쿠키를 매 실행 기록/갱신 (수명 30일 — 실제 만료는 서버가 '마지막 사용 2시간'으로 판정)
+        if st.session_state.get("auth_token"):
+            _write_cookie(st.session_state["auth_token"], 30 * 24 * 3600)
         st.caption(f"👋 **{st.session_state.get('auth_name','')}**님 "
                    f"· {'관리자' if is_admin else '뷰어'}")
         if st.button("🚪 로그아웃", use_container_width=True):
-            drop_session()
+            drop_session()   # DB 세션 삭제 — 쿠키가 브라우저에 남아 있어도 즉시 무효
             for _k in ("auth_user", "auth_name", "auth_role", "auth_token"):
                 st.session_state.pop(_k, None)
-            _set_cookie_and_reload("", 0)   # 쿠키 삭제 + 새로고침 → 로그인 화면
+            _write_cookie("", 0)   # 쿠키 삭제 시도
+            st.rerun()
         st.metric("현재 DB 누적", f"{db_row_count():,} 건")
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
             load_db.clear(); load_master.clear(); st.rerun()
