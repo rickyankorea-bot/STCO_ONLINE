@@ -644,9 +644,17 @@ def render_styled_table(sty):
                 unsafe_allow_html=True)
 
 
-def perf_table(cur, prev, dim, order_list, title, key):
-    """제목 + 우측 엑셀버튼 + 전년비교 표 렌더."""
+def perf_table(cur, prev, dim, order_list, title, key, extra=None):
+    """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
+
+    extra=(컬럼명, {행라벨: 값})이면 표 맨 앞(행이름 바로 옆)에 텍스트 컬럼을 삽입
+    — 예: 유통채널별 표의 '담당자'. 엑셀 다운로드에도 그대로 포함된다.
+    """
     D = yoy_frame(cur, prev, dim, order_list)
+    if extra:
+        _name, _map = extra
+        D.insert(0, (_name, ""),
+                 ["" if k == "G.TOTAL" else str(_map.get(str(k), "") or "") for k in D.index])
     h1, h2 = st.columns([4, 1])
     h1.markdown(f"**{title}**{_NOTE_FLOAT}", unsafe_allow_html=True)
     h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28]),
@@ -772,20 +780,33 @@ def render_channel_brand(df):
         st.info("데이터를 먼저 적재하세요.")
         return
     d = df[df["_판매일"].notna()].copy()
+    # 매장 담당자 매핑 (매장 마스터의 담당자 기준) — 담당자 컬럼·담당 필터용
+    master = load_master()
+    if not master.empty and "담당자" in master.columns:
+        _mgr_map = dict(zip(master["매장코드"].astype(str).str.strip(),
+                            master["담당자"].astype(str).str.strip()))
+        d["_담당자"] = d["매장코드"].astype(str).str.strip().map(_mgr_map)
+    else:
+        d["_담당자"] = None
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     default_start = (pd.to_datetime(dmax) - pd.Timedelta(days=6)).date()
 
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 백만원 · 판가율=실판가÷최초가(가중) · 기본기간=최근 1주")
     rng = st.date_input("조회기간 (기본: 최근 1주)", value=(default_start, dmax),
                         min_value=dmin, max_value=dmax, key="cb_rng")
-    # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 · 빈칸=전체
-    cb1, cb2, cb3 = st.columns(3)
+    # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 → 매장 담당 · 빈칸=전체
+    cb1, cb2, cb3, cb4 = st.columns(4)
     brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
     ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
     seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
+    _mans = sorted({str(m).strip() for m in d["_담당자"].dropna().astype(str)
+                    if str(m).strip() and str(m).strip().lower() not in ("nan", "none")})
     selb = cb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cb_brand")
     sela = cb2.multiselect("연차별", ages, default=[], placeholder="전체", key="cb_age")
     sels = cb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cb_season")
+    selm = cb4.multiselect("매장 담당", _mans, default=[], placeholder="전체", key="cb_mgr")
+    if not _mans:
+        st.caption("※ 매장 기준정보(담당자)가 없어 담당자 컬럼·필터가 비어 있어요 — 사이드바에서 매장 기준정보를 업로드하면 채워져요.")
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
         st.info("기간(시작~끝)을 선택하세요.")
@@ -798,6 +819,8 @@ def render_channel_brand(df):
         base = base[base["연차"].isin(sela)]
     if sels and "시즌명" in base.columns:
         base = base[base["시즌명"].isin(sels)]
+    if selm and "_담당자" in base.columns:
+        base = base[base["_담당자"].astype(str).str.strip().isin(selm)]
     cur = base[(base["_판매일"] >= s) & (base["_판매일"] <= e)]
     prev = base[(base["_판매일"] >= s - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
 
@@ -811,7 +834,11 @@ def render_channel_brand(df):
         st.warning("전년 동기간 데이터가 없어요. 기간을 조정하거나 전년 로우데이터를 적재하세요.")
 
     st.markdown("### A. 유통채널별 (매출 순)")
-    perf_table(cur, prev, "_채널", None, "유통채널별 매출현황", "cb_ch")
+    # 매장명(행) → 담당자 매핑: 표 맨 앞 '담당자' 컬럼으로 표시
+    _cm = d[["_채널", "_담당자"]].astype(str).drop_duplicates(subset=["_채널"])
+    chan_mgr = {c: ("" if m.strip().lower() in ("nan", "none") else m.strip())
+                for c, m in zip(_cm["_채널"], _cm["_담당자"])}
+    perf_table(cur, prev, "_채널", None, "유통채널별 매출현황", "cb_ch", extra=("담당자", chan_mgr))
     st.caption("※ 채널을 자사몰/외부몰 등 그룹으로 묶으려면 '채널 기준정보(매핑)'가 필요해요 — 준비되면 그룹 집계도 추가해드릴게요.")
 
     st.markdown("### B. 브랜드별")
