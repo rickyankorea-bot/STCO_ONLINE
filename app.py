@@ -938,6 +938,99 @@ def render_flagship(df):
                    month=(curb_m, prevb_m), blk_labels=blk)
 
 
+# ── 대시보드 채널 통합 (2026-07-31): 수수료 조건 때문에 2개로 나눠 등록한 매장을 실제 채널로 합산 ──
+CH_MERGE = {"SD185": "쿠팡토탈", "SD184": "쿠팡토탈",
+            "SD165": "네이버토탈", "SD174": "네이버토탈"}
+
+# 채널 리그 정의 (매장 마스터 '리그구분' 값과 동일해야 함)
+LEAGUES = [("1부리그", "🏆", "#2f4d7d", "메이저 채널"),
+           ("2부리그", "🚀", "#4a7ab5", "도전 채널"),
+           ("꿈나무리그", "🌱", "#3f9464", "루키 채널")]
+
+
+def _league_board_html(lg_name, icon, hcolor, subtitle, entries, show_n=11):
+    """채널 리그 보드 HTML (목업 v3 컨펌). entries=[(채널명, {c,p,codes}) 누계매출 내림차순].
+
+    · 매출 있는 채널 11위까지 기본 노출(경쟁심!), 12위 이하는 <details> 펼쳐보기
+    · 막대=리그 내 상대 크기 · 🥇🥈🥉 · 전년비 색 · 순위변동(전년 동기간 리그 내 순위) · ⚡성장1위 배지
+    """
+    head = (f"<div style='background:{hcolor};color:#fff;padding:9px 12px;font-weight:800;"
+            f"font-size:0.92rem;display:flex;justify-content:space-between;align-items:center;'>"
+            f"<span>{icon} {lg_name}</span>"
+            f"<span style='font-weight:400;font-size:0.7rem;opacity:0.85;'>{subtitle} · 매출 {len(entries)}개</span></div>")
+    if not entries:
+        return ("<div style='border:1px solid #e3e6ea;border-radius:10px;overflow:hidden;'>" + head +
+                "<div style='padding:14px;color:#999;font-size:0.8rem;'>이 리그에 매출 있는 매장이 없어요.</div></div>")
+    emap = dict(entries)
+    prev_rank = {k: i + 1 for i, k in enumerate(
+        sorted([k for k, e in entries if e["p"] > 0], key=lambda k: -emap[k]["p"]))}
+    growths = {k: (e["c"] - e["p"]) / e["p"] for k, e in entries if e["p"] > 0}
+    # 리그별 1위 배지 4종 (2026-07-31 추가): 매출 1등이 아니어도 주인공이 나오게
+    _pgr = {k: e["c"] / e["o"] for k, e in entries if e.get("o", 0) > 0}
+    _unit = {k: e["c"] / e["q"] for k, e in entries if e.get("q", 0) > 0}
+    _sins = {k: e.get("s", 0.0) for k, e in entries if e.get("s", 0.0) > 0}
+    _winners = [
+        (max(growths, key=growths.get) if growths else None, ("⚡성장1위", "#fff3cd", "#ffe08a", "#8a6d00")),
+        (max(_pgr, key=_pgr.get) if _pgr else None, ("💎판가율1위", "#f3ecff", "#d3bdf5", "#5b3d99")),
+        (max(_unit, key=_unit.get) if _unit else None, ("💰평균단가1위", "#e6f6f1", "#a8dfcd", "#0f6b4f")),
+        (max(_sins, key=_sins.get) if _sins else None, ("🆕신상판매1위", "#e5f1fd", "#a9cdf2", "#1a5da8")),
+    ]
+    star_badges = {}   # 같은 채널이 여러 배지를 휩쓸 수도 있음 → 리스트로 누적
+    for k, (txt, bg, bd, fg) in _winners:
+        if k is None:
+            continue
+        star_badges.setdefault(k, []).append(
+            f"<span style='background:{bg};border:1px solid {bd};color:{fg};border-radius:8px;"
+            f"font-size:0.6rem;font-weight:800;padding:0 4px;margin-left:3px;white-space:nowrap;'>{txt}</span>")
+    max_c = entries[0][1]["c"] or 1.0
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+    def row_html(rk, k, e):
+        g = growths.get(k)
+        gtxt = (f"<span style='color:{'#1f8a4c' if g >= 0 else '#c62828'};'>{g*100:+.1f}%</span>"
+                if g is not None else "<span style='color:#1f8a4c;'>신규</span>")
+        if e["p"] > 0:
+            pr = prev_rank.get(k)
+            dv = (pr - rk) if pr else 0
+            if dv > 0:
+                mv = f"<span style='color:#1f8a4c;font-weight:800;'>▲{dv}</span>"
+            elif dv < 0:
+                mv = f"<span style='color:#c62828;font-weight:800;'>▼{-dv}</span>"
+            else:
+                mv = "<span style='color:#999;'>—</span>"
+        else:
+            mv = "<span style='color:#1f8a4c;font-weight:800;'>NEW</span>"
+        badge = "".join(star_badges.get(k, []))
+        sub = ""
+        if k in set(CH_MERGE.values()):
+            sub = ("<small style='display:block;color:#999;font-weight:400;font-size:0.66rem;'>"
+                   + "+".join(sorted(set(e["codes"]))) + " 합산</small>")
+        return (
+            "<div style='display:flex;align-items:center;gap:7px;padding:6px 10px;"
+            "border-top:1px solid #f0f2f4;font-size:0.78rem;'>"
+            f"<span style='width:26px;text-align:center;font-weight:800;flex:none;'>{medals.get(rk, rk)}</span>"
+            f"<span style='width:96px;flex:none;font-weight:600;line-height:1.25;'>{k}{badge}{sub}</span>"
+            f"<span style='flex:1;'><span style='display:block;height:12px;border-radius:2px;"
+            f"background:#2f6bb0;width:{max(e['c']/max_c*100, 1):.0f}%;'></span></span>"
+            f"<span style='flex:none;width:92px;text-align:right;font-size:0.74rem;font-weight:700;"
+            f"line-height:1.3;'>{e['c']/1e6:,.1f}<br>{gtxt}</span>"
+            f"<span style='flex:none;width:34px;text-align:center;font-size:0.7rem;'>{mv}</span></div>")
+
+    rows_main = "".join(row_html(i + 1, k, e) for i, (k, e) in enumerate(entries[:show_n]))
+    rows_rest = ""
+    if len(entries) > show_n:
+        inner = "".join(row_html(i + 1, k, e) for i, (k, e) in enumerate(entries) if i >= show_n)
+        rows_rest = (f"<details><summary style='padding:6px 12px;font-size:0.72rem;color:#666;"
+                     f"cursor:pointer;'>{show_n + 1}위 이하 {len(entries) - show_n}개 보기</summary>{inner}</details>")
+    tot_c = sum(e["c"] for _, e in entries)
+    tot_p = sum(e["p"] for _, e in entries)
+    yoyt = f" · 전년비 {(tot_c - tot_p)/tot_p*100:+.1f}%" if tot_p else ""
+    foot = (f"<div style='padding:6px 12px;background:#fafafc;border-top:1px solid #eee;"
+            f"font-size:0.7rem;color:#888;'>리그 합계 {tot_c/1e6:,.1f}{yoyt}</div>")
+    return ("<div style='border:1px solid #e3e6ea;border-radius:10px;overflow:hidden;'>"
+            + head + rows_main + rows_rest + foot + "</div>")
+
+
 def render_dashboard(df):
     """종합 대시보드 (2026-07-31 전면 개편 · 목업 컨펌) — 전체 그림 + 자동 인사이트.
 
@@ -1028,7 +1121,68 @@ def render_dashboard(df):
     st.plotly_chart(fig, use_container_width=True)
     st.caption("※ 남은 달은 계획 점선만 보여요 — 앞으로 채울 목표. 막대에 마우스를 올리면 값이 떠요.")
 
-    # ── ③ 자동 인사이트 ──
+    # ── ③ 채널 리그 랭킹 (2026-07-31 목업 v3 컨펌) — 월별 매출 바로 아래 ──
+    #    쿠팡토탈(SD185+SD184)·네이버토탈(SD165+SD174) 합산 = 대시보드 채널 공통 기준(인사이트 포함)
+    chan = {}
+    if "매장코드" in d.columns:
+        code26 = cur_y["매장코드"].astype(str).str.strip()
+        code25 = prev_y["매장코드"].astype(str).str.strip()
+        cs = cur_y.groupby(code26, observed=True)["_매출액"].sum()
+        ps = prev_y.groupby(code25, observed=True)["_매출액"].sum()
+        os_ = cur_y.groupby(code26, observed=True)["_최초가매출"].sum()   # 판가율 1위용
+        qs_ = cur_y.groupby(code26, observed=True)["_수량"].sum()         # 평균단가 1위용
+        if "연차" in cur_y.columns:                                        # 신상판매 1위용
+            _sin = cur_y[cur_y["연차"].isin(["신상", "내년신상"])]
+            ss_ = _sin.groupby(_sin["매장코드"].astype(str).str.strip(), observed=True)["_매출액"].sum()
+        else:
+            ss_ = pd.Series(dtype="float64")
+        if "매장명" in d.columns:
+            _nm = d[["매장코드", "매장명"]].astype(str)
+            name_of = dict(zip(_nm["매장코드"].str.strip(), _nm["매장명"]))
+        else:
+            name_of = {}
+        mast = load_master()
+        has_league = (mast is not None) and (not mast.empty) and ("리그구분" in mast.columns)
+        lg_of_code = {}
+        if has_league:
+            for _, mr in mast.iterrows():
+                _lg = str(mr.get("리그구분", "")).strip()
+                if _lg and _lg.lower() not in ("nan", "none"):
+                    lg_of_code[str(mr.get("매장코드", "")).strip()] = _lg
+        for c in set(cs.index) | set(ps.index):
+            key = CH_MERGE.get(c, name_of.get(c, c))
+            e = chan.setdefault(key, {"c": 0.0, "p": 0.0, "o": 0.0, "q": 0.0, "s": 0.0, "codes": []})
+            e["c"] += float(cs.get(c, 0.0))
+            e["p"] += float(ps.get(c, 0.0))
+            e["o"] += float(os_.get(c, 0.0))
+            e["q"] += float(qs_.get(c, 0.0))
+            e["s"] += float(ss_.get(c, 0.0))
+            e["codes"].append(c)
+        for key, e in chan.items():
+            members = sorted(e["codes"], key=lambda x: -float(cs.get(x, 0.0)))
+            e["lg"] = next((lg_of_code[x] for x in members if x in lg_of_code), None)
+
+        st.markdown("### 🏟️ 채널 리그 랭킹 — 1부 · 2부 · 꿈나무")
+        if not has_league:
+            st.info("매장 마스터에 **'리그구분'** 컬럼(값: 1부리그/2부리그/꿈나무리그)을 추가해 "
+                    "업로드하면 리그 보드가 채워져요. 사이드바 → 매장 기준정보 업로드.")
+        else:
+            cols3 = st.columns(3)
+            for (lg_name, icon, hcolor, subtitle), colx in zip(LEAGUES, cols3):
+                entries = [(k, e) for k, e in chan.items() if e.get("lg") == lg_name and e["c"] > 0]
+                entries.sort(key=lambda t: -t[1]["c"])
+                with colx:
+                    st.markdown(_league_board_html(lg_name, icon, hcolor, subtitle, entries),
+                                unsafe_allow_html=True)
+            n_un = sum(1 for e in chan.values() if e["c"] > 0 and not e.get("lg"))
+            note = ("리그당 매출 있는 채널 11위까지 기본 노출(12위 이하는 펼쳐보기) · 막대=리그 내 상대 크기 · "
+                    "순위변동=전년 동기간 리그 내 순위 대비 · 쿠팡토탈=SD185+SD184 · 네이버토탈=SD165+SD174 합산 · "
+                    "리그별 1위 배지 4종: ⚡성장(전년비 성장률)·💎판가율(실판가÷최초가)·💰평균단가(실판가÷수량)·🆕신상판매(신상+내년신상 매출)")
+            if n_un:
+                note += f" · 리그 미지정 {n_un}개 채널은 랭킹 미포함(마스터에 리그구분 입력 시 반영)"
+            st.caption(note)
+
+    # ── ④ 자동 인사이트 ──
     def _topdiff(cur, prev, col):
         a = cur.groupby(col, observed=True)["_매출액"].sum()
         b = prev.groupby(col, observed=True)["_매출액"].sum()
@@ -1043,8 +1197,13 @@ def render_dashboard(df):
         return f"<b>{name}</b> <span style='color:{color};font-weight:700'>{r['d']/1e6:+,.1f}</span>{pct}"
 
     lines = []
-    if not prev_y.empty and "_채널" in d.columns:
-        ch = _topdiff(cur_y, prev_y, "_채널")
+    if chan and not prev_y.empty:
+        # 채널 인사이트도 쿠팡토탈·네이버토탈 통합 기준으로 계산
+        chdf = pd.DataFrame([(k, e["c"], e["p"]) for k, e in chan.items()],
+                            columns=["k", "c", "p"]).set_index("k")
+        chdf = chdf[(chdf["c"] != 0) | (chdf["p"] != 0)]
+        chdf["d"] = chdf["c"] - chdf["p"]
+        ch = chdf.sort_values("d", ascending=False)
         ups = ch[ch["d"] > 0].head(2)
         dns = ch[ch["d"] < 0].tail(2).iloc[::-1]
         if not ups.empty:
@@ -1127,23 +1286,7 @@ def render_dashboard(df):
         else:
             st.info("전년 데이터가 있어야 구성 비교가 가능해요.")
 
-    # ── ⑤ 채널 TOP10 (색=전년비) ──
-    st.markdown(f"**채널 TOP10 ({sc}년 누계 매출 · 색=전년비)**")
-    if "_채널" in d.columns:
-        cc = cur_y.groupby("_채널", observed=True)["_매출액"].sum().sort_values(ascending=False).head(10)
-        ppv = prev_y.groupby("_채널", observed=True)["_매출액"].sum()
-        names = [str(x) for x in cc.index]
-        grow = [((float(cc[i]) - float(ppv.get(i, 0))) / float(ppv.get(i, 0))) if float(ppv.get(i, 0)) else None
-                for i in cc.index]
-        txt = [f"{float(v)/1e6:,.1f}" + (f" ({g*100:+.1f}%)" if g is not None else " (신규)")
-               for v, g in zip(cc.values, grow)]
-        colsig = ["#1f8a4c" if (g is None or g >= 0) else "#c62828" for g in grow]
-        figd = go.Figure(go.Bar(x=[float(v) / 1e6 for v in cc.values][::-1], y=names[::-1],
-                                orientation="h", marker_color=colsig[::-1],
-                                text=txt[::-1], textposition="outside"))
-        figd.update_layout(height=380, margin=dict(t=10, b=0, l=0, r=10),
-                           xaxis_title=f"{sc}년 누계(백만)")
-        st.plotly_chart(figd, use_container_width=True)
+    # (기존 '채널 TOP10' 차트는 채널 리그 랭킹 보드가 대체 — 2026-07-31)
 
 
 def render_channel_brand(df):
@@ -1222,7 +1365,8 @@ def render_channel_brand(df):
 # 매장(채널) 기준정보 마스터  ─ 업로드 시 전체 교체
 # ==============================================================================
 MASTER_TABLE = "channel_master"
-MASTER_COLS = ["매장코드", "매장명", "담당자", "유통성격", "채널소유", "채널스토리"]
+MASTER_COLS = ["매장코드", "매장명", "담당자", "유통성격", "채널소유", "채널스토리", "리그구분"]
+# ↑ 리그구분 (2026-07-31 추가): 1부리그/2부리그/꿈나무리그 — 대시보드 채널 리그 랭킹용
 
 
 def read_master_file(uploaded_file):
