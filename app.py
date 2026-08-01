@@ -947,6 +947,11 @@ LEAGUES = [("1부리그", "🏆", "#2f4d7d", "메이저 채널"),
            ("2부리그", "🚀", "#4a7ab5", "도전 채널"),
            ("꿈나무리그", "🌱", "#3f9464", "루키 채널")]
 
+# 🆕신상판매 1위 배지 산출 제외 (2026-08-01 중태님 지시): 본사 직영 온라인 통합몰(SD065)은
+# 신상 매출이 구조적으로 항상 1등이라 재미가 없음 → 이 배지 후보에서만 제외.
+# ※ 랭킹 순위·다른 배지(성장/판가율/평균단가)에는 그대로 참여. 매장코드 기준이라 매장명이 바뀌어도 유지.
+SINSANG_BADGE_EXCL = {"SD065"}
+
 
 def _league_board_html(lg_name, icon, hcolor, subtitle, entries, show_n=11):
     """채널 리그 보드 HTML (목업 v3 컨펌). entries=[(채널명, {c,p,codes}) 누계매출 내림차순].
@@ -968,7 +973,9 @@ def _league_board_html(lg_name, icon, hcolor, subtitle, entries, show_n=11):
     # 리그별 1위 배지 4종 (2026-07-31 추가): 매출 1등이 아니어도 주인공이 나오게
     _pgr = {k: e["c"] / e["o"] for k, e in entries if e.get("o", 0) > 0}
     _unit = {k: e["c"] / e["q"] for k, e in entries if e.get("q", 0) > 0}
-    _sins = {k: e.get("s", 0.0) for k, e in entries if e.get("s", 0.0) > 0}
+    _sins = {k: e.get("s", 0.0) for k, e in entries
+             if e.get("s", 0.0) > 0
+             and not (set(e.get("codes", [])) & SINSANG_BADGE_EXCL)}   # 통합몰(SD065) 제외
     _winners = [
         (max(growths, key=growths.get) if growths else None, ("⚡성장1위", "#fff3cd", "#ffe08a", "#8a6d00")),
         (max(_pgr, key=_pgr.get) if _pgr else None, ("💎판가율1위", "#f3ecff", "#d3bdf5", "#5b3d99")),
