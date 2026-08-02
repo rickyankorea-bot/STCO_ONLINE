@@ -2096,6 +2096,542 @@ def render_weekly_report(df):
 
 
 # ==============================================================================
+# 재고 모니터링 1차 가공  ─ 260731 확정 기준 · v3 106열 (2026-08-02 ERP 이식)
+# ==============================================================================
+# 원본: '쇼핑몰재고 모니터링 자료 1차 가공' 프로젝트 process_260731.py (판정 로직 1:1 이식)
+#  · 선판정: 이관구분='오프라인' → AA·AB·AF '오프라인' / 온라인창고<20 → AA·AF '재고20미만'(AB 미적용)
+#  · AA/AB 5등급: A 상위20% / B 21~50 / C 51~80 / D 81~100 / E 판매0(자동부여)
+#  · 등급 모집단 = (중카테고리 × 년도 × 시즌), 니트류/티셔츠류 분리, 소형그룹 예외 없음
+#  · AF(AI제안방향) 8룰 매트릭스 (재고 분기 200, 온라인창고 기준)
+#  · AC/AD/AE = 사이즈 등급 · SET 상태 구분 · SET 등급 (size-grade-classifier 로직 내장, X·Y 변수)
+#  · 출력: 106열 v3 — 서식은 저장소 동봉 템플릿(inventory_template.xlsx = 최신 v3 결과물)에서 1:1 복제
+#  · 260802 서식 확정: C·K·L·M·AA·AB·AF·AG·AH·AI 노란색 / BA·BG·BH·BI 초록색 / BK~CM 숨김
+# ※ 사이즈 마스터(품번→사이즈코드)는 DB(size_master)에 저장 — 사이드바(관리자)에서 업로드/교체.
+# ※ 재고 로우데이터는 DB에 적재하지 않음(그때그때 가공→엑셀 다운로드만). 가공은 전 팀원 사용 가능.
+INV_TEMPLATE_FILE = "inventory_template.xlsx"   # GitHub 저장소에 weekly_template.xlsx처럼 동봉
+SIZE_MASTER_TABLE = "size_master"
+
+# ── 중카테고리 매핑 (260731 니트류/티셔츠류 분리판 — 재고 가공 전용, 매출 ITEM_MAP과 별개) ──
+_INV_CAT = {}
+for _cat, _codes in {
+    "팬츠": ["PA", "DM", "GP", "WP", "HP"], "셔츠류": ["DS", "WD"],
+    "니트류": ["KT", "KG", "KV", "GK", "WI"], "티셔츠류": ["TS", "IT", "GT", "WS"],
+    "아우터": ["CT", "JP", "JA", "DJ", "WO", "PV", "WJ", "WK", "GE", "GJ"],
+    "수트류": ["SJ", "SL", "EJ", "EP", "JV"], "신발": ["FW"],
+    "ACC": ["NT", "BE", "BA", "MF", "MU", "SC", "GL", "HA", "WA"]}.items():
+    for _c in _codes:
+        _INV_CAT[_c] = _cat
+
+# ── 사이즈 체계 (size-grade-classifier 스킬 정의 내장) ──
+_INV_SYSTEMS = {
+    "A16": {"core": [5, 7], "small": [3], "big": [9, 10, 11, 13], "all": [3, 5, 7, 9, 10, 11, 13]},
+    "A17": {"core": [5, 6, 7], "small": [1, 2, 3], "big": [9, 11, 12, 13],
+            "all": [1, 2, 3, 5, 6, 7, 9, 11, 12, 13]},
+    "A09": {"core": [4, 5], "small": [2, 3], "big": [6, 7], "all": [2, 3, 4, 5, 6, 7]},
+    "A05": {"core": [7, 8, 9, 10], "small": [1, 2, 3, 4, 5, 6], "big": [11, 12],
+            "all": list(range(1, 13)), "shoe_rule": True},
+}
+_INV_TOP = {3: 95, 5: 100, 7: 105, 9: 110, 10: 115, 11: 120, 13: 130}
+_INV_BOT = {1: 74, 2: 76, 3: 78, 5: 82, 6: 84, 7: 86, 9: 90, 11: 94, 12: 98, 13: 102}
+_INV_TOP_IDX = {v: k for k, v in _INV_TOP.items()}
+_INV_BOT_IDX = {v: k for k, v in _INV_BOT.items()}
+_INV_MATCH = {95: [78, 80, 82], 100: [80, 82, 84], 105: [82, 84, 86, 88], 110: [84, 86, 88, 90],
+              115: [84, 86, 88, 90, 92, 94, 98], 120: [86, 88, 90, 92, 94, 98, 102, 106],
+              130: [88, 90, 92, 94, 98, 102, 106]}
+_INV_SET_CORE = (100, 105)
+_INV_SET_SMALL = (95,)
+_INV_SET_BIG = (110, 115, 120, 130)
+
+# 260802 확정: 컬럼 전체(헤더+데이터) 채우기 색 강제 지정 + 상시 숨김 컬럼
+_INV_YELLOW_COLS = {3, 11, 12, 13, 27, 28, 32, 33, 34, 35}   # C,K,L,M,AA,AB,AF,AG,AH,AI
+_INV_GREEN_COLS = {53, 59, 60, 61}                            # BA,BG,BH,BI
+_INV_HIDE_COLS = set(range(63, 92))                           # BK~CM
+
+
+def _inv_grade_one(s14, sd, X, Y):
+    """사이즈 등급(AC) 판정 — size-grade-classifier 로직 (품절/품절근처/A~F/C-1~3)."""
+    total = sum(s14.get(i, 0) for i in range(1, 15))
+    if total == 0:
+        return "품절"
+    core = [i for i in sd["core"] if s14.get(i, 0) >= X]
+    small = [i for i in sd["small"] if s14.get(i, 0) >= X]
+    big = [i for i in sd["big"] if s14.get(i, 0) >= X]
+    ok = [i for i in sd["all"] if s14.get(i, 0) >= X]
+    if not ok:
+        return "품절근처"
+    nc = len(core)
+    if sd.get("shoe_rule"):
+        if nc >= 3:
+            return "A"
+        if nc == 2:
+            return "B"
+    else:
+        if nc >= 3:
+            return "A"
+        if nc == 2:
+            return "A" if len(ok) > nc else "B"
+    if nc == 1:
+        if len(ok) > 1:
+            return "C-1"
+        return "C-2" if s14.get(core[0], 0) >= Y else "C-3"
+    if small and big:
+        return "D"
+    if big:
+        return "E"
+    if small:
+        return "F"
+    return "판정불가"
+
+
+def _inv_set_grade(mq, Y):
+    """SET 등급(AE) 판정 — 매칭된 세트 사이즈(mq={상의사이즈: 세트가능수량}) 기준."""
+    if not mq:
+        return "해당없음"
+    core = [s for s in mq if s in _INV_SET_CORE]
+    others = [s for s in mq if s not in _INV_SET_CORE]
+    sm = [s for s in mq if s in _INV_SET_SMALL]
+    bg = [s for s in mq if s in _INV_SET_BIG]
+    if len(core) == 2:
+        return "A" if others else "B"
+    if len(core) == 1:
+        if others:
+            return "C-1"
+        return "C-2" if mq[core[0]] >= Y else "C-3"
+    if sm and bg:
+        return "D"
+    if bg:
+        return "E"
+    if sm:
+        return "F"
+    return "해당없음"
+
+
+def _inv_num(v):
+    if v is None:
+        return None
+    try:
+        return float(str(v).replace(",", "").strip())
+    except Exception:
+        return None
+
+
+def _inv_cutoff(p):
+    return "A" if p <= 20 else "B" if p <= 50 else "C" if p <= 80 else "D"
+
+
+def read_size_master_file(uploaded_file):
+    """사이즈 마스터 엑셀 → DF[품번, 사이즈코드]. 원본 파이프라인과 동일하게
+    첫 시트 2행부터, C열(품번)·D열(사이즈코드)을 읽고 품번 중복은 첫 값 유지."""
+    import openpyxl
+    wb = openpyxl.load_workbook(uploaded_file, read_only=True)
+    seen, rows = set(), []
+    for r in wb.active.iter_rows(min_row=2, values_only=True):
+        if len(r) > 3 and r[2] is not None and str(r[2]).strip():
+            pn = str(r[2]).strip()
+            if pn in seen:
+                continue
+            seen.add(pn)
+            rows.append((pn, str(r[3]).strip()))
+    wb.close()
+    m = pd.DataFrame(rows, columns=["품번", "사이즈코드"])
+    if m.empty:
+        raise ValueError("사이즈 마스터에서 품번을 읽지 못했어요 — C열(품번)·D열(사이즈코드) 구조를 확인하세요.")
+    return m
+
+
+def replace_size_master(m):
+    eng = get_engine()
+    with eng.begin() as conn:
+        m.astype(str).to_sql(SIZE_MASTER_TABLE, conn, if_exists="replace", index=False)
+    return len(m)
+
+
+@st.cache_data(ttl=300)
+def load_size_master():
+    """DB의 사이즈 마스터를 dict{품번: 사이즈코드}로 반환. 없으면 빈 dict."""
+    eng = get_engine()
+    try:
+        with eng.connect() as conn:
+            exists = conn.exec_driver_sql(
+                "SELECT 1 FROM information_schema.tables WHERE table_name=%s"
+                if eng.dialect.name == "postgresql" else
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (SIZE_MASTER_TABLE,)).fetchone()
+            if not exists:
+                return {}
+            m = pd.read_sql(f'SELECT * FROM "{SIZE_MASTER_TABLE}"', conn)
+    except Exception:
+        return {}
+    if m.empty or "품번" not in m.columns or "사이즈코드" not in m.columns:
+        return {}
+    return dict(zip(m["품번"].astype(str).str.strip(), m["사이즈코드"].astype(str).str.strip()))
+
+
+def size_master_row_count():
+    try:
+        with get_engine().connect() as conn:
+            return conn.exec_driver_sql(f'SELECT COUNT(*) FROM "{SIZE_MASTER_TABLE}"').scalar()
+    except Exception:
+        return 0
+
+
+def process_inventory(raw_file, master, template_path, X, Y, period, workdate, target):
+    """재고 모니터링 로우데이터(93열) → 106열 v3 가공 엑셀 (process_260731 main() 1:1 이식).
+
+    raw_file=업로드 파일 객체, master=dict{품번:사이즈코드}, template_path=v3 서식 템플릿 경로.
+    반환: (엑셀 bytes, 리포트 dict). 규칙 위반·형식 오류는 ValueError로 중단.
+    """
+    import re
+    from copy import copy
+    from collections import defaultdict, Counter
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font
+    from openpyxl.utils import get_column_letter
+
+    fill_yellow = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
+    fill_green = PatternFill(start_color="FF92D050", end_color="FF92D050", fill_type="solid")
+
+    wb = openpyxl.load_workbook(raw_file, read_only=True)
+    ws = wb.worksheets[0]
+    if ws.max_column != 93:
+        raise ValueError(f"로우데이터 열 수 {ws.max_column} ≠ 93 — 파일을 확인하세요 (48열이면 매출 파일이에요).")
+    rows = [r for r in ws.iter_rows(min_row=3, values_only=True)]
+    skipped = sum(1 for r in rows if r[0] in (None, ""))
+    rows = [r for r in rows if r[0] not in (None, "")]
+    wb.close()
+    if not rows:
+        raise ValueError("로우데이터에서 상품 행을 찾지 못했어요 (3행부터 읽어요).")
+
+    recs = []
+    for r in rows:
+        pn = str(r[0]).strip(); item = str(r[14]).strip()
+        rec = dict(raw=r, pn=pn, item=item, cat=_INV_CAT.get(item),
+                   year=str(r[15]).strip(), season=str(r[16]).strip(),
+                   off=str(r[22]).strip() == "오프라인",
+                   stock=_inv_num(r[39]) or 0, sales=_inv_num(r[45]) or 0, depl=_inv_num(r[47]),
+                   size14={i + 1: int(_inv_num(r[78 + i]) or 0) for i in range(14)},
+                   scode=master.get(pn))
+        recs.append(rec)
+
+    unk_item = sorted({r["item"] for r in recs if r["cat"] is None})
+    if unk_item:
+        raise ValueError(f"중카테고리 매핑 없는 아이템 코드 발견: {unk_item} — 확인 후 매핑 추가가 필요해요.")
+
+    # K/L/M (세트 키)
+    for rec in recs:
+        pn, item = rec["pn"], rec["item"]
+        rec["K"] = pn + ","
+        rec["L"] = (pn[0] + ("SJ" if item in ("SJ", "SL") else "EJ") + pn[3:7] + "SET") \
+            if item in ("SJ", "SL", "EJ", "EP") else ""
+        rec["M"] = rec["L"] + "," if rec["L"] else ""
+
+    # AA (기간판매 랭킹 등급)
+    groups = defaultdict(list)
+    for r in recs:
+        if not r["off"] and r["stock"] >= 20 and r["sales"] > 0:
+            groups[(r["cat"], r["year"], r["season"])].append(r)
+    for g in groups.values():
+        gs = sorted(g, key=lambda r: -r["sales"]); n = len(gs)
+        for rank, r in enumerate(gs, 1):
+            r["AA"] = _inv_cutoff(rank / n * 100)
+    for r in recs:
+        if r["off"]:
+            r["AA"] = "오프라인"
+        elif r["stock"] < 20:
+            r["AA"] = "재고20미만"
+        elif r["sales"] <= 0:
+            r["AA"] = "E"
+
+    # AB (소진 속도 등급)
+    groupsb = defaultdict(list)
+    for r in recs:
+        if not r["off"] and r["sales"] > 0:
+            groupsb[(r["cat"], r["year"], r["season"])].append(r)
+    INF = float("inf")
+    for g in groupsb.values():
+        gs = sorted(g, key=lambda r: r["depl"] if r["depl"] is not None else INF); n = len(gs)
+        for rank, r in enumerate(gs, 1):
+            r["AB"] = _inv_cutoff(rank / n * 100)
+    for r in recs:
+        if r["off"]:
+            r["AB"] = "오프라인"
+        elif r["sales"] <= 0:
+            r["AB"] = "E"
+
+    # AF 매트릭스 (AI제안방향)
+    for r in recs:
+        if r["off"]:
+            r["AF"] = "오프라인"; continue
+        if r["stock"] < 20:
+            r["AF"] = "재고20미만"; continue
+        aa, ab, s = r["AA"], r["AB"], r["stock"]
+        if aa in "AB" and ab == "A":
+            r["AF"] = "가격인상" if s < 200 else "가격유지"
+        elif aa in "AB" and ab in "BC":
+            r["AF"] = "가격유지"
+        elif aa == "C" and ab in "AB":
+            r["AF"] = "가격유지"
+        elif aa in "CD" and ab in "CD":
+            r["AF"] = "가격인하"
+        elif aa in "AB" and ab == "D":
+            r["AF"] = "자사타임특가"
+        elif aa == "D" and ab in "AB":
+            r["AF"] = "자사타임특가"
+        elif aa == "E" and ab == "E":
+            r["AF"] = "진열/가격확인"
+        else:
+            r["AF"] = "검증필요"
+    af_bad = sum(1 for r in recs if r["AF"] == "검증필요")
+
+    # AC 사이즈 등급
+    for r in recs:
+        c = r["scode"]
+        if c is None or c == "A18":
+            r["AC"] = "해당없음"
+        elif c == "A06":
+            r["AC"] = "OK" if sum(r["size14"].values()) >= X else "품절근처"
+        elif c in _INV_SYSTEMS:
+            r["AC"] = _inv_grade_one(r["size14"], _INV_SYSTEMS[c], X, Y)
+        else:
+            r["AC"] = "해당없음"
+
+    # AD/AE SET 판정
+    for r in recs:
+        r["AD"] = "해당없음"; r["AE"] = "해당없음"
+    bysets = defaultdict(list)
+    for r in recs:
+        if r["L"]:
+            bysets[r["L"]].append(r)
+    pairs = nopair = 0
+    for g in bysets.values():
+        tops = [r for r in g if r["scode"] == "A16"]
+        bots = [r for r in g if r["scode"] == "A17"]
+        if not tops or not bots:
+            nopair += 1; continue
+        ti, bi = tops[0], bots[0]; pairs += 1
+        top_ok = [_INV_TOP[k] for k in _INV_TOP if ti["size14"][k] >= X]
+        bot_ok = [_INV_BOT[k] for k in _INV_BOT if bi["size14"][k] >= X]
+        matched = {}; used = set()
+        for ts in top_ok:
+            cand = [bs for bs in _INV_MATCH.get(ts, []) if bs in bot_ok]
+            if cand:
+                matched[ts] = min(ti["size14"][_INV_TOP_IDX[ts]],
+                                  max(bi["size14"][_INV_BOT_IDX[b]] for b in cand))
+                used.update(cand)
+        tl = set(top_ok) - set(matched); bl = set(bot_ok) - used
+        if matched:
+            stt = "세트만" if not tl and not bl else \
+                ("세트&상하단품" if tl and bl else ("세트&상의단품" if tl else "세트&하의단품"))
+            sg = _inv_set_grade(matched, Y)
+        else:
+            stt = "단품만-상하모두" if tl and bl else \
+                ("단품만-상의만" if tl else ("단품만-하의만" if bl else "품절근처"))
+            sg = "해당없음"
+        for r in g:
+            r["AD"] = stt; r["AE"] = sg
+
+    # ── 출력: 템플릿(v3 106열) 복제 후 데이터 교체 (v3.1: 상단 메타 5행 + 데이터 9행~) ──
+    if not os.path.exists(template_path):
+        raise ValueError("서식 템플릿(inventory_template.xlsx)이 저장소에 없어요 — "
+                         "최신 v3 결과물을 inventory_template.xlsx로 GitHub에 올려주세요.")
+    twb = openpyxl.load_workbook(template_path)
+    tws = twb.active
+    if tws.max_column != 106:
+        raise ValueError(f"템플릿 열 수 {tws.max_column} ≠ 106 — v3 결과물 파일을 템플릿으로 지정하세요.")
+    names_row = next((r for r in range(1, 12) if tws.cell(r, 10).value == "품번"), None)
+    if names_row is None:
+        raise ValueError("템플릿에서 컬럼명 행(품번)을 찾지 못했어요.")
+    NAMES_R = 8; GROUP_R = 7; DATA_R = 9
+    shift = NAMES_R - names_row
+    if shift > 0:  # 구 레이아웃(4행 헤더) → 신 레이아웃 변환
+        gr = names_row - 1
+        merges = [(m.min_col, m.max_col) for m in list(tws.merged_cells.ranges) if m.min_row == gr]
+        for m in list(tws.merged_cells.ranges):
+            tws.unmerge_cells(str(m))
+        tws.insert_rows(1, shift)
+        for c1, c2 in merges:
+            tws.merge_cells(start_row=GROUP_R, start_column=c1, end_row=GROUP_R, end_column=c2)
+    # 상단 메타 5행 기입
+    meta = [
+        f"기간판매 기준: {period}",
+        f"변수 X= {X}장 (사이즈 OK 기준)",
+        f"변수 Y= {Y}장 (동일등급내에서 추가로 등급 나눌때 기준 수량)",
+        f"작업일: {workdate} / 대상: {target}",
+        "가공기준: 260731 확정판 (5등급 A~E · 재고20미만 · 오프라인 제외 · 모집단 중카테고리×년도×시즌)",
+    ]
+    mf = Font(name="맑은 고딕", size=11, bold=True)
+    for i, t in enumerate(meta, 1):
+        cell = tws.cell(i, 1); cell.value = t; cell.font = mf
+    for r in range(1, 7):
+        if r in tws.row_dimensions:
+            del tws.row_dimensions[r]
+    tws.row_dimensions[GROUP_R].height = 24
+    tws.row_dimensions[NAMES_R].height = 52.2
+    # 260802 확정: 헤더 전체 채우기 강제 지정 (템플릿 상태와 무관하게 항상 적용)
+    for c in _INV_YELLOW_COLS:
+        tws.cell(NAMES_R, c).fill = fill_yellow
+    for c in _INV_GREEN_COLS:
+        tws.cell(NAMES_R, c).fill = fill_green
+    dstyle = {c: (copy(tws.cell(DATA_R, c).font), copy(tws.cell(DATA_R, c).border),
+                  copy(tws.cell(DATA_R, c).alignment), tws.cell(DATA_R, c).number_format,
+                  copy(tws.cell(DATA_R, c).fill)) for c in range(1, 107)}
+    if tws.max_row >= DATA_R:
+        tws.delete_rows(DATA_R, tws.max_row - DATA_R + 1)
+
+    NUM_COLS = set(range(19, 24)) | set(range(37, 107))
+
+    def to_num(v):
+        if v is None or v == "":
+            return None
+        s = str(v).strip().replace(",", "")
+        if re.fullmatch(r"-?\d+", s):
+            return int(s)
+        if re.fullmatch(r"-?\d*\.\d+", s):
+            return float(s)
+        return v
+
+    for i, rec in enumerate(recs):
+        rr = i + DATA_R; raw = rec["raw"]; vals = {}
+        vals[1], vals[2], vals[3] = raw[13], raw[14], rec["cat"]
+        for j, rc in enumerate([15, 16, 17, 18, 19, 20]):
+            vals[4 + j] = raw[rc]
+        vals[10], vals[11] = rec["pn"], rec["K"]
+        vals[12] = rec["L"] or None; vals[13] = rec["M"] or None
+        for j in range(12):
+            vals[14 + j] = raw[1 + j]
+        vals[26] = raw[21]
+        vals[27], vals[28], vals[29] = rec["AA"], rec["AB"], rec["AC"]
+        vals[30], vals[31], vals[32] = rec["AD"], rec["AE"], rec["AF"]
+        vals[33] = vals[34] = None
+        vals[35] = f"=AH{rr}/T{rr}"
+        vals[36] = raw[22]
+        for j in range(70):
+            vals[37 + j] = raw[23 + j]
+        for c in range(1, 107):
+            v = vals.get(c)
+            if v == "":
+                v = None
+            if c in NUM_COLS:
+                v = to_num(v)
+            nc = tws.cell(rr, c, v)
+            f, b, al, nf, fl = dstyle[c]
+            nc.font = f; nc.border = b; nc.alignment = al; nc.number_format = nf
+            if c in _INV_YELLOW_COLS:
+                nc.fill = fill_yellow
+            elif c in _INV_GREEN_COLS:
+                nc.fill = fill_green
+            else:
+                nc.fill = fl
+        tws.row_dimensions[rr].height = 20.25
+
+    tws.auto_filter.ref = f"A{NAMES_R}:DB{NAMES_R + len(recs)}"
+    tws.freeze_panes = f"K{DATA_R}"
+    # 260802 확정: BK~CM 항상 숨김
+    for c in _INV_HIDE_COLS:
+        tws.column_dimensions[get_column_letter(c)].hidden = True
+    buf = io.BytesIO()
+    twb.save(buf)
+
+    def dist(k):
+        return dict(Counter(r[k] for r in recs))
+    unmatched = [r["pn"] for r in recs if r["scode"] is None]
+    report = {
+        "rows": len(recs), "skipped": skipped, "X": X, "Y": Y,
+        "AA": dist("AA"), "AB": dist("AB"), "AF": dist("AF"), "AC": dist("AC"),
+        "SET": dict(Counter(r["AD"] for r in recs if r["L"])),
+        "pairs": pairs, "nopair": nopair, "af_bad": af_bad,
+        "unmatched": unmatched,
+        "small_groups": {" × ".join(map(str, k)): len(v) for k, v in groups.items() if len(v) <= 4},
+    }
+    return buf.getvalue(), report
+
+
+def render_inventory():
+    """🏷️ 재고 모니터링 탭 — 로우데이터 업로드 → 가공 → v3 엑셀 다운로드 (전 팀원 사용 가능)."""
+    st.subheader("🏷️ 쇼핑몰 재고 모니터링 · 1차 가공 (260731 확정 기준 · v3 106열)")
+    st.caption("재고모니터링 로우데이터(93열)를 올리면 AA·AB 5등급, AF(AI제안방향), "
+               "사이즈 등급(AC), SET 판정(AD·AE)을 부여한 106열 v3 엑셀을 만들어 드려요. "
+               "재고 데이터는 DB에 저장하지 않아요(가공 → 다운로드만).")
+
+    master = load_size_master()
+    n_master = len(master)
+    tpl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), INV_TEMPLATE_FILE)
+    c_info1, c_info2 = st.columns(2)
+    c_info1.caption(f"📏 사이즈 마스터: **{n_master:,}개** 품번"
+                    + ("" if n_master else " — ⚠️ 관리자가 사이드바에서 업로드해야 해요"))
+    c_info2.caption("🧾 서식 템플릿: " + ("**동봉됨** (inventory_template.xlsx)" if os.path.exists(tpl_path)
+                                          else "⚠️ **없음** — inventory_template.xlsx를 GitHub에 올려야 해요"))
+    if not n_master:
+        st.warning("사이즈 마스터(품번→사이즈코드)가 비어 있어요. 사이즈 등급(AC)·SET 판정(AD·AE)이 "
+                   "전부 '해당없음'으로 나오니, 관리자에게 사이드바 **📏 사이즈 마스터 업로드**를 요청하세요.")
+
+    # ── 가공 옵션 (X·Y는 변수 — 시즌 시점 따라 조정, 하드코딩 금지 원칙) ──
+    o1, o2, o3 = st.columns(3)
+    X = o1.number_input("변수 X — 사이즈 OK 기준(장)", min_value=1, max_value=999, value=10, key="inv_x")
+    Y = o2.number_input("변수 Y — 동일등급 내 세분 기준(장)", min_value=1, max_value=999, value=20, key="inv_y")
+    workdate = o3.text_input("작업일", value=datetime.now().strftime("%y.%m.%d"), key="inv_workdate")
+    o4, o5 = st.columns(2)
+    period = o4.text_input("기간판매 조회 기준", placeholder="예: 26.07.20~26.07.31", key="inv_period")
+    target = o5.text_input("대상 구분", placeholder="예: B단위 여름", key="inv_target")
+
+    up = st.file_uploader("재고모니터링 로우데이터 업로드 (93열 엑셀 1개)",
+                          type=["xlsx"], accept_multiple_files=False, key="inv_up")
+    if up is not None:
+        if st.button("⚙️ 1차 가공 실행", type="primary", use_container_width=True, key="inv_run"):
+            if not period.strip() or not target.strip():
+                st.error("'기간판매 조회 기준'과 '대상 구분'을 입력해 주세요 (결과물 상단 메타에 들어가요).")
+            else:
+                try:
+                    with st.spinner("가공 중… (등급 판정 → 세트 매칭 → 서식 적용)"):
+                        xls, rep = process_inventory(up, master, tpl_path, int(X), int(Y),
+                                                     period.strip(), workdate.strip(), target.strip())
+                    st.session_state["inv_result"] = {
+                        "bytes": xls, "report": rep,
+                        "fname": f"재고모니터링_1차가공_{_safe_name(workdate.strip() or 'result')}.xlsx"}
+                except ValueError as ex:
+                    st.session_state.pop("inv_result", None)
+                    st.error(f"[중단] {ex}")
+                except Exception as ex:
+                    st.session_state.pop("inv_result", None)
+                    st.error(f"가공 오류: {ex}")
+
+    res = st.session_state.get("inv_result")
+    if res:
+        rep = res["report"]
+        st.success(f"가공 완료 ✅ 상품 {rep['rows']:,}행 (합계행 {rep['skipped']}개 제외) · "
+                   f"X={rep['X']} · Y={rep['Y']} · 세트그룹 {rep['pairs']}쌍 (짝없음 {rep['nopair']})")
+        st.download_button("⬇ 가공 결과 엑셀 다운로드", res["bytes"], file_name=res["fname"],
+                           mime=XLSX_MIME, type="primary", use_container_width=True, key="inv_dl")
+        if rep["af_bad"]:
+            st.warning(f"⚠️ AF 매트릭스 미커버 {rep['af_bad']}건 — '검증필요'로 표시했어요. 규칙 점검이 필요해요.")
+        if rep["unmatched"]:
+            st.warning(f"⚠️ 사이즈 마스터 미매칭 {len(rep['unmatched'])}건 — AC/SET '해당없음' 처리. "
+                       f"예: {', '.join(rep['unmatched'][:10])}"
+                       + (" …" if len(rep["unmatched"]) > 10 else ""))
+        with st.expander("📊 판정 분포 리포트 (AA · AB · AF · AC · SET)"):
+            r1, r2 = st.columns(2)
+            r1.markdown("**AA (기간판매 랭킹)**")
+            r1.dataframe(pd.Series(rep["AA"], name="건수").rename_axis("등급"), use_container_width=True)
+            r1.markdown("**AB (소진 속도)**")
+            r1.dataframe(pd.Series(rep["AB"], name="건수").rename_axis("등급"), use_container_width=True)
+            r1.markdown("**AF (AI제안방향)**")
+            r1.dataframe(pd.Series(rep["AF"], name="건수").rename_axis("제안"), use_container_width=True)
+            r2.markdown("**AC (사이즈 등급)**")
+            r2.dataframe(pd.Series(rep["AC"], name="건수").rename_axis("등급"), use_container_width=True)
+            r2.markdown("**SET 상태 (세트키 보유 상품)**")
+            if rep["SET"]:
+                r2.dataframe(pd.Series(rep["SET"], name="건수").rename_axis("상태"), use_container_width=True)
+            else:
+                r2.caption("세트키(수트·셋업) 상품이 없어요.")
+            if rep["small_groups"]:
+                st.caption("AA 소형 모집단(≤4개): " +
+                           " · ".join(f"{k} {v}개" for k, v in rep["small_groups"].items()))
+    st.caption("※ 판정 규칙(260731 확정판): AA/AB 모집단=중카테고리×년도×시즌(니트류/티셔츠류 분리·소형그룹 예외 없음) · "
+               "선판정: 오프라인→'오프라인', 온라인창고<20→'재고20미만'(AB 미적용) · AF 재고 분기 200 · "
+               "AC/SET은 사이즈 마스터(A16 상의/A17 하의/A09 M-L-X/A05 신발/A06 FREE/A18 아동) 기준.")
+
+
+# ==============================================================================
 # 로그인 / 사용자 관리  ─ 개인 계정 + 역할(admin=관리자 / viewer=뷰어)
 # ==============================================================================
 USERS_TABLE = "app_users"
@@ -2434,7 +2970,7 @@ def main():
             st.rerun()
         st.metric("현재 DB 누적", f"{db_row_count():,} 건")
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
-            load_db.clear(); load_master.clear(); st.rerun()
+            load_db.clear(); load_master.clear(); load_size_master.clear(); st.rerun()
 
         if not is_admin:
             st.divider()
@@ -2512,6 +3048,19 @@ def main():
                         st.error(f"사업계획 오류: {ex}")
 
             st.divider()
+            st.caption(f"📏 사이즈 마스터(품번→사이즈코드): 현재 **{size_master_row_count():,}개** 품번")
+            sup = st.file_uploader("사이즈 마스터 업로드 (재고 모니터링 가공용 · C열=품번, D열=사이즈코드)",
+                                   type=["xlsx"], accept_multiple_files=False, key="sizemaster_up")
+            if sup is not None:
+                if st.button("📏 사이즈 마스터 적용(전체 교체)", use_container_width=True):
+                    try:
+                        n = replace_size_master(read_size_master_file(sup))
+                        load_size_master.clear()
+                        st.success(f"사이즈 마스터 갱신 완료 ✅ {n:,}개 품번")
+                    except Exception as ex:
+                        st.error(f"사이즈 마스터 오류: {ex}")
+
+            st.divider()
             with st.expander("👤 사용자 관리 (계정 추가·권한·비활성)"):
                 render_user_admin()
 
@@ -2524,12 +3073,15 @@ def main():
             "  (이 날짜까지의 매출이 입력되어 있어요)")
     if df.empty:
         st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요.")
+        # 재고 모니터링 가공은 매출 DB와 무관하므로 매출 데이터가 없어도 사용 가능하게 유지
+        render_inventory()
         return
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 주간회의 보고자료",
-                                      "📅 연차·아이템 세부분석 (플래그십)",
-                                      "📈 유통채널·브랜드 주간현황",
-                                      "📊 종합 대시보드"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 주간회의 보고자료",
+                                            "📅 연차·아이템 세부분석 (플래그십)",
+                                            "📈 유통채널·브랜드 주간현황",
+                                            "📊 종합 대시보드",
+                                            "🏷️ 재고 모니터링"])
     with tab1:
         render_weekly_report(df)
     with tab2:
@@ -2538,6 +3090,8 @@ def main():
         render_channel_brand(df)
     with tab4:
         render_dashboard(df)
+    with tab5:
+        render_inventory()
 
 
 if __name__ == "__main__":
