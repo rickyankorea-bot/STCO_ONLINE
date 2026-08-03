@@ -1768,6 +1768,31 @@ def inject_plan(by, idx, master):
         r["진도율"] = (act / p) if (p and act is not None) else None
 
 
+def inject_plan_manager(by, idx, master):
+    """담당별 표 by[key]에 '사업계획'(담당자 매장 연간계획 합)·'진도율' 주입."""
+    store = _store_annual()
+    mgr_codes = {}
+    if master is not None and not master.empty and "담당자" in master.columns:
+        for _, mr in master.iterrows():
+            m = str(mr.get("담당자", "")).strip()
+            c = str(mr.get("매장코드", "")).strip()
+            if m:
+                mgr_codes.setdefault(m, []).append(c)
+    for key in idx:
+        _, mid, _ = key
+        if mid == "G.TOTAL":
+            p = store.get("G.TOTAL")
+        else:
+            codes = mgr_codes.get(mid, [])
+            p = sum(store.get(c, 0) for c in codes) if (codes and store) else None
+        r = by.get(key)
+        if r is None:
+            continue
+        r["사업계획"] = p
+        act = r.get("cy실판가")
+        r["진도율"] = (act / p) if (p and act is not None) else None
+
+
 # ==============================================================================
 # 주간회의 보고자료  ─ 당월실적 / 연간누계 (전년 동기간 비교)
 # ==============================================================================
