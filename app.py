@@ -87,6 +87,9 @@ SEASON_GROUP = {"봄": "S/S", "여름": "S/S", "가을": "F/W", "겨울": "F/W",
                 "공통": "상시/ACC", "RUNNING": "상시/ACC"}
 
 # 아이템 → 아이템그룹 (구분자 기준 + 팀 요청: ACC에서 신발·넥타이·벨트·양말 분리)
+# 260803부터: 진짜 소스는 DB 아이템 마스터(item_master, "AI 마스터파일" 최종본 업로드분) — get_itemgroup_map()이
+# item_master를 우선 사용하고, 마스터에 없는 코드만 아래 _ITEMGROUP_RAW(구 하드코딩)로 폴백한다.
+# (item_master가 아직 비어있으면 전체가 이 폴백으로 동작 — 기존과 동일)
 _ITEMGROUP_RAW = {
     "수트류": ["SJ", "SL", "EJ", "EP", "JV", "SP"],
     "셔츠":   ["DS", "WD"],
@@ -97,8 +100,9 @@ _ITEMGROUP_RAW = {
     "신발":   ["FW"], "넥타이": ["NT"], "벨트": ["BE"], "양말": ["SC"],
     "ACC":    ["BA", "WA", "HA", "MF", "GL", "MU", "TR"],
 }
-ITEMGROUP_MAP = {c: g for g, codes in _ITEMGROUP_RAW.items() for c in codes}
-ITEMGROUP_ORDER = ["수트류", "아우터", "셔츠", "팬츠", "니트류", "티셔츠",
+_ITEMGROUP_MAP_FALLBACK = {c: g for g, codes in _ITEMGROUP_RAW.items() for c in codes}
+# 260803: 아이템 마스터 기준 니트류·티셔츠류가 "니트/티셔츠류" 한 중카테고리로 합쳐짐(모집단 통일 결정).
+ITEMGROUP_ORDER = ["수트류", "아우터", "셔츠", "팬츠", "니트/티셔츠류",
                    "신발", "넥타이", "벨트", "양말", "ACC", "기타"]
 
 NUMERIC_COLS = ["매장수수료율", "할인율", "최초가", "현판가", "판매수량",
@@ -271,7 +275,7 @@ def enrich(df):
     else:
         item_code = None
     if item_code is not None:
-        df["아이템그룹"] = item_code.map(ITEMGROUP_MAP).fillna("기타")
+        df["아이템그룹"] = item_code.map(get_itemgroup_map()).fillna("기타")
 
     if "판매연도" in df.columns and "연도" in df.columns:
         df["연차"] = year_age_series(df["판매연도"], df["연도"])
@@ -481,7 +485,7 @@ def load_db():
     # 비즈니스 규칙(아이템그룹·연차)은 저장값 대신 항상 최신 기준으로 재계산
     #  → 그룹 정의를 바꿔도 재적재 없이 즉시 반영됨
     if "아이템" in df.columns:
-        df["아이템그룹"] = df["아이템"].astype(str).str.strip().str.upper().map(ITEMGROUP_MAP).fillna("기타")
+        df["아이템그룹"] = df["아이템"].astype(str).str.strip().str.upper().map(get_itemgroup_map()).fillna("기타")
     if "판매연도" in df.columns and "연도" in df.columns:
         df["연차"] = year_age_series(df["판매연도"], df["연도"])
     return df
@@ -2101,18 +2105,24 @@ def render_weekly_report(df):
 # 원본: '쇼핑몰재고 모니터링 자료 1차 가공' 프로젝트 process_260731.py (판정 로직 1:1 이식)
 #  · 선판정: 이관구분='오프라인' → AA·AB·AF '오프라인' / 온라인창고<20 → AA·AF '재고20미만'(AB 미적용)
 #  · AA/AB 5등급: A 상위20% / B 21~50 / C 51~80 / D 81~100 / E 판매0(자동부여)
-#  · 등급 모집단 = (중카테고리 × 년도 × 시즌), 니트류/티셔츠류 분리, 소형그룹 예외 없음
+#  · 등급 모집단 = (중카테고리 × 년도 × 시즌) — 중카테고리는 아이템 마스터(item_master) 기준,
+#    260803부터 니트류·티셔츠류가 "니트/티셔츠류" 한 중카테고리로 통일됨(마스터 미등록 시엔 구 분리판 폴백)
 #  · AF(AI제안방향) 8룰 매트릭스 (재고 분기 200, 온라인창고 기준)
 #  · AC/AD/AE = 사이즈 등급 · SET 상태 구분 · SET 등급 (size-grade-classifier 로직 내장, X·Y 변수)
 #  · 출력: 106열 v3 — 서식은 저장소 동봉 템플릿(inventory_template.xlsx = 최신 v3 결과물)에서 1:1 복제
 #  · 260802 서식 확정: C·K·L·M·AA·AB·AF·AG·AH·AI 노란색 / BA·BG·BH·BI 초록색 / BK~CM 숨김
 # ※ 사이즈 마스터(품번→사이즈코드)는 DB(size_master)에 저장 — 사이드바(관리자)에서 업로드/교체.
+# ※ 아이템 마스터(아이템코드→대/중/소카테고리)는 DB(item_master)에 저장 — 사이드바(관리자)에서 업로드/교체.
+#   재고모니터링 중카테고리·판매분석 아이템그룹이 모두 여기서 나온다(단일 소스). 미등록 코드만 구 하드코딩 폴백.
 # ※ 재고 로우데이터는 DB에 적재하지 않음(그때그때 가공→엑셀 다운로드만). 가공은 전 팀원 사용 가능.
 INV_TEMPLATE_FILE = "inventory_template.xlsx"   # GitHub 저장소에 weekly_template.xlsx처럼 동봉
 SIZE_MASTER_TABLE = "size_master"
+ITEM_MASTER_TABLE = "item_master"
 
-# ── 중카테고리 매핑 (260731 니트류/티셔츠류 분리판 — 재고 가공 전용, 매출 ITEM_MAP과 별개) ──
-_INV_CAT = {}
+# ── 중카테고리 매핑 폴백 (260731 니트류/티셔츠류 분리판 — 아이템 마스터 미등록/미매칭 코드용) ──
+# 260803부터 진짜 소스는 DB 아이템 마스터(item_master) — _inv_cat_lookup()이 그걸 우선 쓰고,
+# 마스터에 없는 코드만 아래로 폴백한다.
+_INV_CAT_FALLBACK = {}
 for _cat, _codes in {
     "팬츠": ["PA", "DM", "GP", "WP", "HP"], "셔츠류": ["DS", "WD"],
     "니트류": ["KT", "KG", "KV", "GK", "WI"], "티셔츠류": ["TS", "IT", "GT", "WS"],
@@ -2120,7 +2130,7 @@ for _cat, _codes in {
     "수트류": ["SJ", "SL", "EJ", "EP", "JV"], "신발": ["FW"],
     "ACC": ["NT", "BE", "BA", "MF", "MU", "SC", "GL", "HA", "WA"]}.items():
     for _c in _codes:
-        _INV_CAT[_c] = _cat
+        _INV_CAT_FALLBACK[_c] = _cat
 
 # ── 사이즈 체계 (size-grade-classifier 스킬 정의 내장) ──
 _INV_SYSTEMS = {
@@ -2275,6 +2285,117 @@ def size_master_row_count():
         return 0
 
 
+# ── 아이템 마스터 (아이템코드 → 아이템명·대카테고리·중카테고리·소카테고리·상하의구분) ──
+# "AI 마스터파일 우리회사 품번 코드 체계" 워크북의 '아이템코드와 카테고리 구분' 시트를 그대로 업로드.
+# 재고모니터링 중카테고리(_inv_cat_lookup)와 판매분석 아이템그룹(get_itemgroup_map)이 모두 여기서 나온다.
+def read_item_master_file(uploaded_file):
+    """아이템 마스터 엑셀에서 '아이템코드/아이템명/대카테고리/중카테고리/소카테고리/상하의 구분' 헤더가 있는
+    시트를 자동으로 찾아 DF로 변환. (시트 순서·이름이 바뀌어도 헤더로 탐색하므로 안전)"""
+    import openpyxl
+    uploaded_file.seek(0)
+    wb = openpyxl.load_workbook(uploaded_file, read_only=True, data_only=True)
+    target_ws = None
+    for ws in wb.worksheets:
+        first = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if first and len(first) >= 4 and str(first[0]).strip() == "아이템코드" \
+                and str(first[1]).strip() == "아이템명":
+            target_ws = ws
+            break
+    if target_ws is None:
+        wb.close()
+        raise ValueError("'아이템코드·아이템명·대카테고리·중카테고리·소카테고리' 헤더가 있는 시트를 "
+                         "찾지 못했어요 — 시트 첫 행이 이 헤더로 시작해야 해요.")
+    rows = []
+    for r in target_ws.iter_rows(min_row=2, values_only=True):
+        if not r or r[0] in (None, ""):
+            continue
+        code = str(r[0]).strip().upper()
+        rows.append({
+            "item_code": code,
+            "item_name": str(r[1]).strip() if len(r) > 1 and r[1] is not None else "",
+            "cat_large": str(r[2]).strip() if len(r) > 2 and r[2] is not None else "",
+            "cat_mid": str(r[3]).strip() if len(r) > 3 and r[3] is not None else "",
+            "cat_small": str(r[4]).strip() if len(r) > 4 and r[4] is not None else "",
+            "top_bottom": str(r[5]).strip() if len(r) > 5 and r[5] is not None else "",
+        })
+    wb.close()
+    if not rows:
+        raise ValueError("아이템 마스터 시트에서 데이터 행을 찾지 못했어요.")
+    return pd.DataFrame(rows).drop_duplicates(subset=["item_code"], keep="last")
+
+
+def replace_item_master(m):
+    eng = get_engine()
+    with eng.begin() as conn:
+        m.astype(str).to_sql(ITEM_MASTER_TABLE, conn, if_exists="replace", index=False)
+    return len(m)
+
+
+@st.cache_data(ttl=300)
+def load_item_master():
+    """DB의 아이템 마스터를 dict{아이템코드: {name,large,mid,small,topbottom}}로 반환. 없으면 빈 dict."""
+    eng = get_engine()
+    try:
+        with eng.connect() as conn:
+            exists = conn.exec_driver_sql(
+                "SELECT 1 FROM information_schema.tables WHERE table_name=%s"
+                if eng.dialect.name == "postgresql" else
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (ITEM_MASTER_TABLE,)).fetchone()
+            if not exists:
+                return {}
+            m = pd.read_sql(f'SELECT * FROM "{ITEM_MASTER_TABLE}"', conn)
+    except Exception:
+        return {}
+    if m.empty or "item_code" not in m.columns:
+        return {}
+    out = {}
+    for _, row in m.iterrows():
+        out[str(row["item_code"]).strip().upper()] = {
+            "name": row.get("item_name", "") or "",
+            "large": row.get("cat_large", "") or "",
+            "mid": row.get("cat_mid", "") or "",
+            "small": row.get("cat_small", "") or "",
+            "topbottom": row.get("top_bottom", "") or "",
+        }
+    return out
+
+
+def item_master_row_count():
+    try:
+        with get_engine().connect() as conn:
+            return conn.exec_driver_sql(f'SELECT COUNT(*) FROM "{ITEM_MASTER_TABLE}"').scalar()
+    except Exception:
+        return 0
+
+
+def _inv_cat_lookup(item_code):
+    """재고모니터링 중카테고리 조회 — 아이템 마스터(item_master) 우선, 없으면 구 하드코딩 폴백."""
+    m = load_item_master()
+    rec = m.get(item_code)
+    if rec and rec["mid"]:
+        return rec["mid"]
+    return _INV_CAT_FALLBACK.get(item_code)
+
+
+# 판매분석 아이템그룹: 아이템 마스터 중카테고리를 기본으로 쓰되, 팀 요청으로 ACC에서 분리해온
+# 신발·넥타이·벨트·양말은 마스터의 중카테고리 값과 무관하게 이 라벨을 그대로 덮어쓴다.
+_ITEMGROUP_OVERRIDE_SPLIT = {"FW": "신발", "NT": "넥타이", "BE": "벨트", "SC": "양말"}
+
+
+@st.cache_data(ttl=300)
+def get_itemgroup_map():
+    """판매분석 아이템그룹 맵 — 아이템 마스터(item_master) 기준 + 팀 커스텀 분리 + 구 하드코딩 폴백."""
+    m = load_item_master()
+    out = dict(_ITEMGROUP_MAP_FALLBACK)  # 마스터에 없는 코드는 이 값 그대로 유지
+    for code, rec in m.items():
+        if code in _ITEMGROUP_OVERRIDE_SPLIT:
+            out[code] = _ITEMGROUP_OVERRIDE_SPLIT[code]
+        elif rec["mid"]:
+            out[code] = rec["mid"]
+    return out
+
+
 def _inv_peek_seasons(raw_file):
     """업로드된 로우데이터에서 실제로 쓰인 시즌 코드(컬럼17·raw[16])를 미리 훑어 목록으로 반환.
 
@@ -2378,7 +2499,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         pn = str(r[0]).strip(); item = str(r[14]).strip()
         season_raw = str(r[16]).strip()
         year_raw = str(r[15]).strip()
-        rec = dict(raw=r, pn=pn, item=item, cat=_INV_CAT.get(item),
+        rec = dict(raw=r, pn=pn, item=item, cat=_inv_cat_lookup(item),
                    year=year_raw, season=season_raw,
                    season_grp=(season_group_map or {}).get(season_raw, season_raw),  # 비교 대상군(묶음) 라벨
                    year_grp=(year_group_map or {}).get(year_raw, year_raw),          # 비교 대상군(묶음) 라벨
@@ -2387,6 +2508,9 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                    size14={i + 1: int(_inv_num(r[78 + i]) or 0) for i in range(14)},
                    scode=master.get(pn))
         recs.append(rec)
+
+    _item_master = load_item_master()
+    fallback_items = sorted({r["item"] for r in recs if r["item"] not in _item_master})
 
     unk_item = sorted({r["item"] for r in recs if r["cat"] is None})
     if unk_item:
@@ -2563,6 +2687,17 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         tws.cell(NAMES_R, c).fill = fill_yellow
     for c in _INV_GREEN_COLS:
         tws.cell(NAMES_R, c).fill = fill_green
+
+    # 260803 확정: 위 초록(GREEN) 컬럼들의 상위 그룹 헤더(GROUP_R, 병합 셀)도 같은 초록으로.
+    # 병합 셀은 좌상단 셀에만 실제로 서식이 저장되므로, 열이 속한 병합범위의 좌상단 열을 찾아 그 칸에만 칠한다
+    # (병합이 없으면 그 열 자체가 좌상단이므로 그대로 칠해짐).
+    def _group_header_fill_col(col):
+        for m in tws.merged_cells.ranges:
+            if m.min_row <= GROUP_R <= m.max_row and m.min_col <= col <= m.max_col:
+                return m.min_col
+        return col
+    for c in _INV_GREEN_COLS:
+        tws.cell(GROUP_R, _group_header_fill_col(c)).fill = fill_green
     dstyle = {c: (copy(tws.cell(DATA_R, c).font), copy(tws.cell(DATA_R, c).border),
                   copy(tws.cell(DATA_R, c).alignment), tws.cell(DATA_R, c).number_format,
                   copy(tws.cell(DATA_R, c).fill)) for c in range(1, 107)}
@@ -2637,6 +2772,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         "season_group_map": dict(_season_code_to_grp),
         "year_group_summary": year_group_summary,
         "year_group_map": dict(_year_code_to_grp),
+        "fallback_items": fallback_items,
     }
     return buf.getvalue(), report
 
@@ -2675,12 +2811,15 @@ def render_inventory():
 
     master = load_size_master()
     n_master = len(master)
+    n_item_master = item_master_row_count()
     tpl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), INV_TEMPLATE_FILE)
-    c_info1, c_info2 = st.columns(2)
+    c_info1, c_info2, c_info3 = st.columns(3)
     c_info1.caption(f"📏 사이즈 마스터: **{n_master:,}개** 품번"
                     + ("" if n_master else " — ⚠️ 관리자가 사이드바에서 업로드해야 해요"))
     c_info2.caption("🧾 서식 템플릿: " + ("**동봉됨** (inventory_template.xlsx)" if os.path.exists(tpl_path)
                                           else "⚠️ **없음** — inventory_template.xlsx를 GitHub에 올려야 해요"))
+    c_info3.caption(f"🗂️ 아이템 마스터: **{n_item_master:,}개** 코드"
+                    + ("" if n_item_master else " — 미등록 시 구 기준(니트류·티셔츠류 분리)으로 자동 대체"))
     if not n_master:
         st.warning("사이즈 마스터(품번→사이즈코드)가 비어 있어요. 사이즈 등급(AC)·SET 판정(AD·AE)이 "
                    "전부 '해당없음'으로 나오니, 관리자에게 사이드바 **📏 사이즈 마스터 업로드**를 요청하세요.")
@@ -2781,6 +2920,9 @@ def render_inventory():
             st.warning(f"⚠️ 사이즈 마스터 미매칭 {len(rep['unmatched'])}건 — AC/SET '해당없음' 처리. "
                        f"예: {', '.join(rep['unmatched'][:10])}"
                        + (" …" if len(rep["unmatched"]) > 10 else ""))
+        if rep.get("fallback_items"):
+            st.info(f"ℹ️ 아이템 마스터에 없어서 구 기준(폴백)으로 중카테고리를 처리한 아이템 코드: "
+                   f"{', '.join(rep['fallback_items'])} — 실사용 코드라면 아이템 마스터에 추가해주세요.")
         with st.expander("📊 판정 분포 리포트 (AA · AB · AF · AC · SET)"):
             r1, r2 = st.columns(2)
             r1.markdown("**AA (기간판매 랭킹)**")
@@ -2799,9 +2941,10 @@ def render_inventory():
             if rep["small_groups"]:
                 st.caption("AA 소형 모집단(≤4개): " +
                            " · ".join(f"{k} {v}개" for k, v in rep["small_groups"].items()))
-    st.caption("※ 판정 규칙(260731 확정판): AA/AB 모집단=중카테고리×년도×시즌(니트류/티셔츠류 분리·소형그룹 예외 없음) · "
-               "선판정: 오프라인→'오프라인', 온라인창고<20→'재고20미만'(AB 미적용) · AF 재고 분기 200 · "
-               "AC/SET은 사이즈 마스터(A16 상의/A17 하의/A09 M-L-X/A05 신발/A06 FREE/A18 아동) 기준.")
+    st.caption("※ 판정 규칙(260731 확정판): AA/AB 모집단=중카테고리×년도×시즌(중카테고리는 아이템 마스터 기준·"
+               "소형그룹 예외 없음) · 선판정: 오프라인→'오프라인', 온라인창고<20→'재고20미만'(AB 미적용) · "
+               "AF 재고 분기 200 · AC/SET은 사이즈 마스터(A16 상의/A17 하의/A09 M-L-X/A05 신발/A06 FREE/"
+               "A18 아동) 기준.")
 
 
 # ==============================================================================
@@ -3232,6 +3375,22 @@ def main():
                         st.success(f"사이즈 마스터 갱신 완료 ✅ {n:,}개 품번")
                     except Exception as ex:
                         st.error(f"사이즈 마스터 오류: {ex}")
+
+            st.divider()
+            st.caption(f"🗂️ 아이템 마스터(아이템코드→대/중/소카테고리): 현재 **{item_master_row_count():,}개** 코드"
+                       " · 재고모니터링 중카테고리·판매분석 아이템그룹이 모두 여기서 나와요(단일 기준)")
+            iup = st.file_uploader("아이템 마스터 업로드 ('아이템코드와 카테고리 구분' 시트 포함 워크북)",
+                                   type=["xlsx"], accept_multiple_files=False, key="itemmaster_up")
+            if iup is not None:
+                if st.button("🗂️ 아이템 마스터 적용(전체 교체)", use_container_width=True):
+                    try:
+                        n = replace_item_master(read_item_master_file(iup))
+                        load_item_master.clear()
+                        get_itemgroup_map.clear()
+                        st.success(f"아이템 마스터 갱신 완료 ✅ {n:,}개 코드 "
+                                  "(재고모니터링·판매분석에 즉시 반영돼요)")
+                    except Exception as ex:
+                        st.error(f"아이템 마스터 오류: {ex}")
 
             st.divider()
             with st.expander("👤 사용자 관리 (계정 추가·권한·비활성)"):
