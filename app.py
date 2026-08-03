@@ -3331,8 +3331,12 @@ def render_trend_weekly(df):
                "언제 꺾이는지**를 잡아내는 화면이에요. 조회 기간은 최대 1년(53주)까지 선택할 수 있어요.")
 
     # ── 기준축 · 지표 · 기간 ─────────────────────────────────────────
+    st.markdown("##### ① 무엇을 볼지 정하기")
     c1, c2 = st.columns([1.1, 1.1])
-    axis = c1.selectbox("기준 (그래프의 선을 무엇으로 나눌지)", TREND_AXES, index=0, key="tr_axis")
+    axis = c1.selectbox("📊 기준 — 그래프의 **선을 무엇으로 나눌지** (여기를 바꿔야 선이 바뀝니다)",
+                        TREND_AXES, index=0, key="tr_axis",
+                        help="아이템그룹(중카테고리)별로 선을 보고 싶으면 여기를 '중카테고리'로 바꾸세요. "
+                             "아래쪽 '중카테고리'는 조회 대상을 걸러내는 필터라서 선을 나누지 않아요.")
     metric = c2.selectbox("지표 (세로축)", TREND_METRICS, index=0, key="tr_metric")
 
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=TREND_MAX_DAYS - 7), pd.to_datetime(dmin)).date()
@@ -3397,6 +3401,12 @@ def render_trend_weekly(df):
     base = _trend_prep(base)
 
     # ── 공통 필터 (빈칸=전체) — 브랜드 · 시즌 · 중카테고리 · 소카테고리 ──
+    #    ⚠️ 여기는 '조회 대상을 걸러내는' 필터일 뿐, 그래프의 선을 나누지 않는다(선을 나누는 건 위 ① 기준).
+    #    실제로 중카테고리 필터를 걸어놓고 "왜 아이템그룹별로 안 보이지?" 하는 혼동이 있었어서(260803),
+    #    라벨을 ②로 번호 붙이고, 아래에 '기준 바꾸기' 원클릭 버튼 안내를 띄운다.
+    st.markdown("##### ② 조회 대상 좁히기 (필터 · 빈칸=전체)"
+                "<span style='color:#888;font-weight:400;font-size:0.78rem;'> — 여기는 데이터를 "
+                "걸러내기만 해요. 선을 나누는 건 위 ①의 **기준**입니다.</span>", unsafe_allow_html=True)
     f1, f2, f3, f4 = st.columns(4)
     brands = sorted(base["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in base.columns else []
     seasons = [x for x in _TREND_SEASON_ORDER if x in set(base["_시즌축"])] + \
@@ -3415,6 +3425,28 @@ def render_trend_weekly(df):
         base = base[base["_중카"].isin(selm)]
     if selsm:
         base = base[base["_소카"].isin(selsm)]
+
+    # 💡 필터를 건 축과 그래프 기준이 다르면(예: 중카테고리 필터 + 시즌 기준) 원클릭 전환 버튼 안내.
+    #    필터를 건 축 자체(= 그 항목들끼리 비교)와 한 단계 더 잘게 쪼갠 축(= 그 안을 들여다보기) 둘 다 제안.
+    _filtered_dims = [nm for nm, sel in (("중카테고리", selm), ("소카테고리", selsm),
+                                         ("시즌 (Z/A/B/C/D)", sels)) if sel]
+    _sugg = []
+    if selm:
+        _sugg += ["중카테고리", "아이템코드"]      # 카테고리끼리 비교 / 그 안의 아이템별로 쪼개기
+    if selsm:
+        _sugg += ["소카테고리", "아이템코드"]
+    if sels:
+        _sugg += ["시즌 (Z/A/B/C/D)"]
+    _swap = [x for x in dict.fromkeys(_sugg) if x != axis][:2]
+    if _filtered_dims and _swap:
+        _hc = st.columns([3.0] + [1.5] * len(_swap))
+        _hc[0].caption(f"💡 **{' · '.join(_filtered_dims)}** 로 걸러내는 중인데, 그래프는 "
+                       f"**{axis}** 기준으로 선을 나누고 있어요. 아래 버튼으로 기준을 바로 바꿀 수 있어요.")
+        for _i, _nm in enumerate(_swap):
+            if _hc[_i + 1].button(f"→ {_nm}로 선 나누기", key=f"tr_swap_{_i}", use_container_width=True):
+                st.session_state["tr_axis"] = _nm
+                st.rerun()
+
     if base.empty:
         st.info("필터 조건에 맞는 데이터가 없어요. 조건을 넓혀 보세요.")
         return
@@ -3440,8 +3472,9 @@ def render_trend_weekly(df):
         ordered = [x for x in rev_rank.index if x in M.columns]
     ordered += [c for c in M.columns if c not in ordered]
     default_sel = ordered if axis_col == "_시즌축" else ordered[:TREND_DEFAULT_TOPN]
-    picked = st.multiselect(f"표시할 {axis} (기본 = 매출 상위 {TREND_DEFAULT_TOPN}개 · 비우면 기본값)",
-                            ordered, default=default_sel, key=f"tr_pick_{axis_col}")
+    picked = st.multiselect(f"③ 표시할 {axis} (기본 = 매출 상위 {TREND_DEFAULT_TOPN}개 · 비우면 기본값)",
+                            ordered, default=default_sel, key=f"tr_pick_{axis_col}",
+                            placeholder=f"비워두면 기본값(매출 상위 {TREND_DEFAULT_TOPN}개)으로 표시돼요")
     if not picked:
         picked = default_sel
     picked = [c for c in ordered if c in picked]
