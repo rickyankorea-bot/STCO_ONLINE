@@ -2378,6 +2378,29 @@ def _inv_cat_lookup(item_code):
     return _INV_CAT_FALLBACK.get(item_code)
 
 
+def _inv_cat_small_lookup(item_code):
+    """재고모니터링 소카테고리 조회 — 아이템 마스터 우선, 마스터에 없는 코드는 소카테고리가
+    따로 없으므로 중카테고리 폴백값을 그대로 대신 사용(최선 근사치, 화면에도 그렇게 표시됨)."""
+    m = load_item_master()
+    rec = m.get(item_code)
+    if rec and rec["small"]:
+        return rec["small"]
+    return _INV_CAT_FALLBACK.get(item_code)
+
+
+# 260803: 재고모니터링 C열·등급 모집단의 "카테고리 기준" 축 — 중카테고리(기본)/소카테고리/아이템코드 중 선택.
+INV_CAT_LEVELS = ["중카테고리", "소카테고리", "아이템코드"]
+
+
+def _inv_cat_level_value(item_code, cat_level):
+    """cat_level 선택에 따라 C열에 표기·등급 모집단에 쓰일 값을 반환."""
+    if cat_level == "소카테고리":
+        return _inv_cat_small_lookup(item_code)
+    if cat_level == "아이템코드":
+        return item_code
+    return _inv_cat_lookup(item_code)  # 기본: 중카테고리
+
+
 # 판매분석 아이템그룹: 아이템 마스터 중카테고리를 기본으로 쓰되, 팀 요청으로 ACC에서 분리해온
 # 신발·넥타이·벨트·양말은 마스터의 중카테고리 값과 무관하게 이 라벨을 그대로 덮어쓴다.
 _ITEMGROUP_OVERRIDE_SPLIT = {"FW": "신발", "NT": "넥타이", "BE": "벨트", "SC": "양말"}
@@ -2458,15 +2481,18 @@ def _inv_peek_years(raw_file):
 
 
 def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
-                      season_group_map=None, year_group_map=None):
+                      season_group_map=None, year_group_map=None, cat_level="중카테고리"):
     """재고 모니터링 로우데이터(93열) → 106열 v3 가공 엑셀 (process_260731 main() 1:1 이식).
 
     raw_file=업로드 파일 객체, master=dict{품번:사이즈코드}, template_path=v3 서식 템플릿 경로.
     season_group_map={시즌코드: 비교대상군 라벨}, year_group_map={년도코드: 비교대상군 라벨}이면
-    AA·AB 등급의 모집단(중카테고리×년도×시즌)에서 시즌·년도 축을 각각 그 라벨 기준으로 묶어서 계산한다
+    AA·AB 등급의 모집단(카테고리×년도×시즌)에서 시즌·년도 축을 각각 그 라벨 기준으로 묶어서 계산한다
     (예: season_group_map={"Z":"Z+A+C+D","A":"Z+A+C+D","C":"Z+A+C+D","D":"Z+A+C+D","B":"B"}
     → Z·A·C·D는 하나의 비교 대상군, B는 별도). None/미지정 코드는 원래 코드를 그대로 자기 자신의
     비교 대상군으로 사용(기존 동작과 동일 — 시즌·년도마다 따로 등급 매김).
+    cat_level(INV_CAT_LEVELS 중 하나, 기본 "중카테고리")은 모집단의 카테고리 축과 C열 표기 기준을
+    "중카테고리"/"소카테고리"/"아이템코드" 중 어느 세분화 레벨로 쓸지 정한다. C열 헤더 텍스트도
+    이 선택에 맞춰 동적으로 바뀐다.
     반환: (엑셀 bytes, 리포트 dict). 규칙 위반·형식 오류는 ValueError로 중단.
     """
     import re
@@ -2500,6 +2526,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         season_raw = str(r[16]).strip()
         year_raw = str(r[15]).strip()
         rec = dict(raw=r, pn=pn, item=item, cat=_inv_cat_lookup(item),
+                   cat_level_val=_inv_cat_level_value(item, cat_level),  # C열·모집단에 실제로 쓰이는 값
                    year=year_raw, season=season_raw,
                    season_grp=(season_group_map or {}).get(season_raw, season_raw),  # 비교 대상군(묶음) 라벨
                    year_grp=(year_group_map or {}).get(year_raw, year_raw),          # 비교 대상군(묶음) 라벨
@@ -2524,11 +2551,11 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             if item in ("SJ", "SL", "EJ", "EP") else ""
         rec["M"] = rec["L"] + "," if rec["L"] else ""
 
-    # AA (기간판매 랭킹 등급) — 모집단 = 중카테고리 × 년도 비교대상군(묶음) × 시즌 비교대상군(묶음)
+    # AA (기간판매 랭킹 등급) — 모집단 = 카테고리(cat_level 선택) × 년도 비교대상군(묶음) × 시즌 비교대상군(묶음)
     groups = defaultdict(list)
     for r in recs:
         if not r["off"] and r["stock"] >= 20 and r["sales"] > 0:
-            groups[(r["cat"], r["year_grp"], r["season_grp"])].append(r)
+            groups[(r["cat_level_val"], r["year_grp"], r["season_grp"])].append(r)
     for g in groups.values():
         gs = sorted(g, key=lambda r: -r["sales"]); n = len(gs)
         for rank, r in enumerate(gs, 1):
@@ -2541,11 +2568,11 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         elif r["sales"] <= 0:
             r["AA"] = "E"
 
-    # AB (소진 속도 등급) — 모집단 = AA와 동일 기준(중카테고리 × 년도 비교대상군 × 시즌 비교대상군)
+    # AB (소진 속도 등급) — 모집단 = AA와 동일 기준(카테고리(cat_level 선택) × 년도 비교대상군 × 시즌 비교대상군)
     groupsb = defaultdict(list)
     for r in recs:
         if not r["off"] and r["sales"] > 0:
-            groupsb[(r["cat"], r["year_grp"], r["season_grp"])].append(r)
+            groupsb[(r["cat_level_val"], r["year_grp"], r["season_grp"])].append(r)
     INF = float("inf")
     for g in groupsb.values():
         gs = sorted(g, key=lambda r: r["depl"] if r["depl"] is not None else INF); n = len(gs)
@@ -2671,7 +2698,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         f"변수 X= {X}장 (사이즈 OK 기준)",
         f"변수 Y= {Y}장 (동일등급내에서 추가로 등급 나눌때 기준 수량)",
         f"작업일: {workdate}",
-        "가공기준: 260731 확정판 (5등급 A~E · 재고20미만 · 오프라인 제외 · 모집단 중카테고리×년도×시즌)",
+        f"가공기준: 260731 확정판 (5등급 A~E · 재고20미만 · 오프라인 제외 · 모집단 {cat_level}×년도×시즌)",
         f"비교 대상군(등급 모집단 묶음) — 시즌: {season_group_summary} / 년도: {year_group_summary}",
     ]
     mf = Font(name="맑은 고딕", size=11, bold=True)
@@ -2687,6 +2714,8 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         tws.cell(NAMES_R, c).fill = fill_yellow
     for c in _INV_GREEN_COLS:
         tws.cell(NAMES_R, c).fill = fill_green
+    # 260803: C열 헤더는 cat_level 선택(중카테고리/소카테고리/아이템코드)에 맞춰 텍스트도 같이 바뀐다.
+    tws.cell(NAMES_R, 3).value = cat_level
 
     # 260803 확정: 위 초록(GREEN) 컬럼들의 상위 그룹 헤더(GROUP_R, 병합 셀)도 같은 초록으로.
     # 병합 셀은 좌상단 셀에만 실제로 서식이 저장되므로, 열이 속한 병합범위의 좌상단 열을 찾아 그 칸에만 칠한다
@@ -2718,7 +2747,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
 
     for i, rec in enumerate(recs):
         rr = i + DATA_R; raw = rec["raw"]; vals = {}
-        vals[1], vals[2], vals[3] = raw[13], raw[14], rec["cat"]
+        vals[1], vals[2], vals[3] = raw[13], raw[14], rec["cat_level_val"]
         for j, rc in enumerate([15, 16, 17, 18, 19, 20]):
             vals[4 + j] = raw[rc]
         vals[10], vals[11] = rec["pn"], rec["K"]
@@ -2773,6 +2802,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         "year_group_summary": year_group_summary,
         "year_group_map": dict(_year_code_to_grp),
         "fallback_items": fallback_items,
+        "cat_level": cat_level,
     }
     return buf.getvalue(), report
 
@@ -2831,10 +2861,17 @@ def render_inventory():
     workdate = o3.text_input("작업일", value=datetime.now().strftime("%y.%m.%d"), key="inv_workdate")
     period = o4.text_input("기간판매 조회 기준", placeholder="예: 26.07.20~26.07.31", key="inv_period")
 
+    # ── 카테고리 기준 설정 — AA·AB 등급 모집단·C열 표기에 쓸 카테고리 세분화 레벨을 고른다.
+    #    기본=중카테고리(기존과 동일). C열 헤더 텍스트도 이 선택을 그대로 따라간다.
+    st.markdown("##### 📁 카테고리 기준 설정 (기간판매등급/소진예상등급 · C열 표기)")
+    st.caption("등급 모집단(중카테고리×년도×시즌)의 '카테고리' 축을 어느 세분화 레벨로 쓸지 선택해요. "
+               "결과 엑셀 C열의 헤더·값도 이 선택을 그대로 따라가요. 기본값은 중카테고리(기존과 동일)예요.")
+    cat_level = st.selectbox("카테고리 기준", INV_CAT_LEVELS, index=0, key="inv_catlevel")
+
     up = st.file_uploader("재고모니터링 로우데이터 업로드 (93열 엑셀 1개)",
                           type=["xlsx"], accept_multiple_files=False, key="inv_up")
 
-    # ── 시즌·년도 비교 대상군(묶음) 설정 — AA·AB 등급 모집단(중카테고리×년도×시즌)의 '시즌'·'년도' 축을
+    # ── 시즌·년도 비교 대상군(묶음) 설정 — AA·AB 등급 모집단(카테고리×년도×시즌)의 '시즌'·'년도' 축을
     #    이번 실행에서 어떻게 묶을지 정한다. 기본=코드마다 따로(원래 260731 확정판과 동일).
     #    업로드된 파일에서 실제로 쓰인 코드를 미리 훑어 그 코드로만 선택지를 만든다.
     season_group_map = None
@@ -2893,7 +2930,8 @@ def render_inventory():
                         xls, rep = process_inventory(up, master, tpl_path, int(X), int(Y),
                                                      period.strip(), workdate.strip(),
                                                      season_group_map=season_group_map,
-                                                     year_group_map=year_group_map)
+                                                     year_group_map=year_group_map,
+                                                     cat_level=cat_level)
                     st.session_state["inv_result"] = {
                         "bytes": xls, "report": rep,
                         "fname": f"재고모니터링_1차가공_{_safe_name(workdate.strip() or 'result')}.xlsx"}
@@ -2911,8 +2949,9 @@ def render_inventory():
                    f"X={rep['X']} · Y={rep['Y']} · 세트그룹 {rep['pairs']}쌍 (짝없음 {rep['nopair']})")
         st.download_button("⬇ 가공 결과 엑셀 다운로드", res["bytes"], file_name=res["fname"],
                            mime=XLSX_MIME, type="primary", use_container_width=True, key="inv_dl")
-        if rep.get("season_group_summary") or rep.get("year_group_summary"):
-            st.caption(f"🧩 적용된 비교 대상군 — 시즌: **{rep.get('season_group_summary', '–')}** · "
+        if rep.get("season_group_summary") or rep.get("year_group_summary") or rep.get("cat_level"):
+            st.caption(f"🧩 적용된 비교 대상군 — 카테고리 기준: **{rep.get('cat_level', '중카테고리')}** · "
+                       f"시즌: **{rep.get('season_group_summary', '–')}** · "
                        f"년도: **{rep.get('year_group_summary', '–')}**")
         if rep["af_bad"]:
             st.warning(f"⚠️ AF 매트릭스 미커버 {rep['af_bad']}건 — '검증필요'로 표시했어요. 규칙 점검이 필요해요.")
@@ -2941,10 +2980,10 @@ def render_inventory():
             if rep["small_groups"]:
                 st.caption("AA 소형 모집단(≤4개): " +
                            " · ".join(f"{k} {v}개" for k, v in rep["small_groups"].items()))
-    st.caption("※ 판정 규칙(260731 확정판): AA/AB 모집단=중카테고리×년도×시즌(중카테고리는 아이템 마스터 기준·"
-               "소형그룹 예외 없음) · 선판정: 오프라인→'오프라인', 온라인창고<20→'재고20미만'(AB 미적용) · "
-               "AF 재고 분기 200 · AC/SET은 사이즈 마스터(A16 상의/A17 하의/A09 M-L-X/A05 신발/A06 FREE/"
-               "A18 아동) 기준.")
+    st.caption("※ 판정 규칙(260731 확정판): AA/AB 모집단=카테고리(선택한 기준)×년도×시즌(카테고리는 "
+               "아이템 마스터 기준·소형그룹 예외 없음) · 선판정: 오프라인→'오프라인', 온라인창고<20→"
+               "'재고20미만'(AB 미적용) · AF 재고 분기 200 · AC/SET은 사이즈 마스터(A16 상의/A17 하의/"
+               "A09 M-L-X/A05 신발/A06 FREE/A18 아동) 기준.")
 
 
 # ==============================================================================
