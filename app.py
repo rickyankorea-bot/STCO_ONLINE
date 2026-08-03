@@ -3352,7 +3352,9 @@ def render_trend_weekly(df):
 
     o0, o1, o2, o3, o4 = st.columns([1.05, 0.95, 0.95, 1.5, 0.95])
     show_total = o0.checkbox("전체 실판가 배경선", value=True, key="tr_total",
-                             help="조회 조건 전체의 실판매금액을 굵은 회색 반투명 선으로 뒤에 깔아줘요. "
+                             help="**회사 전체** 실판매금액을 굵은 회색 반투명 선으로 뒤에 깔아줘요. "
+                                  "필터·기준축을 어떻게 바꿔도 이 선은 그대로라서, 특정 아이템·시즌이 "
+                                  "전체 흐름과 얼마나 다르게 움직이는지 바로 비교할 수 있어요. "
                                   "숫자 크기가 달라 다른 선이 눌리지 않도록 별도 보조축을 씁니다.")
     show_prev = o1.checkbox("전년 동기간 점선 비교", value=False, key="tr_prev",
                             help="같은 색 점선으로 전년 같은 주(52주 전)를 겹쳐 그려요 — "
@@ -3467,20 +3469,26 @@ def render_trend_weekly(df):
                 + (_NOTE_FLOAT if metric == "실판매금액(백만)" else ""), unsafe_allow_html=True)
     fig = go.Figure()
 
-    # ── ① 전체 실판가 배경선 (2026-08-03 중태님 지시) ────────────────
+    # ── ① 전체 실판가 배경선 (2026-08-03 중태님 지시 · 260803 수정) ──
     #    "전체 매출은 이렇게 움직이는데, 이 아이템/시즌은 어떻게 움직이나"를 한 화면에서 보기 위한 기준선.
+    #    ⚠️ 중요: 이 선은 **어떤 조회 조건에도 영향받지 않는 '회사 전체' 매출**이다.
+    #       기준축·필터(브랜드/시즌/중·소카테고리)·계열 선택을 아무리 바꿔도 항상 같은 선이 유지돼야
+    #       "신발만 봤을 때 전체 흐름과 어떻게 다른가"를 판단할 수 있기 때문 → 필터 적용 전 원본(d)에서 집계.
     #    전체 합계는 개별 계열보다 자릿수가 커서 같은 축에 두면 나머지 선이 바닥에 눌린다 → 별도 보조축(y3).
     #    맨 먼저 그려야 다른 선들 뒤(배경)에 깔린다. 지표 선택과 무관하게 항상 '실판매금액(백만)' 기준.
     tot_ser = pd.Series(dtype="float64")
+    tot_company = 0.0
     if show_total:
-        _dtc = cur["_판매일"]
+        all_cur = d[(d["_판매일"] >= s) & (d["_판매일"] <= e)]      # ← 필터 적용 전 = 회사 전체
+        tot_company = float(pd.to_numeric(all_cur["_매출액"], errors="coerce").fillna(0.0).sum())
+        _dtc = all_cur["_판매일"]
         _wkc = (_dtc - pd.to_timedelta(_dtc.dt.weekday, unit="D")).dt.normalize()
-        tot_ser = (pd.Series(pd.to_numeric(cur["_매출액"], errors="coerce").fillna(0.0).values)
+        tot_ser = (pd.Series(pd.to_numeric(all_cur["_매출액"], errors="coerce").fillna(0.0).values)
                    .groupby(_wkc.values).sum().reindex(M.index).fillna(0.0) / 1e6)
-        fig.add_scatter(x=weeks, y=[float(v) for v in tot_ser], name="전체 실판가",
+        fig.add_scatter(x=weeks, y=[float(v) for v in tot_ser], name="전체 실판가 (회사 전체)",
                         mode="lines", yaxis="y3",
                         line=dict(color="rgba(126,131,138,0.32)", width=8, shape="spline"),
-                        hovertemplate="전체 실판가 %{y:,.1f}<extra></extra>")
+                        hovertemplate="전체 실판가(회사 전체) %{y:,.1f}<extra></extra>")
 
     if show_prev and not Mp.empty:
         for name in picked:
@@ -3535,7 +3543,7 @@ def render_trend_weekly(df):
                                       showgrid=False, zeroline=True, zerolinecolor="#ddd",
                                       tickfont=dict(size=FS["y"]), title_font=dict(size=FS["ax"])))
     if has_tot:
-        y3 = dict(title="전체 실판가(백만)", overlaying="y", side="right", showgrid=False,
+        y3 = dict(title="회사 전체 실판가(백만)", overlaying="y", side="right", showgrid=False,
                   rangemode="tozero", tickfont=dict(size=FS["y"], color="#7E838A"),
                   title_font=dict(size=FS["ax"], color="#7E838A"))
         if n_right > 1:                      # 기온 축 바깥쪽(맨 오른쪽)에 한 칸 띄워 배치
@@ -3551,9 +3559,11 @@ def render_trend_weekly(df):
                + ". 마우스를 올리면 그 주의 모든 계열 값이 한 번에 떠요. "
                "범례를 클릭하면 해당 계열만 켜고 끌 수 있어요."
                + ("  전년 점선은 52주 전 같은 주와 맞춰 그린 값이에요." if show_prev else "")
-               + ("  **굵은 회색 배경선 = 전체 실판가**(오른쪽 회색 눈금 · 백만원). 위 필터를 걸면 "
-                  "그 조건 안에서의 전체가 돼요. 개별 계열과 자릿수가 달라 별도 축을 쓰니, "
-                  "**선의 높낮이가 아니라 오르내리는 모양을 비교**해 주세요." if has_tot else ""))
+               + ("  **굵은 회색 배경선 = 회사 전체 실판가**(오른쪽 회색 눈금 · 백만원). "
+                  "**기준축·필터·계열 선택을 바꿔도 이 선은 항상 회사 전체로 고정**돼요 — "
+                  "그래야 '신발만 봤을 때 전체 흐름과 어떻게 다른가'를 비교할 수 있으니까요. "
+                  "개별 계열과 자릿수가 달라 별도 축을 쓰니 **선의 높낮이가 아니라 오르내리는 모양**을 비교해 주세요."
+                  if has_tot else ""))
 
     # ── 시점 요약표 (본격 상승 · 피크 · 피크아웃) ────────────────────
     tot_all = float(cur["_매출액"].sum())
@@ -3561,10 +3571,11 @@ def render_trend_weekly(df):
     gseries = M[picked].sum(axis=1) if metric in ("실판매금액(백만)", "판매수량") else None
     wxt = wxw if (show_wx and not wxw.empty and wx_key in getattr(wxw, "columns", [])) else None
     if has_tot:
-        # 전체 실판가는 항상 '백만원' 기준이라 지표 선택과 무관하게 금액 포맷으로 표기(첫 행 노란 강조)
+        # 전체 실판가 행은 '회사 전체'라 조회 조건과 모집단이 달라 비중 칸은 '–'로 둔다(tot_all=0 → '–').
+        # 값은 지표 선택과 무관하게 항상 백만원 기준(첫 행 노란 강조).
         tt = _trend_timing(weeks, tot_ser.to_numpy(dtype="float64"), thr_pct / 100.0)
-        tidx.append("■ 전체 실판가 (백만·보조축)")
-        trows.append(_trend_timing_row(tt, "실판매금액(백만)", tot_all, rev=tot_all,
+        tidx.append("■ 전체 실판가 (회사 전체)")
+        trows.append(_trend_timing_row(tt, "실판매금액(백만)", 0.0, rev=tot_company,
                                        wxw=wxt, wx_key=wx_key))
     if gseries is not None:
         gt = _trend_timing(weeks, gseries.to_numpy(dtype="float64"), thr_pct / 100.0)
@@ -3584,9 +3595,16 @@ def render_trend_weekly(df):
                        file_name=f"추세분석_시점요약_{_safe_name(axis)}_{e.date()}.xlsx",
                        mime=XLSX_MIME, key="tr_dl_timing", use_container_width=True)
     render_styled_table(T.style.set_properties(**{"text-align": "right"}))
+    _tail = ""
+    if has_tot:
+        _share = (tot_all / tot_company * 100) if tot_company else None
+        _tail = ("  **■ 전체 실판가 행은 필터와 무관한 '회사 전체' 기준**이라 모집단이 달라 비중 칸은 '–'예요"
+                 + (f" — 지금 조회 조건은 회사 전체 매출의 **{_share:.1f}%**({_mm(tot_all):,.1f} / "
+                    f"{_mm(tot_company):,.1f} 백만)입니다." if _share is not None else "."))
     st.caption(f"※ 기준선 = 피크 대비 **{thr_pct}%**. **본격 상승 시점** = 피크 직전 최저점 이후 이 선을 "
                "처음 넘어선 주 · **피크아웃 시점** = 피크 뒤 이 선 아래로 처음 내려온 주(기간 안에서 아직 "
-               "안 꺾였으면 '–'). 조회 기간이 짧으면 실제 피크가 기간 밖일 수 있으니 1년으로 넓혀서도 확인해 주세요.")
+               "안 꺾였으면 '–'). 조회 기간이 짧으면 실제 피크가 기간 밖일 수 있으니 1년으로 넓혀서도 확인해 주세요."
+               + _tail)
 
     # ── 🌡️ 임계 온도 자동 코멘트 (보고서에 그대로 붙일 수 있는 문장) ──
     if wxt is not None:
