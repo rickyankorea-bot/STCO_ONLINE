@@ -956,6 +956,132 @@ LEAGUES = [("1부리그", "🏆", "#2f4d7d", "메이저 채널"),
 # ※ 랭킹 순위·다른 배지(성장/판가율/평균단가)에는 그대로 참여. 매장코드 기준이라 매장명이 바뀌어도 유지.
 SINSANG_BADGE_EXCL = {"SD065"}
 
+# 260803 추가 (중태님 지시 · 재확인: 품번이 아니라 '채널 랭킹'과 동일하게 매장 TOP10):
+#  채널 랭킹 아래에, 카테고리별로 실판매금액이 많은 "매장(채널)" TOP10 보드 3종을 같은 컨셉으로 노출.
+#  · 슈트류=아이템그룹(중카테고리) '수트류' · 온라인셔츠=브랜드 J(GENTLEMENS PHILOSOPHY) 전체 상품 합
+#  · FW+NT+BE=아이템그룹 '신발'+'넥타이'+'벨트' 3종 합산 · 순위 기준=실판매금액 · 기간=채널랭킹 토글 연동
+#  · 매장 통합(쿠팡토탈·네이버토탈)·'26년 미운영' 제외 등은 위 채널 랭킹과 동일 기준(CH_MERGE·excl_codes)
+STORE_RANK_BOARDS = [
+    ("슈트류 판매 우수 매장 TOP10", "👔", "#5c4a8a", "중카테고리 기준 · 수트류",
+     lambda x: x["아이템그룹"].astype(str) == "수트류"),
+    ("온라인셔츠 판매 매장 TOP10", "👕", "#2f6bb0", "브랜드 J (GENTLEMENS PHILOSOPHY) 전체",
+     lambda x: x["브랜드명"].astype(str) == "GENTLEMENS PHILOSOPHY"),
+    ("FW+NT+BE 판매 매장 TOP10", "👞", "#3f9464", "신발+넥타이+벨트 합산",
+     lambda x: x["아이템그룹"].astype(str).isin(["신발", "넥타이", "벨트"])),
+]
+
+
+def _build_store_rank_entries(fc, fp, mask, name_of, excl_codes):
+    """카테고리 랭킹 보드용: 조건(mask)에 맞는 매출만 걸러 매장(채널)별 매출 합계·전년비교 entries.
+
+    채널 랭킹(_build_chan)과 동일 기준으로 쿠팡토탈·네이버토탈 합산, '26년 미운영' 매장 제외.
+    배지(성장1위·판가율1위·평균단가1위) 계산용으로 최초가매출(o)·판매수량(q)도 함께 집계한다.
+    [(채널명, {c, p, o, q, codes}), ...] 를 올해(c) 매출 내림차순으로 반환(TOP10만).
+    """
+    def _prep(f):
+        if f is None or f.empty or "매장코드" not in f.columns:
+            return None
+        sub = f[mask(f)]
+        return sub if not sub.empty else None
+
+    c_df, p_df = _prep(fc), _prep(fp)
+
+    def _grp(f, col):
+        if f is None or col not in f.columns:
+            return pd.Series(dtype="float64")
+        return f.groupby(f["매장코드"].astype(str).str.strip(), observed=True)[col].sum()
+
+    cs, ps = _grp(c_df, "_매출액"), _grp(p_df, "_매출액")
+    os_ = _grp(c_df, "_최초가매출")   # 판가율1위 배지용(올해 기준)
+    qs = _grp(c_df, "_수량")          # 평균단가1위 배지용(올해 기준)
+    out = {}
+    for c in set(cs.index) | set(ps.index):
+        if c in excl_codes:
+            continue
+        key = CH_MERGE.get(c, name_of.get(c, c))
+        e = out.setdefault(key, {"c": 0.0, "p": 0.0, "o": 0.0, "q": 0.0, "codes": []})
+        e["c"] += float(cs.get(c, 0.0))
+        e["p"] += float(ps.get(c, 0.0))
+        e["o"] += float(os_.get(c, 0.0))
+        e["q"] += float(qs.get(c, 0.0))
+        e["codes"].append(c)
+    entries = [(k, e) for k, e in out.items() if e["c"] > 0 or e["p"] > 0]
+    entries.sort(key=lambda t: -t[1]["c"])
+    return entries[:10]
+
+
+def _store_rank_board_html(title, icon, hcolor, subtitle, entries, show_n=10):
+    """카테고리별 매장 랭킹 보드 HTML — 채널 리그 보드(_league_board_html)와 동일 컨셉·스타일.
+
+    entries=[(채널명, {c,p,o,q,codes}), ...] 매출(올해=c) 내림차순, 최대 show_n개.
+    매장명 아래 ⚡성장1위·💎판가율1위·💰평균단가1위 배지 표시(2026-08-03 추가, 채널 랭킹과 동일 3종).
+    매장코드(합산 매장 목록)는 표시 안 함.
+    """
+    head = (f"<div style='background:{hcolor};color:#fff;padding:9px 12px;font-weight:800;"
+            f"font-size:0.92rem;display:flex;justify-content:space-between;align-items:center;'>"
+            f"<span>{icon} {title}</span>"
+            f"<span style='font-weight:400;font-size:0.7rem;opacity:0.85;'>{subtitle}</span></div>")
+    if not entries:
+        return ("<div style='border:1px solid #e3e6ea;border-radius:10px;overflow:hidden;'>" + head +
+                "<div style='padding:14px;color:#999;font-size:0.8rem;'>매출 있는 매장이 없어요.</div></div>")
+    emap = dict(entries)
+    prev_rank = {k: i + 1 for i, k in enumerate(
+        sorted([k for k, e in entries if e["p"] > 0], key=lambda k: -emap[k]["p"]))}
+    growths = {k: (e["c"] - e["p"]) / e["p"] for k, e in entries if e["p"] > 0}
+    pgr = {k: e["c"] / e["o"] for k, e in entries if e.get("o", 0) > 0}
+    unit = {k: e["c"] / e["q"] for k, e in entries if e.get("q", 0) > 0}
+    _winners = [
+        (max(growths, key=growths.get) if growths else None, ("⚡성장1위", "#fff3cd", "#ffe08a", "#8a6d00")),
+        (max(pgr, key=pgr.get) if pgr else None, ("💎판가율1위", "#f3ecff", "#d3bdf5", "#5b3d99")),
+        (max(unit, key=unit.get) if unit else None, ("💰평균단가1위", "#e6f6f1", "#a8dfcd", "#0f6b4f")),
+    ]
+    star_badges = {}
+    for k, (txt, bg, bd, fg) in _winners:
+        if k is None:
+            continue
+        star_badges.setdefault(k, []).append(
+            f"<span style='background:{bg};border:1px solid {bd};color:{fg};border-radius:8px;"
+            f"font-size:0.6rem;font-weight:800;padding:0 4px;margin-left:3px;white-space:nowrap;'>{txt}</span>")
+    max_c = entries[0][1]["c"] or 1.0
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+    def row_html(rk, k, e):
+        g = ((e["c"] - e["p"]) / e["p"]) if e["p"] > 0 else None
+        gtxt = (f"<span style='color:{'#1f8a4c' if g >= 0 else '#c62828'};'>{g*100:+.1f}%</span>"
+                if g is not None else "<span style='color:#1f8a4c;'>신규</span>")
+        if e["p"] > 0:
+            pr = prev_rank.get(k)
+            dv = (pr - rk) if pr else 0
+            if dv > 0:
+                mv = f"<span style='color:#1f8a4c;font-weight:800;'>▲{dv}</span>"
+            elif dv < 0:
+                mv = f"<span style='color:#c62828;font-weight:800;'>▼{-dv}</span>"
+            else:
+                mv = "<span style='color:#999;'>—</span>"
+        else:
+            mv = "<span style='color:#1f8a4c;font-weight:800;'>NEW</span>"
+        # 매장코드(쿠팡토탈=SD184+SD185 등 합산 목록)는 표시하지 않음 — 배지만 이름 아래 표시(2026-08-03)
+        badge = "".join(star_badges.get(k, []))
+        return (
+            "<div style='display:flex;align-items:center;gap:7px;padding:6px 10px;"
+            "border-top:1px solid #f0f2f4;font-size:0.78rem;'>"
+            f"<span style='width:26px;text-align:center;font-weight:800;flex:none;'>{medals.get(rk, rk)}</span>"
+            f"<span style='width:96px;flex:none;font-weight:600;line-height:1.25;'>{k}{badge}</span>"
+            f"<span style='flex:1;'><span style='display:block;height:12px;border-radius:2px;"
+            f"background:{hcolor};width:{max(e['c']/max_c*100, 1):.0f}%;'></span></span>"
+            f"<span style='flex:none;width:92px;text-align:right;font-size:0.74rem;font-weight:700;"
+            f"line-height:1.3;'>{e['c']/1e6:,.1f}<br>{gtxt}</span>"
+            f"<span style='flex:none;width:34px;text-align:center;font-size:0.7rem;'>{mv}</span></div>")
+
+    rows_main = "".join(row_html(i + 1, k, e) for i, (k, e) in enumerate(entries[:show_n]))
+    tot_c = sum(e["c"] for _, e in entries[:show_n])
+    tot_p = sum(e["p"] for _, e in entries[:show_n])
+    yoyt = f" · 전년비 {(tot_c - tot_p)/tot_p*100:+.1f}%" if tot_p else ""
+    foot = (f"<div style='padding:6px 12px;background:#fafafc;border-top:1px solid #eee;"
+            f"font-size:0.7rem;color:#888;'>TOP{show_n} 합계 {tot_c/1e6:,.1f}{yoyt}</div>")
+    return ("<div style='border:1px solid #e3e6ea;border-radius:10px;overflow:hidden;'>"
+            + head + rows_main + foot + "</div>")
+
 
 def _league_board_html(lg_name, icon, hcolor, subtitle, entries, show_n=11):
     """채널 리그 보드 HTML (목업 v3 컨펌). entries=[(채널명, {c,p,codes}) 누계매출 내림차순].
@@ -1190,6 +1316,8 @@ def render_dashboard(df):
         mode = t2.radio("랭킹 기준", ["연간랭킹", "월간랭킹"], horizontal=True,
                         label_visibility="collapsed", key="dash_rank_mode")
         fcur, fprev = (cur_y, prev_y) if mode == "연간랭킹" else (cur_m, prev_m)
+        rng_txt = (f"연간누계 {y_start.date()} → {asof.date()}" if mode == "연간랭킹"
+                   else f"당월 {m_start.date()} → {asof.date()}")
         chan_rank = _build_chan(fcur, fprev)
         # 자동 인사이트의 채널 계산은 토글과 무관하게 항상 '연간누계' 기준 유지
         chan = chan_rank if mode == "연간랭킹" else _build_chan(cur_y, prev_y)
@@ -1198,8 +1326,6 @@ def render_dashboard(df):
             st.info("매장 마스터에 **'리그구분'** 컬럼(값: 1부리그/2부리그/꿈나무리그)을 추가해 "
                     "업로드하면 리그 보드가 채워져요. 사이드바 → 매장 기준정보 업로드.")
         else:
-            rng_txt = (f"연간누계 {y_start.date()} → {asof.date()}" if mode == "연간랭킹"
-                       else f"당월 {m_start.date()} → {asof.date()}")
             cols3 = st.columns(3)
             for (lg_name, icon, hcolor, subtitle), colx in zip(LEAGUES, cols3):
                 entries = [(k, e) for k, e in chan_rank.items() if e.get("lg") == lg_name and e["c"] > 0]
@@ -1215,6 +1341,21 @@ def render_dashboard(df):
             if n_un:
                 note += f" · 리그 미지정 {n_un}개 채널은 랭킹 미포함(마스터에 리그구분 입력 시 반영)"
             st.caption(note)
+
+        # ── ③-2 카테고리별 매장 랭킹 (2026-08-03 추가): 채널 랭킹과 동일한 토글(연간/월간)·기간에 연동 ──
+        #    슈트류(중카테고리) · 온라인셔츠(브랜드 J 전체) · FW+NT+BE(신발+넥타이+벨트) — 각각 매출 많은 매장 TOP10.
+        #    순위 기준=실판매금액. 채널 랭킹과 동일하게 쿠팡토탈·네이버토탈 합산, '26년 미운영' 매장 제외.
+        if "아이템그룹" in d.columns and "브랜드명" in d.columns:
+            st.markdown("### 🏆 카테고리별 매장 랭킹")
+            scols = st.columns(3)
+            for (stitle, sicon, shcolor, ssubtitle, smask), scol in zip(STORE_RANK_BOARDS, scols):
+                sentries = _build_store_rank_entries(fcur, fprev, smask, name_of, excl_codes)
+                with scol:
+                    st.markdown(_store_rank_board_html(stitle, sicon, shcolor, ssubtitle, sentries),
+                                unsafe_allow_html=True)
+            st.caption(f"**{mode}** ({rng_txt} · 전년 동기간 비교) · 순위 기준=실판매금액 · "
+                       "매출 상위 10개 매장만 노출 · 막대=보드 내 상대 크기 · "
+                       "쿠팡토탈=SD185+SD184 · 네이버토탈=SD165+SD174 합산 · '26년 미운영' 매장 제외.")
 
     # ── ④ 자동 인사이트 ──
     def _topdiff(cur, prev, col):
@@ -1619,31 +1760,6 @@ def inject_plan(by, idx, master):
     cum = _plan_cum(load_plan(), master)
     for key in idx:
         p = _plan_for(key, cum)
-        r = by.get(key)
-        if r is None:
-            continue
-        r["사업계획"] = p
-        act = r.get("cy실판가")
-        r["진도율"] = (act / p) if (p and act is not None) else None
-
-
-def inject_plan_manager(by, idx, master):
-    """담당별 표 by[key]에 '사업계획'(담당자 매장 연간계획 합)·'진도율' 주입."""
-    store = _store_annual()
-    mgr_codes = {}
-    if master is not None and not master.empty and "담당자" in master.columns:
-        for _, mr in master.iterrows():
-            m = str(mr.get("담당자", "")).strip()
-            c = str(mr.get("매장코드", "")).strip()
-            if m:
-                mgr_codes.setdefault(m, []).append(c)
-    for key in idx:
-        _, mid, _ = key
-        if mid == "G.TOTAL":
-            p = store.get("G.TOTAL")
-        else:
-            codes = mgr_codes.get(mid, [])
-            p = sum(store.get(c, 0) for c in codes) if (codes and store) else None
         r = by.get(key)
         if r is None:
             continue
@@ -3467,3 +3583,25 @@ def main():
 
 if __name__ == "__main__":
     main()
+    """담당별 표 by[key]에 '사업계획'(담당자 매장 연간계획 합)·'진도율' 주입."""
+    store = _store_annual()
+    mgr_codes = {}
+    if master is not None and not master.empty and "담당자" in master.columns:
+        for _, mr in master.iterrows():
+            m = str(mr.get("담당자", "")).strip()
+            c = str(mr.get("매장코드", "")).strip()
+            if m:
+                mgr_codes.setdefault(m, []).append(c)
+    for key in idx:
+        _, mid, _ = key
+        if mid == "G.TOTAL":
+            p = store.get("G.TOTAL")
+        else:
+            codes = mgr_codes.get(mid, [])
+            p = sum(store.get(c, 0) for c in codes) if (codes and store) else None
+        r = by.get(key)
+        if r is None:
+            continue
+        r["사업계획"] = p
+        act = r.get("cy실판가")
+        r["진도율"] = (act / p) if (p and act is not None) else None
