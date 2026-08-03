@@ -2303,15 +2303,49 @@ def _inv_peek_seasons(raw_file):
     return sorted(codes, key=lambda c: (order.get(c, 99), c))
 
 
-def process_inventory(raw_file, master, template_path, X, Y, period, workdate, target,
-                      season_group_map=None):
+def _inv_peek_years(raw_file):
+    """업로드된 로우데이터에서 실제로 쓰인 년도 코드(컬럼16·raw[15])를 미리 훑어 목록으로 반환.
+
+    숫자로 해석되는 값은 오름차순, 그 외는 뒤에 알파벳순.
+    파일 포인터를 되돌리기 위해 호출 측에서 반드시 raw_file.seek(0)을 다시 해줘야 한다.
+    """
+    import openpyxl
+    try:
+        raw_file.seek(0)
+    except Exception:
+        pass
+    wb = openpyxl.load_workbook(raw_file, read_only=True)
+    ws = wb.worksheets[0]
+    codes = []
+    seen = set()
+    for r in ws.iter_rows(min_row=3, values_only=True):
+        if not r or r[0] in (None, ""):
+            continue
+        if len(r) <= 15 or r[15] is None:
+            continue
+        v = str(r[15]).strip()
+        if v and v not in seen:
+            seen.add(v); codes.append(v)
+    wb.close()
+
+    def _key(c):
+        try:
+            return (0, float(c))
+        except ValueError:
+            return (1, c)
+    return sorted(codes, key=_key)
+
+
+def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
+                      season_group_map=None, year_group_map=None):
     """재고 모니터링 로우데이터(93열) → 106열 v3 가공 엑셀 (process_260731 main() 1:1 이식).
 
     raw_file=업로드 파일 객체, master=dict{품번:사이즈코드}, template_path=v3 서식 템플릿 경로.
-    season_group_map={시즌코드: 비교대상군 라벨}이면 AA·AB 등급의 모집단(중카테고리×년도×시즌)을
-    이 라벨 기준으로 묶어서 계산한다(예: {"Z":"Z+A+C+D","A":"Z+A+C+D","C":"Z+A+C+D","D":"Z+A+C+D","B":"B"}
-    → Z·A·C·D는 하나의 비교 대상군, B는 별도). None/미지정 코드는 원래 시즌코드를 그대로 자기 자신의
-    비교 대상군으로 사용(기존 동작과 동일 — 시즌마다 따로 등급 매김).
+    season_group_map={시즌코드: 비교대상군 라벨}, year_group_map={년도코드: 비교대상군 라벨}이면
+    AA·AB 등급의 모집단(중카테고리×년도×시즌)에서 시즌·년도 축을 각각 그 라벨 기준으로 묶어서 계산한다
+    (예: season_group_map={"Z":"Z+A+C+D","A":"Z+A+C+D","C":"Z+A+C+D","D":"Z+A+C+D","B":"B"}
+    → Z·A·C·D는 하나의 비교 대상군, B는 별도). None/미지정 코드는 원래 코드를 그대로 자기 자신의
+    비교 대상군으로 사용(기존 동작과 동일 — 시즌·년도마다 따로 등급 매김).
     반환: (엑셀 bytes, 리포트 dict). 규칙 위반·형식 오류는 ValueError로 중단.
     """
     import re
@@ -2343,9 +2377,11 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate, t
     for r in rows:
         pn = str(r[0]).strip(); item = str(r[14]).strip()
         season_raw = str(r[16]).strip()
+        year_raw = str(r[15]).strip()
         rec = dict(raw=r, pn=pn, item=item, cat=_INV_CAT.get(item),
-                   year=str(r[15]).strip(), season=season_raw,
+                   year=year_raw, season=season_raw,
                    season_grp=(season_group_map or {}).get(season_raw, season_raw),  # 비교 대상군(묶음) 라벨
+                   year_grp=(year_group_map or {}).get(year_raw, year_raw),          # 비교 대상군(묶음) 라벨
                    off=str(r[22]).strip() == "오프라인",
                    stock=_inv_num(r[39]) or 0, sales=_inv_num(r[45]) or 0, depl=_inv_num(r[47]),
                    size14={i + 1: int(_inv_num(r[78 + i]) or 0) for i in range(14)},
@@ -2364,11 +2400,11 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate, t
             if item in ("SJ", "SL", "EJ", "EP") else ""
         rec["M"] = rec["L"] + "," if rec["L"] else ""
 
-    # AA (기간판매 랭킹 등급) — 모집단 = 중카테고리 × 년도 × 시즌 비교대상군(묶음)
+    # AA (기간판매 랭킹 등급) — 모집단 = 중카테고리 × 년도 비교대상군(묶음) × 시즌 비교대상군(묶음)
     groups = defaultdict(list)
     for r in recs:
         if not r["off"] and r["stock"] >= 20 and r["sales"] > 0:
-            groups[(r["cat"], r["year"], r["season_grp"])].append(r)
+            groups[(r["cat"], r["year_grp"], r["season_grp"])].append(r)
     for g in groups.values():
         gs = sorted(g, key=lambda r: -r["sales"]); n = len(gs)
         for rank, r in enumerate(gs, 1):
@@ -2381,11 +2417,11 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate, t
         elif r["sales"] <= 0:
             r["AA"] = "E"
 
-    # AB (소진 속도 등급) — 모집단 = AA와 동일 기준(중카테고리 × 년도 × 시즌 비교대상군)
+    # AB (소진 속도 등급) — 모집단 = AA와 동일 기준(중카테고리 × 년도 비교대상군 × 시즌 비교대상군)
     groupsb = defaultdict(list)
     for r in recs:
         if not r["off"] and r["sales"] > 0:
-            groupsb[(r["cat"], r["year"], r["season_grp"])].append(r)
+            groupsb[(r["cat"], r["year_grp"], r["season_grp"])].append(r)
     INF = float("inf")
     for g in groupsb.values():
         gs = sorted(g, key=lambda r: r["depl"] if r["depl"] is not None else INF); n = len(gs)
@@ -2490,25 +2526,29 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate, t
         tws.insert_rows(1, shift)
         for c1, c2 in merges:
             tws.merge_cells(start_row=GROUP_R, start_column=c1, end_row=GROUP_R, end_column=c2)
-    # 시즌 비교 대상군(묶음) 요약 — 등장 순서 기준으로 중복 없이 나열 (예: "Z+A+C+D · B")
-    _code_to_grp = {}
-    for rec in recs:
-        _code_to_grp.setdefault(rec["season"], rec["season_grp"])
-    _seen_lbl, _grp_desc = set(), []
-    for _code in _code_to_grp:
-        _lbl = _code_to_grp[_code]
-        if _lbl not in _seen_lbl:
-            _seen_lbl.add(_lbl); _grp_desc.append(_lbl)
-    season_group_summary = " · ".join(_grp_desc) if _grp_desc else "–"
+    # 시즌·년도 비교 대상군(묶음) 요약 — 등장 순서 기준으로 중복 없이 나열 (예: "Z+A+C+D · B")
+    def _grp_summary(field, grp_field):
+        _code_to_grp = {}
+        for rec in recs:
+            _code_to_grp.setdefault(rec[field], rec[grp_field])
+        _seen_lbl, _grp_desc = set(), []
+        for _code in _code_to_grp:
+            _lbl = _code_to_grp[_code]
+            if _lbl not in _seen_lbl:
+                _seen_lbl.add(_lbl); _grp_desc.append(_lbl)
+        return (" · ".join(_grp_desc) if _grp_desc else "–"), _code_to_grp
 
-    # 상단 메타 6행 기입 (5행 + 시즌 비교대상군 요약 1행)
+    season_group_summary, _season_code_to_grp = _grp_summary("season", "season_grp")
+    year_group_summary, _year_code_to_grp = _grp_summary("year", "year_grp")
+
+    # 상단 메타 6행 기입 (5행 + 시즌·년도 비교대상군 요약 1행)
     meta = [
         f"기간판매 기준: {period}",
         f"변수 X= {X}장 (사이즈 OK 기준)",
         f"변수 Y= {Y}장 (동일등급내에서 추가로 등급 나눌때 기준 수량)",
-        f"작업일: {workdate} / 대상: {target}",
+        f"작업일: {workdate}",
         "가공기준: 260731 확정판 (5등급 A~E · 재고20미만 · 오프라인 제외 · 모집단 중카테고리×년도×시즌)",
-        f"시즌 비교 대상군(등급 모집단 묶음): {season_group_summary}",
+        f"비교 대상군(등급 모집단 묶음) — 시즌: {season_group_summary} / 년도: {year_group_summary}",
     ]
     mf = Font(name="맑은 고딕", size=11, bold=True)
     for i, t in enumerate(meta, 1):
@@ -2594,9 +2634,36 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate, t
         "unmatched": unmatched,
         "small_groups": {" × ".join(map(str, k)): len(v) for k, v in groups.items() if len(v) <= 4},
         "season_group_summary": season_group_summary,
-        "season_group_map": dict(_code_to_grp),
+        "season_group_map": dict(_season_code_to_grp),
+        "year_group_summary": year_group_summary,
+        "year_group_map": dict(_year_code_to_grp),
     }
     return buf.getvalue(), report
+
+
+def _inv_group_ui(codes, key_prefix):
+    """codes(문자열 리스트) 각각에 그룹 셀렉트박스를 한 줄로 렌더링하고, 선택 결과로부터
+    {코드: 라벨(같은 그룹끼리 "+"로 합친 문자열)} 맵과, 2개 이상 묶인 그룹 목록(list of code-list)을 반환한다.
+    기본 선택값은 코드마다 자기 자신의 순번 그룹 — 즉 아무것도 안 바꾸면 전부 별도(묶지 않음)가 된다.
+    """
+    from collections import defaultdict as _defaultdict
+    n = len(codes)
+    opts = [f"그룹{i + 1}" for i in range(n)]
+    cols = st.columns(n)
+    assign = {}
+    for i, code in enumerate(codes):
+        assign[code] = cols[i].selectbox(code, opts, index=i, key=f"{key_prefix}_{code}")
+    by_val = _defaultdict(list)
+    for code, val in assign.items():
+        by_val[val].append(code)
+    group_map = {}
+    for val, codes_list in by_val.items():
+        codes_sorted = [c for c in codes if c in codes_list]
+        lbl = "+".join(codes_sorted)
+        for c in codes_sorted:
+            group_map[c] = lbl
+    merged = [g for g in by_val.values() if len(g) > 1]
+    return group_map, merged
 
 
 def render_inventory():
@@ -2619,21 +2686,20 @@ def render_inventory():
                    "전부 '해당없음'으로 나오니, 관리자에게 사이드바 **📏 사이즈 마스터 업로드**를 요청하세요.")
 
     # ── 가공 옵션 (X·Y는 변수 — 시즌 시점 따라 조정, 하드코딩 금지 원칙) ──
-    o1, o2, o3 = st.columns(3)
+    o1, o2, o3, o4 = st.columns(4)
     X = o1.number_input("변수 X — 사이즈 OK 기준(장)", min_value=1, max_value=999, value=10, key="inv_x")
     Y = o2.number_input("변수 Y — 동일등급 내 세분 기준(장)", min_value=1, max_value=999, value=20, key="inv_y")
     workdate = o3.text_input("작업일", value=datetime.now().strftime("%y.%m.%d"), key="inv_workdate")
-    o4, o5 = st.columns(2)
     period = o4.text_input("기간판매 조회 기준", placeholder="예: 26.07.20~26.07.31", key="inv_period")
-    target = o5.text_input("대상 구분", placeholder="예: B단위 여름", key="inv_target")
 
     up = st.file_uploader("재고모니터링 로우데이터 업로드 (93열 엑셀 1개)",
                           type=["xlsx"], accept_multiple_files=False, key="inv_up")
 
-    # ── 시즌 비교 대상군(묶음) 설정 — AA·AB 등급 모집단(중카테고리×년도×시즌)의 '시즌' 축을
-    #    이번 실행에서 어떻게 묶을지 정한다. 기본=시즌마다 따로(원래 260731 확정판과 동일).
-    #    업로드된 파일에서 실제로 쓰인 시즌 코드를 미리 훑어 그 코드로만 선택지를 만든다.
+    # ── 시즌·년도 비교 대상군(묶음) 설정 — AA·AB 등급 모집단(중카테고리×년도×시즌)의 '시즌'·'년도' 축을
+    #    이번 실행에서 어떻게 묶을지 정한다. 기본=코드마다 따로(원래 260731 확정판과 동일).
+    #    업로드된 파일에서 실제로 쓰인 코드를 미리 훑어 그 코드로만 선택지를 만든다.
     season_group_map = None
+    year_group_map = None
     if up is not None:
         try:
             seasons_found = _inv_peek_seasons(up)
@@ -2644,44 +2710,51 @@ def render_inventory():
                 up.seek(0)
             except Exception:
                 pass
+        try:
+            years_found = _inv_peek_years(up)
+        except Exception:
+            years_found = []
+        finally:
+            try:
+                up.seek(0)
+            except Exception:
+                pass
+
         if seasons_found:
-            st.markdown("##### 🧩 시즌 비교 대상군 설정 (등급 AA·AB 모집단)")
+            st.markdown("##### 🧩 시즌 비교 대상군 설정 (기간판매등급/소진예상등급)")
             st.caption("등급은 **중카테고리 × 년도 × 시즌**이 모두 같은 상품끼리만 비교해요(동기 그룹). "
                        "아래에서 이번 가공에 한해 시즌을 묶을 수 있어요 — **같은 그룹을 고른 시즌끼리 하나의 "
                        "비교 대상군**이 돼요. 기본값은 시즌마다 따로(묶지 않음)예요.")
-            n = len(seasons_found)
-            opts = [f"그룹{i+1}" for i in range(n)]
-            cols = st.columns(n)
-            assign = {}
-            for i, code in enumerate(seasons_found):
-                assign[code] = cols[i].selectbox(code, opts, index=i, key=f"inv_szgrp_{code}")
-            from collections import defaultdict as _defaultdict
-            by_val = _defaultdict(list)
-            for code, val in assign.items():
-                by_val[val].append(code)
-            season_group_map = {}
-            for val, codes_list in by_val.items():
-                codes_sorted = [c for c in seasons_found if c in codes_list]
-                lbl = "+".join(codes_sorted)
-                for c in codes_sorted:
-                    season_group_map[c] = lbl
-            merged = [g for g in by_val.values() if len(g) > 1]
-            if merged:
-                merged_txt = " · ".join("+".join(c for c in seasons_found if c in g) for g in merged)
+            season_group_map, sz_merged = _inv_group_ui(seasons_found, "inv_szgrp")
+            if sz_merged:
+                merged_txt = " · ".join("+".join(c for c in seasons_found if c in g) for g in sz_merged)
                 st.caption(f"✅ 지금 설정: **{merged_txt}** 묶음 적용 (나머지는 시즌별 개별 유지)")
             else:
-                st.caption("현재 설정: 묶음 없음 — 5개 시즌 각각 별도 비교 대상군(기존과 동일).")
+                st.caption("현재 설정: 묶음 없음 — 시즌 각각 별도 비교 대상군(기존과 동일).")
+
+        if years_found:
+            st.markdown("##### 📅 년도 비교 대상군 설정 (기간판매등급/소진예상등급)")
+            st.caption("등급은 **중카테고리 × 년도 × 시즌**이 모두 같은 상품끼리만 비교해요(동기 그룹). "
+                       "아래에서 이번 가공에 한해 년도를 묶을 수 있어요 — **같은 그룹을 고른 년도끼리 하나의 "
+                       "비교 대상군**이 돼요. 기본값은 년도마다 따로(묶지 않음)예요.")
+            year_group_map, yr_merged = _inv_group_ui(years_found, "inv_yrgrp")
+            if yr_merged:
+                merged_txt_y = " · ".join("+".join(c for c in years_found if c in g) for g in yr_merged)
+                st.caption(f"✅ 지금 설정: **{merged_txt_y}** 묶음 적용 (나머지는 년도별 개별 유지)")
+            else:
+                st.caption("현재 설정: 묶음 없음 — 년도 각각 별도 비교 대상군(기존과 동일).")
 
     if up is not None:
         if st.button("⚙️ 1차 가공 실행", type="primary", use_container_width=True, key="inv_run"):
-            if not period.strip() or not target.strip():
-                st.error("'기간판매 조회 기준'과 '대상 구분'을 입력해 주세요 (결과물 상단 메타에 들어가요).")
+            if not period.strip():
+                st.error("'기간판매 조회 기준'을 입력해 주세요 (결과물 상단 메타에 들어가요).")
             else:
                 try:
                     with st.spinner("가공 중… (등급 판정 → 세트 매칭 → 서식 적용)"):
                         xls, rep = process_inventory(up, master, tpl_path, int(X), int(Y),
-                                                     period.strip(), workdate.strip(), target.strip(),
-                                                     season_group_map=season_group_map)
+                                                     period.strip(), workdate.strip(),
+                                                     season_group_map=season_group_map,
+                                                     year_group_map=year_group_map)
                     st.session_state["inv_result"] = {
                         "bytes": xls, "report": rep,
                         "fname": f"재고모니터링_1차가공_{_safe_name(workdate.strip() or 'result')}.xlsx"}
@@ -2699,8 +2772,9 @@ def render_inventory():
                    f"X={rep['X']} · Y={rep['Y']} · 세트그룹 {rep['pairs']}쌍 (짝없음 {rep['nopair']})")
         st.download_button("⬇ 가공 결과 엑셀 다운로드", res["bytes"], file_name=res["fname"],
                            mime=XLSX_MIME, type="primary", use_container_width=True, key="inv_dl")
-        if rep.get("season_group_summary"):
-            st.caption(f"🧩 적용된 시즌 비교 대상군: **{rep['season_group_summary']}**")
+        if rep.get("season_group_summary") or rep.get("year_group_summary"):
+            st.caption(f"🧩 적용된 비교 대상군 — 시즌: **{rep.get('season_group_summary', '–')}** · "
+                       f"년도: **{rep.get('year_group_summary', '–')}**")
         if rep["af_bad"]:
             st.warning(f"⚠️ AF 매트릭스 미커버 {rep['af_bad']}건 — '검증필요'로 표시했어요. 규칙 점검이 필요해요.")
         if rep["unmatched"]:
