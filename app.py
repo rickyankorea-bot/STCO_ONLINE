@@ -3128,6 +3128,782 @@ def render_inventory():
 
 
 # ==============================================================================
+# 추세분석  ─ 메뉴1: 주별 시즌상품 판매 변화 (2026-08-03 신설 · 중태님 지시)
+# ==============================================================================
+# "언제 붙기 시작하고, 언제 피크를 찍고, 언제 꺾이는가"를 주 단위로 보는 시즌 타이밍 분석 화면.
+#  · 기준축(계열) 4종: 중카테고리 · 소카테고리 · 아이템코드 · 시즌(Z/A/B/C/D — 품번 5번째 자리)
+#  · 지표 토글 4종: 실판매금액(백만) · 판매수량 · 판가율(%) · 주간 비중(%)
+#  · 조회기간 최대 1년(53주) · 전년 동기간 점선 오버레이 On/Off(52주=364일 시프트 정렬)
+#  · 공통 필터: 브랜드 · 시즌 · 중카테고리 · 소카테고리 (빈칸=전체)
+#  · 시점 자동판정: 본격 상승 시점 / 피크 시점 / 피크아웃 시점 (피크 대비 기준선 % 조절)
+#  · 룰11: 주별 데이터 표 + 시점 요약표 각각 ⬇엑셀 기본 제공
+TREND_AXES = ["중카테고리", "소카테고리", "아이템코드", "시즌 (Z/A/B/C/D)"]
+TREND_METRICS = ["실판매금액(백만)", "판매수량", "판가율(%)", "주간 비중(%)"]
+TREND_MAX_WEEKS = 53                 # 조회 가능 최대 기간 = 1년(53주)
+TREND_MAX_DAYS = TREND_MAX_WEEKS * 7
+TREND_PREV_SHIFT_DAYS = 364          # 전년 동기간 정렬: 52주 시프트(요일 정렬 유지)
+TREND_DEFAULT_TOPN = 7               # 처음 화면에 자동 선택되는 계열 수
+
+# 계열 색상 팔레트 — 올해 실선과 전년 점선이 같은 색을 쓰도록 고정 배정
+TREND_PALETTE = ["#E8743B", "#7B52AB", "#EFB700", "#2F8FD6", "#4C9A52",
+                 "#1F3864", "#C62828", "#009B8E", "#B5651D", "#8E44AD",
+                 "#2E7D32", "#5D6D7E"]
+
+# 시즌 축 라벨 — 품번 5번째 자리 코드 + 시즌명 (중태님 지시: Z/A/B/C/D로 보이게)
+_TREND_SEASON_LABEL = {"공통": "Z (공통)", "봄": "A (봄)", "여름": "B (여름)",
+                       "가을": "C (가을)", "겨울": "D (겨울)", "RUNNING": "E (RUNNING)"}
+_TREND_SEASON_ORDER = ["Z (공통)", "A (봄)", "B (여름)", "C (가을)", "D (겨울)", "E (RUNNING)"]
+
+
+@st.cache_data(ttl=300)
+def _trend_cat_maps():
+    """아이템코드 → (중카테고리, 소카테고리, 아이템명) 맵.
+
+    진짜 기준은 DB 아이템 마스터(item_master). 마스터에 없는 코드만 구 하드코딩(_INV_CAT_FALLBACK,
+    ITEM_MAP)으로 폴백한다 — 재고모니터링·판매분석과 완전히 같은 단일 기준을 쓴다.
+    """
+    m = load_item_master()
+    mid, small, name = {}, {}, {}
+    for code, rec in m.items():
+        if rec.get("mid"):
+            mid[code] = rec["mid"]
+        if rec.get("small"):
+            small[code] = rec["small"]
+        if rec.get("name"):
+            name[code] = rec["name"]
+    for code, cat in _INV_CAT_FALLBACK.items():      # 마스터 미등록 코드 폴백
+        mid.setdefault(code, cat)
+        small.setdefault(code, cat)
+    for code, tup in ITEM_MAP.items():
+        name.setdefault(code, tup[0])
+    return mid, small, name
+
+
+def _trend_prep(frame):
+    """조회 대상 프레임에 추세분석용 파생 컬럼(_중카·_소카·_아이템축·_시즌축)을 붙여 반환.
+
+    날짜로 이미 좁힌 뒤에 호출해서 메모리 사용을 줄인다(전체 50만 행에 문자열 컬럼을 붙이지 않음).
+    """
+    mid_map, small_map, name_map = _trend_cat_maps()
+    out = frame.copy()
+    if "아이템" in out.columns:
+        ic = out["아이템"].astype(str).str.strip().str.upper()
+    elif "품번" in out.columns:
+        ic = out["품번"].astype(str).str.strip().str.upper().str[1:3]
+    else:
+        ic = pd.Series("", index=out.index, dtype="object")
+    out["_중카"] = ic.map(mid_map).fillna("기타")
+    out["_소카"] = ic.map(small_map).fillna("기타")
+    out["_아이템축"] = ic + " (" + ic.map(name_map).fillna("미등록") + ")"
+    if "시즌명" in out.columns:
+        out["_시즌축"] = out["시즌명"].astype(str).map(_TREND_SEASON_LABEL).fillna("기타")
+    else:
+        out["_시즌축"] = "기타"
+    return out
+
+
+def _trend_axis_col(axis):
+    """기준축 선택값 → 실제 사용할 컬럼명."""
+    return {"중카테고리": "_중카", "소카테고리": "_소카",
+            "아이템코드": "_아이템축", "시즌 (Z/A/B/C/D)": "_시즌축"}[axis]
+
+
+def _trend_long(frame, axis_col):
+    """주(월요일 시작) × 계열 단위 집계 long DataFrame [week, label, rev, orig, qty]."""
+    cols = ["week", "label", "rev", "orig", "qty"]
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=cols)
+    dt = frame["_판매일"]
+    week = (dt - pd.to_timedelta(dt.dt.weekday, unit="D")).dt.normalize()
+    g = pd.DataFrame({
+        "week": week.values,
+        "label": frame[axis_col].astype(str).values,
+        "rev": pd.to_numeric(frame["_매출액"], errors="coerce").fillna(0.0).values,
+        "orig": pd.to_numeric(frame["_최초가매출"], errors="coerce").fillna(0.0).values,
+        "qty": pd.to_numeric(frame["_수량"], errors="coerce").fillna(0.0).values,
+    })
+    return g.groupby(["week", "label"], as_index=False)[["rev", "orig", "qty"]].sum()
+
+
+def _trend_matrix(long_df, metric):
+    """long 집계 → 행=주, 열=계열 매트릭스(선택 지표 기준)."""
+    if long_df is None or long_df.empty:
+        return pd.DataFrame()
+
+    def piv(v):
+        return long_df.pivot_table(index="week", columns="label", values=v, aggfunc="sum")
+
+    if metric == "판가율(%)":
+        M = (piv("rev") / piv("orig").replace(0, np.nan)) * 100.0   # 판매 없는 주는 공백(선 끊김)
+    elif metric == "판매수량":
+        M = piv("qty").fillna(0.0)
+    elif metric == "주간 비중(%)":
+        r = piv("rev").fillna(0.0)
+        M = r.div(r.sum(axis=1).replace(0, np.nan), axis=0) * 100.0
+    else:                                                            # 실판매금액(백만)
+        M = piv("rev").fillna(0.0) / 1e6
+    return M.sort_index()
+
+
+def _trend_timing(weeks, vals, ratio):
+    """한 계열의 시즌 타이밍 자동 판정 — 본격 상승 / 피크 / 피크아웃.
+
+    · 피크 = 기간 내 최대값 주.
+    · 본격 상승 시점 = 피크 이전 최저점 이후, 처음으로 '피크 × ratio' 선을 넘어선 주.
+    · 피크아웃 시점 = 피크 이후, 처음으로 '피크 × ratio' 선 아래로 내려온 주.
+    ratio(기준선)를 올리면 더 늦게 붙고 더 빨리 꺾인 것으로 잡힌다(민감도 조절).
+    값이 전부 0/결측이면 None.
+    """
+    v = np.asarray(vals, dtype="float64")
+    if v.size == 0 or not np.isfinite(v).any():
+        return None
+    vmax = np.nanmax(v)
+    if not np.isfinite(vmax) or vmax <= 0:
+        return None
+    pi = int(np.nanargmax(v))
+    thr = vmax * ratio
+    pre = v[:pi + 1].copy()
+    pre[~np.isfinite(pre)] = np.inf
+    ti = int(np.argmin(pre)) if pre.size else 0
+    rise = None
+    for i in range(ti, pi + 1):
+        if np.isfinite(v[i]) and v[i] >= thr:
+            rise = i
+            break
+    out = None
+    for i in range(pi + 1, v.size):
+        if np.isfinite(v[i]) and v[i] < thr:
+            out = i
+            break
+    return {"peak_i": pi, "peak_v": float(vmax), "rise_i": rise, "out_i": out,
+            "rise_w": (weeks[rise] if rise is not None else None),
+            "peak_w": weeks[pi],
+            "out_w": (weeks[out] if out is not None else None)}
+
+
+def _trend_wk(ts):
+    """주 시작일(월요일)을 표 라벨용 문자열로 — 룰2에 맞춰 연도 2자리."""
+    return pd.Timestamp(ts).strftime("%y-%m-%d")
+
+
+def _trend_metric_fmt(metric, v):
+    if v is None or (isinstance(v, float) and not np.isfinite(v)):
+        return "–"
+    if metric == "실판매금액(백만)":
+        return f"{v:,.1f}"
+    if metric == "판매수량":
+        return f"{v:,.0f}"
+    return f"{v:.1f}%"
+
+
+def render_trend_weekly(df):
+    """추세분석 · 메뉴1 — 주별 시즌상품 판매 변화."""
+    if df is None or df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
+        st.info("데이터를 먼저 적재하세요.")
+        return
+    d = df[df["_판매일"].notna()]
+    dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
+
+    st.caption("주(월요일 시작) 단위로 계열별 판매 흐름을 그려서 **언제 붙기 시작하고, 언제 피크를 찍고, "
+               "언제 꺾이는지**를 잡아내는 화면이에요. 조회 기간은 최대 1년(53주)까지 선택할 수 있어요.")
+
+    # ── 기준축 · 지표 · 기간 ─────────────────────────────────────────
+    c1, c2 = st.columns([1.1, 1.1])
+    axis = c1.selectbox("기준 (그래프의 선을 무엇으로 나눌지)", TREND_AXES, index=0, key="tr_axis")
+    metric = c2.selectbox("지표 (세로축)", TREND_METRICS, index=0, key="tr_metric")
+
+    default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=TREND_MAX_DAYS - 7), pd.to_datetime(dmin)).date()
+    rng = st.date_input(f"조회기간 (최대 1년 · 기본 = 최근 {TREND_MAX_WEEKS}주)",
+                        value=(default_start, dmax), min_value=dmin, max_value=dmax, key="tr_rng")
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        st.info("기간(시작~끝)을 선택하세요.")
+        return
+    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    if e < s:
+        st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
+        return
+    if (e - s).days > TREND_MAX_DAYS:
+        st.error(f"조회 기간은 최대 1년({TREND_MAX_WEEKS}주)까지예요. "
+                 f"현재 선택 {(e - s).days + 1}일 — 기간을 줄여 주세요.")
+        return
+
+    o1, o2, o3 = st.columns([1, 1, 1.4])
+    show_prev = o1.checkbox("전년 동기간 점선 비교", value=False, key="tr_prev",
+                            help="같은 색 점선으로 전년 같은 주(52주 전)를 겹쳐 그려요 — "
+                                 "'작년 이맘때보다 빠른가/늦은가'를 볼 수 있어요.")
+    show_peak = o2.checkbox("피크 시점 자동 표시", value=True, key="tr_peak",
+                            help="계열마다 최고점 주에 마커와 '○○ 피크' 라벨을 찍어줘요.")
+    thr_pct = o3.slider("시점 판정 기준선 (피크 대비 %)", min_value=30, max_value=80, value=50, step=5,
+                        key="tr_thr",
+                        help="이 선을 처음 넘은 주 = 본격 상승 시점, 피크 뒤 처음 내려온 주 = 피크아웃 시점.")
+
+    # ── 🌡️ 서울 기온 겹쳐보기 (2026-08-03) ─────────────────────────
+    #    "아침 최저기온이 20도 아래로 떨어진 주에 니트가 붙는다" 같은 임계 온도를 눈으로도, 표로도 확인.
+    n_wx = weather_row_count()
+    show_wx, wx_lines, wx_key = False, [], "최저기온"
+    if n_wx:
+        wd0, wd1 = weather_span()
+        g1, g2, g3 = st.columns([1, 1.5, 1.2])
+        show_wx = g1.checkbox("🌡️ 서울 기온 겹쳐보기", value=False, key="tr_wx",
+                              help=f"기상청 ASOS 일자료 {wd0}~{wd1} 적재됨. 주 평균으로 보조축(오른쪽)에 겹쳐 그려요.")
+        wx_lines = g2.multiselect("겹쳐 그릴 기온", WEATHER_KINDS, default=["최저기온", "최고기온"],
+                                  key="tr_wxlines", placeholder="선택")
+        wx_key = g3.selectbox("임계 기온 기준", WEATHER_KINDS, index=1, key="tr_wxkey",
+                              help="시점 요약표의 '그때 기온' 컬럼에 쓸 기준이에요. "
+                                   "가을 시즌 진입은 보통 아침 최저기온이 가장 잘 맞아요.")
+    else:
+        st.caption("🌡️ 서울 기온을 겹쳐 보려면 관리자가 사이드바 **기온 데이터 업로드**에서 "
+                   "기상자료개방포털 ASOS 일자료를 올리거나, 기상청 API로 자동 수집하면 돼요.")
+
+    # ── 데이터 준비: 필요한 날짜 구간만 잘라서 파생 컬럼 부착 (메모리 절약) ──
+    s_load = (s - pd.Timedelta(days=TREND_PREV_SHIFT_DAYS)) if show_prev else s
+    base = d[(d["_판매일"] >= s_load) & (d["_판매일"] <= e)]
+    if base.empty:
+        st.info("선택한 기간에 매출 데이터가 없어요.")
+        return
+    base = _trend_prep(base)
+
+    # ── 공통 필터 (빈칸=전체) — 브랜드 · 시즌 · 중카테고리 · 소카테고리 ──
+    f1, f2, f3, f4 = st.columns(4)
+    brands = sorted(base["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in base.columns else []
+    seasons = [x for x in _TREND_SEASON_ORDER if x in set(base["_시즌축"])] + \
+              sorted(x for x in set(base["_시즌축"]) if x not in _TREND_SEASON_ORDER)
+    mids = sorted(set(base["_중카"]))
+    smalls = sorted(set(base["_소카"]))
+    selb = f1.multiselect("브랜드", brands, default=[], placeholder="전체", key="tr_fb")
+    sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="tr_fs")
+    selm = f3.multiselect("중카테고리", mids, default=[], placeholder="전체", key="tr_fm")
+    selsm = f4.multiselect("소카테고리", smalls, default=[], placeholder="전체", key="tr_fsm")
+    if selb and "브랜드명" in base.columns:
+        base = base[base["브랜드명"].astype(str).isin(selb)]
+    if sels:
+        base = base[base["_시즌축"].isin(sels)]
+    if selm:
+        base = base[base["_중카"].isin(selm)]
+    if selsm:
+        base = base[base["_소카"].isin(selsm)]
+    if base.empty:
+        st.info("필터 조건에 맞는 데이터가 없어요. 조건을 넓혀 보세요.")
+        return
+
+    axis_col = _trend_axis_col(axis)
+    cur = base[(base["_판매일"] >= s) & (base["_판매일"] <= e)]
+    if cur.empty:
+        st.info("선택한 기간·조건에 매출 데이터가 없어요.")
+        return
+
+    M = _trend_matrix(_trend_long(cur, axis_col), metric)
+    if M.empty:
+        st.info("집계 결과가 비어 있어요.")
+        return
+
+    # ── 계열 선택 (기본 = 기간 매출 상위 N개) ────────────────────────
+    rev_rank = (cur.groupby(cur[axis_col].astype(str), observed=True)["_매출액"].sum()
+                .sort_values(ascending=False))
+    if axis_col == "_시즌축":                                    # 시즌은 Z→A→B→C→D 고정 순서로
+        ordered = [x for x in _TREND_SEASON_ORDER if x in M.columns] + \
+                  [x for x in rev_rank.index if x in M.columns and x not in _TREND_SEASON_ORDER]
+    else:
+        ordered = [x for x in rev_rank.index if x in M.columns]
+    ordered += [c for c in M.columns if c not in ordered]
+    default_sel = ordered if axis_col == "_시즌축" else ordered[:TREND_DEFAULT_TOPN]
+    picked = st.multiselect(f"표시할 {axis} (기본 = 매출 상위 {TREND_DEFAULT_TOPN}개 · 비우면 기본값)",
+                            ordered, default=default_sel, key=f"tr_pick_{axis_col}")
+    if not picked:
+        picked = default_sel
+    picked = [c for c in ordered if c in picked]
+    M = M[picked]
+
+    # 가로축은 '주 시작일(월요일)' 실제 날짜를 그대로 씀 — MM-DD 문자열을 쓰면 1년(53주)을 꽉 채웠을 때
+    # 첫 주와 마지막 주의 MM-DD가 겹쳐 두 점이 한 칸으로 합쳐지는 사고가 나기 때문(날짜축이면 안전).
+    weeks = list(M.index)
+    color_of = {name: TREND_PALETTE[i % len(TREND_PALETTE)] for i, name in enumerate(picked)}
+
+    # ── 전년 동기간 (52주=364일 시프트로 주 라벨 정렬) ──────────────
+    Mp = pd.DataFrame()
+    if show_prev:
+        sp, ep = s - pd.Timedelta(days=TREND_PREV_SHIFT_DAYS), e - pd.Timedelta(days=TREND_PREV_SHIFT_DAYS)
+        prev = base[(base["_판매일"] >= sp) & (base["_판매일"] <= ep)]
+        Mp = _trend_matrix(_trend_long(prev, axis_col), metric)
+        if not Mp.empty:
+            Mp.index = Mp.index + pd.Timedelta(days=TREND_PREV_SHIFT_DAYS)
+            Mp = Mp.reindex(index=M.index, columns=picked)
+
+    # ── 차트 ─────────────────────────────────────────────────────────
+    ttl = f"주별 {axis} 판매 변화 — {metric}"
+    st.markdown(f"**{ttl}**  <span style='color:#888;font-size:0.8rem;'>"
+                f"({s.date()} → {e.date()} · {len(weeks)}주 · 주 시작일=월요일)</span>"
+                + (_NOTE_FLOAT if metric == "실판매금액(백만)" else ""), unsafe_allow_html=True)
+    fig = go.Figure()
+    if show_prev and not Mp.empty:
+        for name in picked:
+            if name not in Mp.columns:
+                continue
+            fig.add_scatter(x=weeks, y=[None if pd.isna(v) else float(v) for v in Mp[name]],
+                            name=f"{name} (전년)", mode="lines", legendgroup=name,
+                            line=dict(color=color_of[name], width=1.6, dash="dot"),
+                            opacity=0.55, hovertemplate=f"{name}(전년) " + "%{y:,.1f}<extra></extra>")
+    timing = {}
+    for name in picked:
+        ys = [None if pd.isna(v) else float(v) for v in M[name]]
+        fig.add_scatter(x=weeks, y=ys, name=name, mode="lines", legendgroup=name,
+                        line=dict(color=color_of[name], width=2.6),
+                        hovertemplate=f"{name} " + "%{y:,.1f}<extra></extra>")
+        t = _trend_timing(weeks, M[name].to_numpy(dtype="float64"), thr_pct / 100.0)
+        timing[name] = t
+        if t and show_peak:
+            fig.add_scatter(x=[weeks[t["peak_i"]]], y=[t["peak_v"]], mode="markers",
+                            marker=dict(color=color_of[name], size=10, symbol="diamond",
+                                        line=dict(color="#fff", width=1.4)),
+                            showlegend=False, legendgroup=name, hoverinfo="skip")
+            fig.add_annotation(x=weeks[t["peak_i"]], y=t["peak_v"], text=f"{name} 피크",
+                               showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.6,
+                               arrowcolor=color_of[name], ax=0, ay=-30,
+                               bgcolor=color_of[name], bordercolor=color_of[name],
+                               font=dict(color="#ffffff", size=10.5))
+    # ── 기온 보조축(오른쪽) 겹쳐 그리기 ──
+    wxw = weather_weekly(weeks) if (show_wx and wx_lines) else pd.DataFrame()
+    if not wxw.empty:
+        for kind in wx_lines:
+            if kind not in wxw.columns:
+                continue
+            fig.add_scatter(x=weeks, y=[None if pd.isna(v) else float(v) for v in wxw[kind]],
+                            name=f"🌡 {kind}", mode="lines", yaxis="y2",
+                            line=dict(color=_WEATHER_LINE.get(kind, "#888"), width=1.8, dash="longdash"),
+                            opacity=0.75, hovertemplate=f"{kind} " + "%{y:.1f}℃<extra></extra>")
+    ytitle = {"실판매금액(백만)": "백만원", "판매수량": "수량(점)",
+              "판가율(%)": "판가율(%)", "주간 비중(%)": "비중(%)"}[metric]
+    fig.update_layout(height=470, margin=dict(t=30, b=0, l=0, r=10),
+                      legend=dict(orientation="h", y=1.14, font=dict(size=11)),
+                      yaxis_title=ytitle, hovermode="x unified")
+    if not wxw.empty:
+        fig.update_layout(yaxis2=dict(title="기온(℃)", overlaying="y", side="right",
+                                      showgrid=False, zeroline=True, zerolinecolor="#ddd"))
+    fig.update_xaxes(type="date", tickformat="%m-%d", dtick=7 * 24 * 3600 * 1000,
+                     tickangle=-60, tickfont=dict(size=10))
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("※ 가로축 = 주 시작일(월요일) MM-DD. 마우스를 올리면 그 주의 모든 계열 값이 한 번에 떠요. "
+               "범례를 클릭하면 해당 계열만 켜고 끌 수 있어요."
+               + ("  전년 점선은 52주 전 같은 주와 맞춰 그린 값이에요." if show_prev else ""))
+
+    # ── 시점 요약표 (본격 상승 · 피크 · 피크아웃) ────────────────────
+    tot_all = float(cur["_매출액"].sum())
+    trows, tidx = [], []
+    gseries = M[picked].sum(axis=1) if metric in ("실판매금액(백만)", "판매수량") else None
+    wxt = wxw if (show_wx and not wxw.empty and wx_key in getattr(wxw, "columns", [])) else None
+    if gseries is not None:
+        gt = _trend_timing(weeks, gseries.to_numpy(dtype="float64"), thr_pct / 100.0)
+        tidx.append("G.TOTAL (선택 계열 합)")
+        trows.append(_trend_timing_row(gt, metric, tot_all, agg=True, wxw=wxt, wx_key=wx_key))
+    for name in picked:
+        tidx.append(name)
+        trows.append(_trend_timing_row(timing.get(name), metric, tot_all,
+                                       rev=float(rev_rank.get(name, 0.0)),
+                                       wxw=wxt, wx_key=wx_key))
+    T = pd.DataFrame(trows, index=tidx)
+    T.index.name = axis
+
+    t1, t2 = st.columns([5, 1])
+    t1.markdown("##### 🕒 계열별 시즌 타이밍 요약" + _NOTE_FLOAT, unsafe_allow_html=True)
+    t2.download_button("⬇ 엑셀", table_excel_bytes(T, "시점요약"),
+                       file_name=f"추세분석_시점요약_{_safe_name(axis)}_{e.date()}.xlsx",
+                       mime=XLSX_MIME, key="tr_dl_timing", use_container_width=True)
+    render_styled_table(T.style.set_properties(**{"text-align": "right"}))
+    st.caption(f"※ 기준선 = 피크 대비 **{thr_pct}%**. **본격 상승 시점** = 피크 직전 최저점 이후 이 선을 "
+               "처음 넘어선 주 · **피크아웃 시점** = 피크 뒤 이 선 아래로 처음 내려온 주(기간 안에서 아직 "
+               "안 꺾였으면 '–'). 조회 기간이 짧으면 실제 피크가 기간 밖일 수 있으니 1년으로 넓혀서도 확인해 주세요.")
+
+    # ── 🌡️ 임계 온도 자동 코멘트 (보고서에 그대로 붙일 수 있는 문장) ──
+    if wxt is not None:
+        cmts = []
+        for name in picked:
+            t = timing.get(name)
+            if not t:
+                continue
+            tr_ = _wx_at(wxt, wx_key, t["rise_i"])
+            to_ = _wx_at(wxt, wx_key, t["out_i"])
+            if tr_ is None and to_ is None:
+                continue
+            seg = f"<b>{name}</b> — "
+            if tr_ is not None:
+                seg += (f"주간 {wx_key} <b>{tr_:.1f}℃</b> 구간({_trend_wk(t['rise_w'])} 주)에서 붙기 시작")
+            if to_ is not None:
+                seg += (" · " if tr_ is not None else "") + \
+                       f"{to_:.1f}℃ 구간({_trend_wk(t['out_w'])} 주)에서 꺾임"
+            cmts.append(seg)
+        if cmts:
+            st.markdown("##### 🌡️ 임계 온도 자동 코멘트")
+            body = "<br>".join(f"{i + 1}. {t}" for i, t in enumerate(cmts))
+            st.markdown("<div style='background:#f7f9fc;border:1px solid #dde6f0;border-radius:8px;"
+                        f"padding:12px 16px;font-size:0.88rem;line-height:1.9;'>{body}</div>",
+                        unsafe_allow_html=True)
+            st.caption(f"※ 해당 주의 일자료 평균 {wx_key} 기준(서울 108 지점). 매년 같은 온도대에서 "
+                       "반복되는지 확인하면, 다음 시즌 상품 투입·프로모션 시점을 온도로 잡을 수 있어요.")
+
+    # ── 주별 데이터 표 + 엑셀 (룰11) ─────────────────────────────────
+    disp = pd.DataFrame({name: [_trend_metric_fmt(metric, v) for v in M[name]] for name in picked},
+                        index=[_trend_wk(w) for w in weeks])
+    if metric in ("실판매금액(백만)", "판매수량"):
+        disp.insert(0, "합계", [_trend_metric_fmt(metric, v) for v in M[picked].sum(axis=1)])
+        head = {"합계": _trend_metric_fmt(metric, float(M[picked].sum(axis=1).sum()))}
+        head.update({name: _trend_metric_fmt(metric, float(M[name].sum())) for name in picked})
+    else:
+        head = {name: _trend_metric_fmt(metric, float(M[name].mean(skipna=True))) for name in picked}
+    lbl = "기간 합계" if metric in ("실판매금액(백만)", "판매수량") else "기간 평균"
+    disp = pd.concat([pd.DataFrame([head], index=[lbl]), disp])
+    disp.index.name = "주 시작일"
+
+    w1, w2 = st.columns([5, 1])
+    w1.markdown(f"##### 📋 주별 데이터 ({metric})" + (_NOTE_FLOAT if metric == "실판매금액(백만)" else ""),
+                unsafe_allow_html=True)
+    w2.download_button("⬇ 엑셀", table_excel_bytes(disp, "주별데이터"),
+                       file_name=f"추세분석_주별_{_safe_name(axis)}_{e.date()}.xlsx",
+                       mime=XLSX_MIME, key="tr_dl_weekly", use_container_width=True)
+    render_styled_table(disp.style.set_properties(**{"text-align": "right"}))
+    st.caption(f"※ 첫 행 = {lbl}(노란 강조). 주 시작일은 월요일 기준이라 마지막 주는 조회 종료일까지만 "
+               "집계된 '미완성 주'일 수 있어요 — 끝부분이 갑자기 낮으면 이것 때문일 수 있으니 참고하세요.")
+
+
+def _trend_timing_row(t, metric, tot_all=0.0, rev=None, agg=False, wxw=None, wx_key="최저기온"):
+    """시점 요약표의 한 행 만들기 — 본격 상승 / 피크 / 피크아웃 + 소요 주수 + 기간 매출·비중.
+
+    wxw(주간 기온표)를 넘기면 각 시점 주의 기온(wx_key 기준) 컬럼 3개가 함께 붙는다
+    — "니트류는 주간 최저기온 12℃ 구간에서 붙기 시작" 같은 임계 온도를 표에서 바로 읽기 위한 것.
+    """
+    if t is None:
+        row = {"본격 상승 시점": "–", "피크 시점": "–", "피크값": "–", "피크아웃 시점": "–",
+               "상승→피크(주)": "–", "피크→피크아웃(주)": "–"}
+        if wxw is not None:
+            row.update({f"상승 시점 {wx_key}": "–", f"피크 시점 {wx_key}": "–",
+                        f"피크아웃 {wx_key}": "–"})
+    else:
+        row = {
+            "본격 상승 시점": _trend_wk(t["rise_w"]) if t["rise_w"] is not None else "–",
+            "피크 시점": _trend_wk(t["peak_w"]),
+            "피크값": _trend_metric_fmt(metric, t["peak_v"]),
+            "피크아웃 시점": _trend_wk(t["out_w"]) if t["out_w"] is not None else "–",
+            "상승→피크(주)": (f"{t['peak_i'] - t['rise_i']}주" if t["rise_i"] is not None else "–"),
+            "피크→피크아웃(주)": (f"{t['out_i'] - t['peak_i']}주" if t["out_i"] is not None else "–"),
+        }
+        if wxw is not None:
+            row[f"상승 시점 {wx_key}"] = _wx_fmt(_wx_at(wxw, wx_key, t["rise_i"]))
+            row[f"피크 시점 {wx_key}"] = _wx_fmt(_wx_at(wxw, wx_key, t["peak_i"]))
+            row[f"피크아웃 {wx_key}"] = _wx_fmt(_wx_at(wxw, wx_key, t["out_i"]))
+    if agg:
+        row["기간 실판매(백만)"] = "–"
+        row["기간 비중"] = "100.0%"
+    else:
+        row["기간 실판매(백만)"] = f"{(rev or 0.0) / 1e6:,.1f}"
+        row["기간 비중"] = f"{(rev or 0.0) / tot_all * 100:.1f}%" if tot_all else "–"
+    return row
+
+
+TREND_MENUS = ["📈 주별 시즌상품 판매 변화"]
+
+
+def render_trend(df):
+    """📉 추세분석 탭 — 메뉴 선택 후 해당 화면 렌더(메뉴는 앞으로 계속 추가 예정)."""
+    st.subheader("📉 추세분석")
+    menu = st.radio("메뉴", TREND_MENUS, horizontal=True,
+                    label_visibility="collapsed", key="trend_menu")
+    st.divider()
+    if menu == TREND_MENUS[0]:
+        render_trend_weekly(df)
+
+
+# ==============================================================================
+# 서울 기온 데이터  ─ 추세분석 기온 겹쳐보기용 (2026-08-03 신설 · 중태님 지시)
+# ==============================================================================
+# "아침 최저기온이 20도 아래로 떨어진 주에 니트가 붙기 시작한다" 같은 임계 온도를 잡아내기 위해
+# 기상청 종관기상관측(ASOS) 일자료를 DB에 쌓아두고, 추세분석 차트에 보조축으로 겹쳐 그린다.
+#  · 적재 방법 2가지 (둘 다 관리자 전용 · 사이드바)
+#    ① 파일 업로드 — 기상자료개방포털(data.kma.go.kr) → 종관기상관측(ASOS) → 일자료 CSV/엑셀 그대로
+#    ② API 자동 수집 — 공공데이터포털 '기상청_지상(종관, ASOS) 일자료 조회서비스' 인증키가 있을 때
+#  · 저장 단위는 '일자료'. 화면에서 쓸 때 주(월요일 시작) 평균으로 자동 집계한다.
+#  · 개인정보와 무관한 공공데이터라 PII 방어벽 대상이 아니다.
+WEATHER_TABLE = "weather_daily"
+WEATHER_STN_DEFAULT = "108"          # 108 = 서울
+WEATHER_KINDS = ["평균기온", "최저기온", "최고기온"]
+_WEATHER_COL = {"평균기온": "avg_ta", "최저기온": "min_ta", "최고기온": "max_ta"}
+_WEATHER_LINE = {"평균기온": "#4CAF50", "최저기온": "#2F6BB0", "최고기온": "#C62828"}
+KMA_ASOS_URL = "http://apis.data.go.kr/1360000/AsosDalyInfoService/getWthrDataList"
+
+
+def _wx_num(v):
+    try:
+        f = float(str(v).strip().replace(",", ""))
+        return None if pd.isna(f) else f
+    except Exception:
+        return None
+
+
+def read_weather_file(uploaded_file):
+    """기상자료개방포털 ASOS 일자료 파일(CSV/엑셀) → DF[date, stn, avg_ta, min_ta, max_ta].
+
+    포털에서 받은 CSV는 인코딩이 CP949인 경우가 많고 위쪽에 주석/안내 줄이 붙기도 해서,
+    '일시(또는 날짜/tm)' 헤더가 있는 줄을 찾아 그 줄부터 읽는다. 컬럼은 이름 키워드로 잡되
+    '최저기온시각'처럼 시각(hhmi) 컬럼은 제외한다.
+    """
+    import csv as _csv
+    name = str(uploaded_file.name).lower()
+    if name.endswith((".xlsx", ".xls")):
+        raw = pd.read_excel(uploaded_file, header=None, dtype=str)
+    else:
+        # 포털 CSV는 위쪽에 '# 종관기상관측…' 같은 안내 줄이 붙어 줄마다 칸 수가 달라서
+        # pandas 기본 파서가 실패한다 → 직접 읽어 최대 칸 수에 맞춰 채운 뒤 표로 만든다.
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        data = uploaded_file.read()
+        text = None
+        if isinstance(data, str):
+            text = data
+        else:
+            for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8", "latin-1"):
+                try:
+                    text = data.decode(enc)
+                    break
+                except Exception:
+                    text = None
+        if not text:
+            raise ValueError("CSV를 읽지 못했어요 — 파일 인코딩(UTF-8/CP949)을 확인해 주세요.")
+        head = text[:4000]
+        delim = "\t" if head.count("\t") > head.count(",") else ","
+        rows = [r for r in _csv.reader(io.StringIO(text), delimiter=delim) if any(str(x).strip() for x in r)]
+        if not rows:
+            raise ValueError("CSV 내용이 비어 있어요.")
+        ncol = max(len(r) for r in rows)
+        raw = pd.DataFrame([r + [""] * (ncol - len(r)) for r in rows], dtype=str)
+
+    hrow = None
+    for i in range(min(30, len(raw))):
+        vals = [str(v).strip() for v in raw.iloc[i].tolist()]
+        if any(v in ("일시", "날짜", "tm", "TM") for v in vals) and any("기온" in v or "Ta" in v for v in vals):
+            hrow = i
+            break
+    if hrow is None:
+        raise ValueError("'일시'와 '기온' 컬럼이 있는 헤더 줄을 찾지 못했어요 — "
+                         "기상자료개방포털 ASOS 일자료 원본 파일인지 확인해 주세요.")
+    header = [str(v).strip() for v in raw.iloc[hrow].tolist()]
+    body = raw.iloc[hrow + 1:].copy()
+    body.columns = header
+    body = body.dropna(how="all")
+
+    def pick(*keys, exclude=("시각", "hhmi", "HHMI")):
+        for c in header:
+            if any(k in c for k in keys) and not any(x in c for x in exclude):
+                return c
+        return None
+
+    c_date = pick("일시", "날짜", "tm", "TM", exclude=())
+    c_avg = pick("평균기온", "avgTa")
+    c_min = pick("최저기온", "minTa")
+    c_max = pick("최고기온", "maxTa")
+    c_stn = pick("지점", "stnId", exclude=("명",))
+    if c_date is None or not any([c_avg, c_min, c_max]):
+        raise ValueError("일시 또는 기온(평균/최저/최고) 컬럼을 찾지 못했어요.")
+
+    out = pd.DataFrame({
+        "date": pd.to_datetime(body[c_date], errors="coerce"),
+        "stn": (body[c_stn].astype(str).str.strip() if c_stn else WEATHER_STN_DEFAULT),
+        "avg_ta": body[c_avg].map(_wx_num) if c_avg else None,
+        "min_ta": body[c_min].map(_wx_num) if c_min else None,
+        "max_ta": body[c_max].map(_wx_num) if c_max else None,
+    })
+    out = out[out["date"].notna()]
+    if out.empty:
+        raise ValueError("날짜를 인식한 행이 없어요 — 파일 내용을 확인해 주세요.")
+    out["date"] = out["date"].dt.strftime("%Y-%m-%d")
+    return out.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+
+
+def fetch_weather_kma(start_date, end_date, service_key, stn=WEATHER_STN_DEFAULT):
+    """공공데이터포털 ASOS 일자료 API로 기간 기온을 받아 DF[date, stn, avg_ta, min_ta, max_ta] 반환.
+
+    엔드포인트: /1360000/AsosDalyInfoService/getWthrDataList (dataCd=ASOS · dateCd=DAY).
+    한 번에 최대 999행씩 페이징하며, 인증키 오류·응답 형식 오류는 ValueError로 알려준다.
+    """
+    import requests
+    rows, page, PER = [], 1, 999
+    while page <= 30:
+        params = {"serviceKey": service_key, "numOfRows": PER, "pageNo": page,
+                  "dataType": "JSON", "dataCd": "ASOS", "dateCd": "DAY",
+                  "startDt": pd.to_datetime(start_date).strftime("%Y%m%d"),
+                  "endDt": pd.to_datetime(end_date).strftime("%Y%m%d"), "stnIds": str(stn)}
+        r = requests.get(KMA_ASOS_URL, params=params, timeout=25)
+        r.raise_for_status()
+        try:
+            js = r.json()
+        except Exception:
+            snippet = r.text[:200].replace("\n", " ")
+            raise ValueError(f"응답이 JSON이 아니에요(인증키 오류일 가능성이 커요): {snippet}")
+        body = (js.get("response", {}) or {}).get("body", {}) or {}
+        head = (js.get("response", {}) or {}).get("header", {}) or {}
+        code = str(head.get("resultCode", ""))
+        if code not in ("", "00"):
+            raise ValueError(f"기상청 API 오류 [{code}] {head.get('resultMsg', '')}")
+        items = ((body.get("items") or {}).get("item")) or []
+        if isinstance(items, dict):
+            items = [items]
+        rows.extend(items)
+        if len(items) < PER:
+            break
+        page += 1
+    if not rows:
+        raise ValueError("받아온 데이터가 없어요 — 기간·지점번호를 확인해 주세요.")
+    out = pd.DataFrame({
+        "date": pd.to_datetime([r.get("tm") for r in rows], errors="coerce"),
+        "stn": [str(r.get("stnId", stn)) for r in rows],
+        "avg_ta": [_wx_num(r.get("avgTa")) for r in rows],
+        "min_ta": [_wx_num(r.get("minTa")) for r in rows],
+        "max_ta": [_wx_num(r.get("maxTa")) for r in rows],
+    })
+    out = out[out["date"].notna()]
+    out["date"] = out["date"].dt.strftime("%Y-%m-%d")
+    return out.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+
+
+def merge_weather(new_df):
+    """기온 일자료를 기존 데이터와 합쳐 저장(같은 날짜는 새 값으로 교체). 저장 후 총 행수 반환.
+
+    전체 교체가 아니라 '병합'이라, 매년 새 기간만 올려도 과거 기온이 지워지지 않는다.
+    (일자료라 10년치를 다 담아도 4천 행 수준이라 통째 재기록이 더 안전하고 빠르다)
+    """
+    old = load_weather(raw=True)
+    both = new_df if (old is None or old.empty) else pd.concat([old, new_df], ignore_index=True)
+    both = both.dropna(subset=["date"]).drop_duplicates(subset=["date"], keep="last")
+    both = both.sort_values("date").reset_index(drop=True)
+    eng = get_engine()
+    with eng.begin() as conn:
+        both.astype(object).where(both.notna(), None).to_sql(
+            WEATHER_TABLE, conn, if_exists="replace", index=False)
+    return len(both)
+
+
+@st.cache_data(ttl=300)
+def load_weather(raw=False):
+    """DB의 기온 일자료 DF[date, stn, avg_ta, min_ta, max_ta]. 없으면 빈 DF."""
+    eng = get_engine()
+    try:
+        with eng.connect() as conn:
+            exists = conn.exec_driver_sql(
+                "SELECT 1 FROM information_schema.tables WHERE table_name=%s"
+                if eng.dialect.name == "postgresql" else
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (WEATHER_TABLE,)).fetchone()
+            if not exists:
+                return pd.DataFrame()
+            w = pd.read_sql(f'SELECT * FROM "{WEATHER_TABLE}"', conn)
+    except Exception:
+        return pd.DataFrame()
+    if w.empty:
+        return w
+    for c in ("avg_ta", "min_ta", "max_ta"):
+        if c in w.columns:
+            w[c] = pd.to_numeric(w[c], errors="coerce")
+    w["date"] = w["date"].astype(str).str.slice(0, 10)
+    return w if raw else w.sort_values("date").reset_index(drop=True)
+
+
+def weather_row_count():
+    try:
+        with get_engine().connect() as conn:
+            return conn.exec_driver_sql(f'SELECT COUNT(*) FROM "{WEATHER_TABLE}"').scalar()
+    except Exception:
+        return 0
+
+
+def weather_span():
+    """적재된 기온 데이터의 (시작일, 종료일) 문자열. 없으면 (None, None)."""
+    w = load_weather()
+    if w is None or w.empty:
+        return None, None
+    return str(w["date"].min()), str(w["date"].max())
+
+
+def weather_weekly(week_index):
+    """일자료 → 주(월요일 시작) 평균 기온. week_index(주 시작일 목록)에 맞춰 정렬해 반환.
+
+    반환: DataFrame(index=week_index, columns=[평균기온, 최저기온, 최고기온]). 데이터 없으면 빈 DF.
+    """
+    w = load_weather()
+    if w is None or w.empty or len(week_index) == 0:
+        return pd.DataFrame()
+    dt = pd.to_datetime(w["date"], errors="coerce")
+    ok = dt.notna()
+    if not ok.any():
+        return pd.DataFrame()
+    wk = (dt[ok] - pd.to_timedelta(dt[ok].dt.weekday, unit="D")).dt.normalize()
+    g = pd.DataFrame({"week": wk.values,
+                      "평균기온": w.loc[ok, "avg_ta"].values if "avg_ta" in w.columns else np.nan,
+                      "최저기온": w.loc[ok, "min_ta"].values if "min_ta" in w.columns else np.nan,
+                      "최고기온": w.loc[ok, "max_ta"].values if "max_ta" in w.columns else np.nan})
+    g = g.groupby("week")[WEATHER_KINDS].mean()
+    return g.reindex(pd.DatetimeIndex(week_index))
+
+
+def _wx_at(wxw, kind, i):
+    """주간 기온표에서 i번째 주의 kind 기온 — 값이 없으면 None."""
+    if wxw is None or wxw.empty or kind not in wxw.columns or i is None:
+        return None
+    try:
+        v = float(wxw[kind].iloc[i])
+    except Exception:
+        return None
+    return v if np.isfinite(v) else None
+
+
+def _wx_fmt(v):
+    return "–" if v is None else f"{v:.1f}℃"
+
+
+def render_weather_admin():
+    """사이드바(관리자) — 서울 기온 일자료 적재 UI. 업로드 / API 자동 수집 2가지."""
+    n = weather_row_count()
+    d0, d1 = weather_span()
+    st.caption(f"🌡️ 서울 기온 일자료: 현재 **{n:,}일**"
+               + (f" ({d0} ~ {d1})" if d0 else " — 추세분석 '기온 겹쳐보기'에 쓰여요"))
+    wup = st.file_uploader("기온 데이터 업로드 (기상자료개방포털 ASOS 일자료 CSV/엑셀)",
+                           type=["csv", "xlsx", "xls"], accept_multiple_files=False, key="wx_up")
+    if wup is not None:
+        if st.button("🌡️ 기온 데이터 적재(같은 날짜는 교체)", use_container_width=True, key="wx_apply"):
+            try:
+                total = merge_weather(read_weather_file(wup))
+                load_weather.clear()
+                st.success(f"기온 데이터 갱신 완료 ✅ 누적 {total:,}일")
+            except Exception as ex:
+                st.error(f"기온 데이터 오류: {ex}")
+    with st.expander("🔗 기상청 API로 자동 수집 (인증키 필요)"):
+        st.caption("공공데이터포털 → '기상청_지상(종관, ASOS) 일자료 조회서비스' 활용신청 후 "
+                   "받은 **일반 인증키(Decoding)** 를 넣으면 기간을 지정해 바로 받아와요. "
+                   "Streamlit Secrets에 `[kma] service_key = \"...\"` 로 넣어두면 매번 안 넣어도 돼요.")
+        try:
+            _sk_default = str(st.secrets.get("kma", {}).get("service_key", "") or "")
+        except Exception:
+            _sk_default = ""
+        key = st.text_input("인증키", value=_sk_default, type="password", key="wx_key")
+        cA, cB = st.columns(2)
+        d_from = cA.date_input("시작일", value=(datetime.now() - pd.Timedelta(days=760)).date(), key="wx_from")
+        d_to = cB.date_input("종료일", value=datetime.now().date(), key="wx_to")
+        stn = st.text_input("지점번호 (108=서울)", value=WEATHER_STN_DEFAULT, key="wx_stn")
+        if st.button("🔗 기상청에서 받아오기", use_container_width=True, key="wx_fetch"):
+            if not key.strip():
+                st.error("인증키를 입력해 주세요.")
+            elif d_to < d_from:
+                st.error("종료일이 시작일보다 앞서요.")
+            else:
+                try:
+                    with st.spinner("기상청에서 받아오는 중…"):
+                        got = fetch_weather_kma(d_from, d_to, key.strip(), stn.strip() or WEATHER_STN_DEFAULT)
+                        total = merge_weather(got)
+                    load_weather.clear()
+                    st.success(f"수집 완료 ✅ {len(got):,}일 수신 · 누적 {total:,}일")
+                except Exception as ex:
+                    st.error(f"수집 실패: {ex}")
+
+
+# ==============================================================================
 # 로그인 / 사용자 관리  ─ 개인 계정 + 역할(admin=관리자 / viewer=뷰어)
 # ==============================================================================
 USERS_TABLE = "app_users"
@@ -3573,6 +4349,9 @@ def main():
                         st.error(f"아이템 마스터 오류: {ex}")
 
             st.divider()
+            render_weather_admin()   # 🌡️ 서울 기온 일자료 (추세분석 기온 겹쳐보기용)
+
+            st.divider()
             with st.expander("👤 사용자 관리 (계정 추가·권한·비활성)"):
                 render_user_admin()
 
@@ -3589,11 +4368,12 @@ def main():
         render_inventory()
         return
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 주간회의 보고자료",
-                                            "📅 연차·아이템 세부분석 (플래그십)",
-                                            "📈 유통채널·브랜드 주간현황",
-                                            "📊 종합 대시보드",
-                                            "🏷️ 재고 모니터링"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 주간회의 보고자료",
+                                                  "📅 연차·아이템 세부분석 (플래그십)",
+                                                  "📈 유통채널·브랜드 주간현황",
+                                                  "📊 종합 대시보드",
+                                                  "📉 추세분석",
+                                                  "🏷️ 재고 모니터링"])
     with tab1:
         render_weekly_report(df)
     with tab2:
@@ -3603,6 +4383,8 @@ def main():
     with tab4:
         render_dashboard(df)
     with tab5:
+        render_trend(df)
+    with tab6:
         render_inventory()
 
 
