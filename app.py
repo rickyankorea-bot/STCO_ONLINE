@@ -26,6 +26,7 @@ import io
 import os
 import gc
 import hmac
+import math
 import hashlib
 from datetime import datetime
 from urllib.parse import quote_plus
@@ -3144,6 +3145,28 @@ TREND_MAX_DAYS = TREND_MAX_WEEKS * 7
 TREND_PREV_SHIFT_DAYS = 364          # 전년 동기간 정렬: 52주 시프트(요일 정렬 유지)
 TREND_DEFAULT_TOPN = 7               # 처음 화면에 자동 선택되는 계열 수
 
+# 차트 글자 크기 프리셋 (2026-08-03 중태님 요청: 가로축 날짜·범례가 너무 작음 → 기본 '크게').
+#  x=가로축 날짜 · y=세로축 눈금 · lg=상단 범례 · ax=축 제목 · pk=피크 라벨 · h=차트 높이(px)
+TREND_FONT_PRESETS = {
+    "보통":      {"x": 11, "y": 12, "lg": 12, "ax": 13, "pk": 11, "h": 470},
+    "크게":      {"x": 20, "y": 16, "lg": 17, "ax": 16, "pk": 14, "h": 620},
+    "아주 크게": {"x": 25, "y": 20, "lg": 21, "ax": 19, "pk": 16, "h": 700},
+}
+TREND_FONT_DEFAULT = "크게"
+
+
+def _trend_tick_step(n_weeks, x_font, plot_px=1150):
+    """가로축 라벨을 글자 크기에 맞춰 몇 주 간격으로 찍을지 계산(겹침 방지).
+
+    -60° 회전 기준 라벨 하나가 가로로 차지하는 폭 ≈ 글자크기 × 1.45.
+    글자를 키우면 53주를 전부 찍을 수 없으므로 2주·3주 간격으로 자동으로 벌린다.
+    """
+    if n_weeks < 2:
+        return 1
+    spacing = plot_px / (n_weeks - 1)
+    need = x_font * 1.45
+    return max(1, int(math.ceil(need / spacing)))
+
 # 계열 색상 팔레트 — 올해 실선과 전년 점선이 같은 색을 쓰도록 고정 배정
 TREND_PALETTE = ["#E8743B", "#7B52AB", "#EFB700", "#2F8FD6", "#4C9A52",
                  "#1F3864", "#C62828", "#009B8E", "#B5651D", "#8E44AD",
@@ -3327,7 +3350,10 @@ def render_trend_weekly(df):
                  f"현재 선택 {(e - s).days + 1}일 — 기간을 줄여 주세요.")
         return
 
-    o1, o2, o3 = st.columns([1, 1, 1.4])
+    o0, o1, o2, o3, o4 = st.columns([1.05, 0.95, 0.95, 1.5, 0.95])
+    show_total = o0.checkbox("전체 실판가 배경선", value=True, key="tr_total",
+                             help="조회 조건 전체의 실판매금액을 굵은 회색 반투명 선으로 뒤에 깔아줘요. "
+                                  "숫자 크기가 달라 다른 선이 눌리지 않도록 별도 보조축을 씁니다.")
     show_prev = o1.checkbox("전년 동기간 점선 비교", value=False, key="tr_prev",
                             help="같은 색 점선으로 전년 같은 주(52주 전)를 겹쳐 그려요 — "
                                  "'작년 이맘때보다 빠른가/늦은가'를 볼 수 있어요.")
@@ -3336,6 +3362,11 @@ def render_trend_weekly(df):
     thr_pct = o3.slider("시점 판정 기준선 (피크 대비 %)", min_value=30, max_value=80, value=50, step=5,
                         key="tr_thr",
                         help="이 선을 처음 넘은 주 = 본격 상승 시점, 피크 뒤 처음 내려온 주 = 피크아웃 시점.")
+    font_key = o4.selectbox("글자 크기", list(TREND_FONT_PRESETS.keys()),
+                            index=list(TREND_FONT_PRESETS).index(TREND_FONT_DEFAULT), key="tr_font",
+                            help="회의 때 화면에 띄우면 '아주 크게'가 잘 보여요. 글자를 키우면 "
+                                 "가로축 날짜가 겹치지 않게 라벨 간격(1주→2주)이 자동으로 벌어져요.")
+    FS = TREND_FONT_PRESETS[font_key]
 
     # ── 🌡️ 서울 기온 겹쳐보기 (2026-08-03) ─────────────────────────
     #    "아침 최저기온이 20도 아래로 떨어진 주에 니트가 붙는다" 같은 임계 온도를 눈으로도, 표로도 확인.
@@ -3435,6 +3466,22 @@ def render_trend_weekly(df):
                 f"({s.date()} → {e.date()} · {len(weeks)}주 · 주 시작일=월요일)</span>"
                 + (_NOTE_FLOAT if metric == "실판매금액(백만)" else ""), unsafe_allow_html=True)
     fig = go.Figure()
+
+    # ── ① 전체 실판가 배경선 (2026-08-03 중태님 지시) ────────────────
+    #    "전체 매출은 이렇게 움직이는데, 이 아이템/시즌은 어떻게 움직이나"를 한 화면에서 보기 위한 기준선.
+    #    전체 합계는 개별 계열보다 자릿수가 커서 같은 축에 두면 나머지 선이 바닥에 눌린다 → 별도 보조축(y3).
+    #    맨 먼저 그려야 다른 선들 뒤(배경)에 깔린다. 지표 선택과 무관하게 항상 '실판매금액(백만)' 기준.
+    tot_ser = pd.Series(dtype="float64")
+    if show_total:
+        _dtc = cur["_판매일"]
+        _wkc = (_dtc - pd.to_timedelta(_dtc.dt.weekday, unit="D")).dt.normalize()
+        tot_ser = (pd.Series(pd.to_numeric(cur["_매출액"], errors="coerce").fillna(0.0).values)
+                   .groupby(_wkc.values).sum().reindex(M.index).fillna(0.0) / 1e6)
+        fig.add_scatter(x=weeks, y=[float(v) for v in tot_ser], name="전체 실판가",
+                        mode="lines", yaxis="y3",
+                        line=dict(color="rgba(126,131,138,0.32)", width=8, shape="spline"),
+                        hovertemplate="전체 실판가 %{y:,.1f}<extra></extra>")
+
     if show_prev and not Mp.empty:
         for name in picked:
             if name not in Mp.columns:
@@ -3460,7 +3507,7 @@ def render_trend_weekly(df):
                                showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.6,
                                arrowcolor=color_of[name], ax=0, ay=-30,
                                bgcolor=color_of[name], bordercolor=color_of[name],
-                               font=dict(color="#ffffff", size=10.5))
+                               font=dict(color="#ffffff", size=FS["pk"]))
     # ── 기온 보조축(오른쪽) 겹쳐 그리기 ──
     wxw = weather_weekly(weeks) if (show_wx and wx_lines) else pd.DataFrame()
     if not wxw.empty:
@@ -3473,24 +3520,52 @@ def render_trend_weekly(df):
                             opacity=0.75, hovertemplate=f"{kind} " + "%{y:.1f}℃<extra></extra>")
     ytitle = {"실판매금액(백만)": "백만원", "판매수량": "수량(점)",
               "판가율(%)": "판가율(%)", "주간 비중(%)": "비중(%)"}[metric]
-    fig.update_layout(height=470, margin=dict(t=30, b=0, l=0, r=10),
-                      legend=dict(orientation="h", y=1.14, font=dict(size=11)),
-                      yaxis_title=ytitle, hovermode="x unified")
+    step_w = _trend_tick_step(len(weeks), FS["x"])
+    fig.update_layout(height=FS["h"], margin=dict(t=34, b=10, l=0, r=10),
+                      legend=dict(orientation="h", y=1.12, font=dict(size=FS["lg"])),
+                      yaxis_title=ytitle, hovermode="x unified",
+                      hoverlabel=dict(font_size=max(13, FS["y"])))
+    # 오른쪽 보조축이 2개(기온 + 전체 실판가)면 서로 겹치지 않게 그래프 폭을 살짝 줄이고 축을 나란히 배치
+    has_tot = show_total and not tot_ser.empty
+    n_right = int(not wxw.empty) + int(has_tot)
+    if n_right > 1:
+        fig.update_layout(xaxis=dict(domain=[0.0, 0.93]))
     if not wxw.empty:
         fig.update_layout(yaxis2=dict(title="기온(℃)", overlaying="y", side="right",
-                                      showgrid=False, zeroline=True, zerolinecolor="#ddd"))
-    fig.update_xaxes(type="date", tickformat="%m-%d", dtick=7 * 24 * 3600 * 1000,
-                     tickangle=-60, tickfont=dict(size=10))
+                                      showgrid=False, zeroline=True, zerolinecolor="#ddd",
+                                      tickfont=dict(size=FS["y"]), title_font=dict(size=FS["ax"])))
+    if has_tot:
+        y3 = dict(title="전체 실판가(백만)", overlaying="y", side="right", showgrid=False,
+                  rangemode="tozero", tickfont=dict(size=FS["y"], color="#7E838A"),
+                  title_font=dict(size=FS["ax"], color="#7E838A"))
+        if n_right > 1:                      # 기온 축 바깥쪽(맨 오른쪽)에 한 칸 띄워 배치
+            y3.update(anchor="free", position=1.0)
+        fig.update_layout(yaxis3=y3)
+    fig.update_xaxes(type="date", tickformat="%m-%d", dtick=step_w * 7 * 24 * 3600 * 1000,
+                     tickangle=-60, tickfont=dict(size=FS["x"]), automargin=True)
+    fig.update_yaxes(tickfont=dict(size=FS["y"]), title_font=dict(size=FS["ax"]), automargin=True)
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("※ 가로축 = 주 시작일(월요일) MM-DD. 마우스를 올리면 그 주의 모든 계열 값이 한 번에 떠요. "
+    st.caption("※ 가로축 = 주 시작일(월요일) MM-DD"
+               + (f" · 글자 크기 '{font_key}'라 라벨은 **{step_w}주 간격**으로 표시(점·선은 매주 그대로)"
+                  if step_w > 1 else "")
+               + ". 마우스를 올리면 그 주의 모든 계열 값이 한 번에 떠요. "
                "범례를 클릭하면 해당 계열만 켜고 끌 수 있어요."
-               + ("  전년 점선은 52주 전 같은 주와 맞춰 그린 값이에요." if show_prev else ""))
+               + ("  전년 점선은 52주 전 같은 주와 맞춰 그린 값이에요." if show_prev else "")
+               + ("  **굵은 회색 배경선 = 전체 실판가**(오른쪽 회색 눈금 · 백만원). 위 필터를 걸면 "
+                  "그 조건 안에서의 전체가 돼요. 개별 계열과 자릿수가 달라 별도 축을 쓰니, "
+                  "**선의 높낮이가 아니라 오르내리는 모양을 비교**해 주세요." if has_tot else ""))
 
     # ── 시점 요약표 (본격 상승 · 피크 · 피크아웃) ────────────────────
     tot_all = float(cur["_매출액"].sum())
     trows, tidx = [], []
     gseries = M[picked].sum(axis=1) if metric in ("실판매금액(백만)", "판매수량") else None
     wxt = wxw if (show_wx and not wxw.empty and wx_key in getattr(wxw, "columns", [])) else None
+    if has_tot:
+        # 전체 실판가는 항상 '백만원' 기준이라 지표 선택과 무관하게 금액 포맷으로 표기(첫 행 노란 강조)
+        tt = _trend_timing(weeks, tot_ser.to_numpy(dtype="float64"), thr_pct / 100.0)
+        tidx.append("■ 전체 실판가 (백만·보조축)")
+        trows.append(_trend_timing_row(tt, "실판매금액(백만)", tot_all, rev=tot_all,
+                                       wxw=wxt, wx_key=wx_key))
     if gseries is not None:
         gt = _trend_timing(weeks, gseries.to_numpy(dtype="float64"), thr_pct / 100.0)
         tidx.append("G.TOTAL (선택 계열 합)")
