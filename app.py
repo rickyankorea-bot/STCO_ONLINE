@@ -3752,7 +3752,20 @@ WEATHER_STN_DEFAULT = "108"          # 108 = 서울
 WEATHER_KINDS = ["평균기온", "최저기온", "최고기온"]
 _WEATHER_COL = {"평균기온": "avg_ta", "최저기온": "min_ta", "최고기온": "max_ta"}
 _WEATHER_LINE = {"평균기온": "#4CAF50", "최저기온": "#2F6BB0", "최고기온": "#C62828"}
-KMA_ASOS_URL = "http://apis.data.go.kr/1360000/AsosDalyInfoService/getWthrDataList"
+KMA_ASOS_URL = "https://apis.data.go.kr/1360000/AsosDalyInfoService/getWthrDataList"
+# 공공데이터포털 인증 관련 오류코드 → 팀원이 바로 조치할 수 있는 한글 안내로 변환
+_KMA_ERR = {
+    "01": "제공기관 서비스 오류예요. 잠시 뒤 다시 시도해 주세요.",
+    "03": "해당 기간·지점에 자료가 없어요. 기간이나 지점번호를 확인해 주세요.",
+    "04": "요청값(HTTP) 오류예요.",
+    "12": "폐기된 서비스예요. 포털에서 서비스 상태를 확인해 주세요.",
+    "20": "접근이 거부됐어요 — 포털에서 이 API를 '활용신청' 했는지 확인해 주세요.",
+    "22": "오늘 요청 한도를 초과했어요(개발계정 1일 10,000건). 내일 다시 시도해 주세요.",
+    "30": "등록되지 않은 인증키예요 — ① '일반 인증키(Decoding)'를 복사했는지 "
+          "② 활용신청 직후라면 1시간 정도 뒤에 다시 시도해 주세요.",
+    "31": "기한이 만료된 인증키예요. 포털에서 연장 신청해 주세요.",
+    "32": "등록되지 않은 도메인/IP예요.",
+}
 
 
 def _wx_num(v):
@@ -3850,6 +3863,7 @@ def fetch_weather_kma(start_date, end_date, service_key, stn=WEATHER_STN_DEFAULT
     엔드포인트: /1360000/AsosDalyInfoService/getWthrDataList (dataCd=ASOS · dateCd=DAY).
     한 번에 최대 999행씩 페이징하며, 인증키 오류·응답 형식 오류는 ValueError로 알려준다.
     """
+    import re
     import requests
     rows, page, PER = [], 1, 999
     while page <= 30:
@@ -3862,13 +3876,22 @@ def fetch_weather_kma(start_date, end_date, service_key, stn=WEATHER_STN_DEFAULT
         try:
             js = r.json()
         except Exception:
-            snippet = r.text[:200].replace("\n", " ")
-            raise ValueError(f"응답이 JSON이 아니에요(인증키 오류일 가능성이 커요): {snippet}")
+            # 인증키가 잘못되면 dataType=JSON이어도 XML 에러문서가 돌아온다 → 코드를 뽑아 한글 안내로 변환
+            txt = r.text or ""
+            m = re.search(r"<returnReasonCode>(\d+)</returnReasonCode>", txt) or \
+                re.search(r"<errMsg>(.*?)</errMsg>", txt)
+            hit = m.group(1) if m else ""
+            if hit in _KMA_ERR:
+                raise ValueError(f"[{hit}] {_KMA_ERR[hit]}")
+            if "SERVICE_KEY_IS_NOT_REGISTERED" in txt or "SERVICE KEY IS NOT REGISTERED" in txt:
+                raise ValueError(f"[30] {_KMA_ERR['30']}")
+            raise ValueError("응답이 JSON이 아니에요(인증키 오류일 가능성이 커요): "
+                             + txt[:200].replace("\n", " "))
         body = (js.get("response", {}) or {}).get("body", {}) or {}
         head = (js.get("response", {}) or {}).get("header", {}) or {}
-        code = str(head.get("resultCode", ""))
+        code = str(head.get("resultCode", "")).zfill(2) if str(head.get("resultCode", "")) else ""
         if code not in ("", "00"):
-            raise ValueError(f"기상청 API 오류 [{code}] {head.get('resultMsg', '')}")
+            raise ValueError(f"[{code}] " + _KMA_ERR.get(code, head.get("resultMsg", "알 수 없는 오류")))
         items = ((body.get("items") or {}).get("item")) or []
         if isinstance(items, dict):
             items = [items]
