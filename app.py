@@ -93,8 +93,8 @@ SEASON_GROUP = {"봄": "S/S", "여름": "S/S", "가을": "F/W", "겨울": "F/W",
 # (item_master가 아직 비어있으면 전체가 이 폴백으로 동작 — 기존과 동일)
 _ITEMGROUP_RAW = {
     "수트류": ["SJ", "SL", "EJ", "EP", "JV", "SP"],
-    "셔츠":   ["DS", "WD"],
-    "팬츠":   ["PA", "HP", "DM", "GP", "WP"],
+    "셔츠류": ["DS", "WD"],
+    "팬츠류": ["PA", "HP", "DM", "GP", "WP"],
     "아우터": ["DJ", "JA", "JP", "CT", "WJ", "GJ", "WO", "PV", "GE", "LJ"],
     "니트류": ["KT", "GK", "KG", "KV", "WK", "WI"],
     "티셔츠": ["TS", "GT", "WS", "IT"],
@@ -103,7 +103,11 @@ _ITEMGROUP_RAW = {
 }
 _ITEMGROUP_MAP_FALLBACK = {c: g for g, codes in _ITEMGROUP_RAW.items() for c in codes}
 # 260803: 아이템 마스터 기준 니트류·티셔츠류가 "니트/티셔츠류" 한 중카테고리로 합쳐짐(모집단 통일 결정).
-ITEMGROUP_ORDER = ["수트류", "아우터", "셔츠", "팬츠", "니트/티셔츠류",
+# 260804 수정(반품률 분석 탭 필터에 '셔츠류'가 안 보이는 버그 리포트로 발견): 아이템 마스터의 실제
+# 중카테고리 값은 "셔츠류"·"팬츠류"(둘 다 '류'가 붙음, DS/WD·PA/DM/GP/WP/HP 코드) — 이 리스트가 예전엔
+# '류' 없는 "셔츠"·"팬츠"로 적혀 있어서, 마스터 로딩 후 실제 데이터 값("셔츠류"/"팬츠류")과 안 맞아
+# ITEMGROUP_ORDER 교집합 필터에서 통째로 빠지는 사고가 있었음 — 마스터 표기와 동일하게 통일.
+ITEMGROUP_ORDER = ["수트류", "아우터", "셔츠류", "팬츠류", "니트/티셔츠류",
                    "신발", "넥타이", "벨트", "양말", "ACC", "기타"]
 
 NUMERIC_COLS = ["매장수수료율", "할인율", "최초가", "현판가", "판매수량",
@@ -2266,7 +2270,8 @@ ITEM_MASTER_TABLE = "item_master"
 # 마스터에 없는 코드만 아래로 폴백한다.
 _INV_CAT_FALLBACK = {}
 for _cat, _codes in {
-    "팬츠": ["PA", "DM", "GP", "WP", "HP"], "셔츠류": ["DS", "WD"],
+    # 260804: "팬츠"→"팬츠류"로 통일(아이템 마스터 실제 표기·ITEMGROUP_ORDER와 동일 기준 맞춤).
+    "팬츠류": ["PA", "DM", "GP", "WP", "HP"], "셔츠류": ["DS", "WD"],
     "니트류": ["KT", "KG", "KV", "GK", "WI"], "티셔츠류": ["TS", "IT", "GT", "WS"],
     "아우터": ["CT", "JP", "JA", "DJ", "WO", "PV", "WJ", "WK", "GE", "GJ"],
     "수트류": ["SJ", "SL", "EJ", "EP", "JV"], "신발": ["FW"],
@@ -4214,10 +4219,16 @@ def render_return_rate(df):
         return
 
     # 노이즈 필터 — 최소 판매수량 (이 수량 미만은 반품률이 소수 케이스로 왜곡되기 쉬움)
-    q95 = int(agg["판매수량"].quantile(0.95)) if len(agg) else 10
-    slider_max = max(10, q95)
-    min_qty = st.slider("최소 판매수량 (이 수량 미만 상품은 반품률 왜곡 방지를 위해 분석에서 제외)",
-                        min_value=0, max_value=slider_max, value=min(10, slider_max), key="rr_minqty")
+    # 260804: 슬라이더 최대값을 데이터 95분위로 자동 제한하던 방식은, 상품별 판매수량이
+    # 원래 10~18개 정도로 작은 경우(예: 11개 팔고 9개 반품=81.8%처럼 소수 케이스에 비율이
+    # 확 튀는 구조) 정작 "20개, 50개 이상 팔린 상품만 놓고 봐도 여전히 심각한지" 확인하려는
+    # 값을 슬라이더로 못 올리는 문제가 있었음 → 직접 숫자를 입력하는 방식으로 변경(중태님 요청).
+    max_qty_data = int(agg["판매수량"].max()) if len(agg) else 10
+    min_qty = st.number_input(
+        "최소 판매수량 (이 수량 미만 상품은 분석에서 제외 — 20, 50처럼 원하는 값을 직접 입력해서 "
+        "\"표본이 작아서 반품률이 튄 것\"인지 \"진짜 심각한 문제\"인지 확인해보세요)",
+        min_value=0, max_value=max(max_qty_data, 1000), value=10, step=5, key="rr_minqty")
+    min_qty = int(min_qty)
     excluded_n = int((agg["판매수량"] < min_qty).sum())
     pool = agg[agg["판매수량"] >= min_qty].copy()
     if pool.empty:
@@ -4285,28 +4296,68 @@ def render_return_rate(df):
     })
     disp = disp.set_index("품번")
 
+    # ── 표 맨 위 소계 — 지금 선택한 "비교 기준"(전체/중카테고리/소카테고리/아이템코드) 그룹별로
+    # 부분합을 먼저 보여준다(중태님 요청, 2026-08-04). 판매수량·반품수량은 그룹 합산 기준 반품률
+    # (반품수량합÷판매수량합 · 볼륨가중), 비교기준평균·이상치기준값은 위에서 이미 계산된 그룹값 그대로.
+    # 정렬 = 그룹 반품률 높은 순(가장 심각한 그룹이 맨 위).
+    sub_keys = [("전체", pool)] if _basis_col is None else list(pool.groupby(_basis_col))
+    sub_rows = []
+    for name, gdf in sub_keys:
+        tot_sale = float(gdf["판매수량"].sum())
+        tot_ret = float(gdf["반품수량"].sum())
+        tot_amt = float(gdf["반품금액"].sum())
+        tot_rate = (tot_ret / tot_sale) if tot_sale else np.nan
+        avg_v = float(gdf["_avg"].iloc[0]) if len(gdf) else np.nan
+        thr_v = float(gdf["_기준값"].iloc[0]) if len(gdf) else np.nan
+        n_out_g = int(gdf["이상치"].sum())
+        row = {
+            "품번": "■ 전체 합계" if _basis_col is None else f"■ 소계 · {name}",
+            "아이템명": f"{'전체' if _basis_col is None else name} ({len(gdf):,}개 품번)",
+            "브랜드명": "", "아이템그룹": "", "소카테고리": "", "시즌명": "",
+            "판매수량": f"{tot_sale:,.0f}", "반품수량": f"{tot_ret:,.0f}",
+            "반품률": f"{tot_rate*100:.1f}%" if pd.notnull(tot_rate) else "–",
+            "비교기준평균": f"{avg_v*100:.1f}%" if pd.notnull(avg_v) else "–",
+            "그룹내상품수": f"{len(gdf):,}",
+            "이상치기준값": f"{thr_v*100:.1f}%" if pd.notnull(thr_v) else "–",
+            "반품금액(백만)": f"{tot_amt/1e6:,.2f}",
+            "이상치": f"{n_out_g:,}건 의심" if n_out_g else "0건",
+            "_sort": tot_rate if pd.notnull(tot_rate) else -1.0,
+        }
+        if _basis_col == "아이템그룹":
+            row["아이템그룹"] = str(name)
+        elif _basis_col == "소카테고리":
+            row["소카테고리"] = str(name)
+        sub_rows.append(row)
+    sub_df = pd.DataFrame(sub_rows).sort_values("_sort", ascending=False).drop(columns="_sort")
+    sub_df = sub_df.set_index("품번")
+    disp_full = pd.concat([sub_df, disp])
+
     h1, h2 = st.columns([5, 1])
     h1.markdown(f"**품번별 반품률 상세**  <span style='color:#888;font-size:0.8rem;'>"
                 f"({s.date()} → {e.date()} · 비교기준={basis} · 판정방식={method})</span>"
                 "<span style='float:right;color:#888;font-weight:400;font-size:0.78rem;'>"
                 "[반품금액: 백만원 · 반품률=반품수량÷판매수량]</span>", unsafe_allow_html=True)
-    h2.download_button("⬇ 엑셀", table_excel_bytes(disp, "반품률분석"),
+    h2.download_button("⬇ 엑셀", table_excel_bytes(disp_full, "반품률분석"),
                        file_name=f"반품률분석_{e.date()}.xlsx", mime=XLSX_MIME,
                        key="rr_dl", use_container_width=True)
 
     _out_flag = pool.set_index("품번")["이상치"]
 
     def _hl(row):
+        if str(row.name).startswith("■"):
+            return ["background-color:#e3ecf7;font-weight:700" for _ in row]
         flag = bool(_out_flag.get(row.name, False))
         return ["background-color:#ffe3e3;font-weight:600" if flag else "" for _ in row]
 
-    sty = disp.style.apply(_hl, axis=1).set_properties(**{"text-align": "right"})
+    sty = disp_full.style.apply(_hl, axis=1).set_properties(**{"text-align": "right"})
     render_styled_table(sty)
-    st.caption("※ 반품률 = 해당 기간 반품수량 ÷ 판매수량(양수). ⚠️ 의심 = 선택한 비교 기준·판정 방식에서 "
+    st.caption(f"※ 맨 위 파란 강조 행(■) = 지금 선택한 비교 기준(**{basis}**) 그룹별 소계 — "
+               "판매수량·반품수량 합산 기준 반품률이며, 그룹 반품률이 높은 순으로 정렬돼요. "
+               "반품률 = 해당 기간 반품수량 ÷ 판매수량(양수). ⚠️ 의심 = 선택한 비교 기준·판정 방식에서 "
                "이상치로 잡힌 품번 — 상품 품질, 사이즈/색상 등 상품정보 표기 오류, 사진·설명 오인 소지 등을 "
                "우선적으로 점검해 볼 후보예요. 그룹내상품수가 적으면(예: 5개 미만) 평균·표준편차가 표본 "
-               "부족으로 흔들릴 수 있으니 참고만 하세요. 최소 판매수량 미만 품번은 위 슬라이더로 조정해서 "
-               "노이즈를 줄일 수 있어요.")
+               "부족으로 흔들릴 수 있으니 참고만 하세요. 최소 판매수량 미만 품번은 위 입력란에 20, 50처럼 "
+               "직접 값을 넣어 제외 기준을 조정해서 노이즈를 줄일 수 있어요.")
 
     # 산점도: 판매수량 vs 반품률 (버블 크기=반품수량)
     st.markdown("##### 📍 판매수량 대비 반품률 분포")
