@@ -3155,6 +3155,38 @@ TREND_FONT_PRESETS = {
 TREND_FONT_DEFAULT = "크게"
 
 
+# 추세 다듬기(스무딩) — 2026-08-04 중태님 요청.
+#  ※ 왜 '7일 이동평균'이 아니라 '주 단위'인가:
+#     이 화면은 이미 월~일 7일치를 한 점으로 합친 '주별 집계'다. 일별 7일 이동평균을 주 간격으로
+#     찍으면 (주별 합계 ÷ 7)과 수학적으로 같은 모양이 나와서 변동성이 전혀 줄지 않는다.
+#     주 사이의 들쭉날쭉함을 줄이려면 '여러 주'를 묶어 평균/중앙값을 내야 한다.
+#  ※ center=True(중앙 정렬): 뒤로 미는 방식(trailing)을 쓰면 피크 시점이 뒤로 밀려버린다.
+#     우리는 이미 지난 데이터를 보는 사후 분석이므로 앞뒤를 같이 평균 내 피크 위치를 보존한다.
+#  ※ 중앙값(median)은 하루짜리 대형 주문·이벤트로 한 주만 튄 경우를 사실상 무시해 준다.
+TREND_SMOOTH = {
+    "없음 (원본 주별)": None,
+    "3주 이동평균 (권장)": ("mean", 3),
+    "4주 이동평균": ("mean", 4),
+    "5주 이동평균 (큰 흐름만)": ("mean", 5),
+    "3주 중앙값 (단발 폭증에 강함)": ("median", 3),
+}
+TREND_SMOOTH_DEFAULT = "3주 이동평균 (권장)"
+
+
+def _trend_smooth(M, mode):
+    """주별 매트릭스에 이동평균/이동중앙값을 적용(중앙 정렬 · 양끝은 있는 만큼만 사용)."""
+    if not mode or M is None or getattr(M, "empty", True):
+        return M
+    kind, win = mode
+    r = M.rolling(window=win, center=True, min_periods=1)
+    return r.median() if kind == "median" else r.mean()
+
+
+def _trend_smooth_tag(key):
+    """제목·표에 붙일 짧은 꼬리표 (스무딩 없음이면 빈 문자열)."""
+    return "" if TREND_SMOOTH.get(key) is None else f" · {key.split(' (')[0]}"
+
+
 def _trend_tick_step(n_weeks, x_font, plot_px=1150):
     """가로축 라벨을 글자 크기에 맞춰 몇 주 간격으로 찍을지 계산(겹침 방지).
 
@@ -3332,12 +3364,20 @@ def render_trend_weekly(df):
 
     # ── 기준축 · 지표 · 기간 ─────────────────────────────────────────
     st.markdown("##### ① 무엇을 볼지 정하기")
-    c1, c2 = st.columns([1.1, 1.1])
+    c1, c2, c3 = st.columns([1.15, 1.0, 1.15])
     axis = c1.selectbox("📊 기준 — 그래프의 **선을 무엇으로 나눌지** (여기를 바꿔야 선이 바뀝니다)",
                         TREND_AXES, index=0, key="tr_axis",
                         help="아이템그룹(중카테고리)별로 선을 보고 싶으면 여기를 '중카테고리'로 바꾸세요. "
                              "아래쪽 '중카테고리'는 조회 대상을 걸러내는 필터라서 선을 나누지 않아요.")
     metric = c2.selectbox("지표 (세로축)", TREND_METRICS, index=0, key="tr_metric")
+    smooth_key = c3.selectbox("〰️ 추세 다듬기 (스무딩)", list(TREND_SMOOTH.keys()),
+                              index=list(TREND_SMOOTH).index(TREND_SMOOTH_DEFAULT), key="tr_smooth",
+                              help="한 주만 튀는 프로모션·단발 대형주문 때문에 선이 들쭉날쭉할 때 씁니다. "
+                                   "앞뒤 주를 함께 평균 내는 '중앙 정렬'이라 피크 시점이 뒤로 밀리지 않아요. "
+                                   "한 주짜리 폭증이 심하면 '3주 중앙값'이 가장 강하게 눌러줍니다. "
+                                   "정확한 원본 수치는 아래 '주별 데이터' 표에 그대로 남아 있어요.")
+    smooth_mode = TREND_SMOOTH[smooth_key]
+    smooth_tag = _trend_smooth_tag(smooth_key)
 
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=TREND_MAX_DAYS - 7), pd.to_datetime(dmin)).date()
     rng = st.date_input(f"조회기간 (최대 1년 · 기본 = 최근 {TREND_MAX_WEEKS}주)",
@@ -3478,7 +3518,10 @@ def render_trend_weekly(df):
     if not picked:
         picked = default_sel
     picked = [c for c in ordered if c in picked]
-    M = M[picked]
+    # Mraw = 원본 주별 수치(아래 '주별 데이터' 표·엑셀은 항상 이 값 = 사실 데이터)
+    # M    = 스무딩 적용본(그래프와 시점 판정용 = 추세 해석)
+    Mraw = M[picked]
+    M = _trend_smooth(Mraw, smooth_mode)
 
     # 가로축은 '주 시작일(월요일)' 실제 날짜를 그대로 씀 — MM-DD 문자열을 쓰면 1년(53주)을 꽉 채웠을 때
     # 첫 주와 마지막 주의 MM-DD가 겹쳐 두 점이 한 칸으로 합쳐지는 사고가 나기 때문(날짜축이면 안전).
@@ -3496,7 +3539,7 @@ def render_trend_weekly(df):
             Mp = Mp.reindex(index=M.index, columns=picked)
 
     # ── 차트 ─────────────────────────────────────────────────────────
-    ttl = f"주별 {axis} 판매 변화 — {metric}"
+    ttl = f"주별 {axis} 판매 변화 — {metric}{smooth_tag}"
     st.markdown(f"**{ttl}**  <span style='color:#888;font-size:0.8rem;'>"
                 f"({s.date()} → {e.date()} · {len(weeks)}주 · 주 시작일=월요일)</span>"
                 + (_NOTE_FLOAT if metric == "실판매금액(백만)" else ""), unsafe_allow_html=True)
@@ -3518,6 +3561,8 @@ def render_trend_weekly(df):
         _wkc = (_dtc - pd.to_timedelta(_dtc.dt.weekday, unit="D")).dt.normalize()
         tot_ser = (pd.Series(pd.to_numeric(all_cur["_매출액"], errors="coerce").fillna(0.0).values)
                    .groupby(_wkc.values).sum().reindex(M.index).fillna(0.0) / 1e6)
+        tot_raw_sum = float(tot_ser.sum()) * 1e6      # 스무딩 전 실제 합계(요약표 금액용)
+        tot_ser = _trend_smooth(tot_ser.to_frame("v"), smooth_mode)["v"]   # 계열과 같은 스무딩 적용
         fig.add_scatter(x=weeks, y=[float(v) for v in tot_ser], name="전체 실판가 (회사 전체)",
                         mode="lines", yaxis="y3",
                         line=dict(color="rgba(126,131,138,0.32)", width=8, shape="spline"),
@@ -3592,6 +3637,9 @@ def render_trend_weekly(df):
                + ". 마우스를 올리면 그 주의 모든 계열 값이 한 번에 떠요. "
                "범례를 클릭하면 해당 계열만 켜고 끌 수 있어요."
                + ("  전년 점선은 52주 전 같은 주와 맞춰 그린 값이에요." if show_prev else "")
+               + ("  〰️ **" + smooth_key.split(" (")[0] + "** 적용 — 앞뒤 주를 함께 평균 낸 "
+                  "중앙 정렬 방식이라 피크 시점은 밀리지 않아요. 정확한 원본 수치는 아래 '주별 데이터' 표에 있어요."
+                  if smooth_mode else "")
                + ("  **굵은 회색 배경선 = 회사 전체 실판가**(오른쪽 회색 눈금 · 백만원). "
                   "**기준축·필터·계열 선택을 바꿔도 이 선은 항상 회사 전체로 고정**돼요 — "
                   "그래야 '신발만 봤을 때 전체 흐름과 어떻게 다른가'를 비교할 수 있으니까요. "
@@ -3623,7 +3671,10 @@ def render_trend_weekly(df):
     T.index.name = axis
 
     t1, t2 = st.columns([5, 1])
-    t1.markdown("##### 🕒 계열별 시즌 타이밍 요약" + _NOTE_FLOAT, unsafe_allow_html=True)
+    t1.markdown("##### 🕒 계열별 시즌 타이밍 요약"
+                + (f" <span style='color:#888;font-weight:400;font-size:0.78rem;'>"
+                   f"({smooth_key.split(' (')[0]} 기준)</span>" if smooth_mode else "")
+                + _NOTE_FLOAT, unsafe_allow_html=True)
     t2.download_button("⬇ 엑셀", table_excel_bytes(T, "시점요약"),
                        file_name=f"추세분석_시점요약_{_safe_name(axis)}_{e.date()}.xlsx",
                        mime=XLSX_MIME, key="tr_dl_timing", use_container_width=True)
@@ -3667,27 +3718,31 @@ def render_trend_weekly(df):
                        "반복되는지 확인하면, 다음 시즌 상품 투입·프로모션 시점을 온도로 잡을 수 있어요.")
 
     # ── 주별 데이터 표 + 엑셀 (룰11) ─────────────────────────────────
-    disp = pd.DataFrame({name: [_trend_metric_fmt(metric, v) for v in M[name]] for name in picked},
+    disp = pd.DataFrame({name: [_trend_metric_fmt(metric, v) for v in Mraw[name]] for name in picked},
                         index=[_trend_wk(w) for w in weeks])
     if metric in ("실판매금액(백만)", "판매수량"):
-        disp.insert(0, "합계", [_trend_metric_fmt(metric, v) for v in M[picked].sum(axis=1)])
-        head = {"합계": _trend_metric_fmt(metric, float(M[picked].sum(axis=1).sum()))}
-        head.update({name: _trend_metric_fmt(metric, float(M[name].sum())) for name in picked})
+        disp.insert(0, "합계", [_trend_metric_fmt(metric, v) for v in Mraw[picked].sum(axis=1)])
+        head = {"합계": _trend_metric_fmt(metric, float(Mraw[picked].sum(axis=1).sum()))}
+        head.update({name: _trend_metric_fmt(metric, float(Mraw[name].sum())) for name in picked})
     else:
-        head = {name: _trend_metric_fmt(metric, float(M[name].mean(skipna=True))) for name in picked}
+        head = {name: _trend_metric_fmt(metric, float(Mraw[name].mean(skipna=True))) for name in picked}
     lbl = "기간 합계" if metric in ("실판매금액(백만)", "판매수량") else "기간 평균"
     disp = pd.concat([pd.DataFrame([head], index=[lbl]), disp])
     disp.index.name = "주 시작일"
 
     w1, w2 = st.columns([5, 1])
-    w1.markdown(f"##### 📋 주별 데이터 ({metric})" + (_NOTE_FLOAT if metric == "실판매금액(백만)" else ""),
-                unsafe_allow_html=True)
+    w1.markdown(f"##### 📋 주별 데이터 ({metric})"
+                + (" <span style='color:#888;font-weight:400;font-size:0.78rem;'>"
+                   "— 스무딩 적용 안 된 <b>원본 수치</b></span>" if smooth_mode else "")
+                + (_NOTE_FLOAT if metric == "실판매금액(백만)" else ""), unsafe_allow_html=True)
     w2.download_button("⬇ 엑셀", table_excel_bytes(disp, "주별데이터"),
                        file_name=f"추세분석_주별_{_safe_name(axis)}_{e.date()}.xlsx",
                        mime=XLSX_MIME, key="tr_dl_weekly", use_container_width=True)
     render_styled_table(disp.style.set_properties(**{"text-align": "right"}))
     st.caption(f"※ 첫 행 = {lbl}(노란 강조). 주 시작일은 월요일 기준이라 마지막 주는 조회 종료일까지만 "
-               "집계된 '미완성 주'일 수 있어요 — 끝부분이 갑자기 낮으면 이것 때문일 수 있으니 참고하세요.")
+               "집계된 '미완성 주'일 수 있어요 — 끝부분이 갑자기 낮으면 이것 때문일 수 있으니 참고하세요."
+               + ("  이 표와 엑셀은 **스무딩을 적용하지 않은 원본 수치**예요(그래프·시점 판정에만 적용)."
+                  if smooth_mode else ""))
 
 
 def _trend_timing_row(t, metric, tot_all=0.0, rev=None, agg=False, wxw=None, wx_key="최저기온"):
@@ -4050,6 +4105,231 @@ def render_weather_admin():
                     st.success(f"수집 완료 ✅ {len(got):,}일 수신 · 누적 {total:,}일")
                 except Exception as ex:
                     st.error(f"수집 실패: {ex}")
+
+
+# ==============================================================================
+# 반품률 분석  ─ 품번별 판매수량 대비 반품수량 이상치 탐지 (2026-08-04 신설 · 중태님 지시)
+# ==============================================================================
+# 매출 로우데이터에는 반품이 별도 컬럼이 아니라 '판매수량이 음수인 행'으로 섞여 있다(ERP 원본 방식).
+# 품번 단위로 판매(양수)·반품(음수)을 나눠 반품률(반품수량÷판매수량)을 구하고, 비교 기준(전체/중카테고리/
+# 소카테고리/아이템코드) 평균 대비 이상치 판정 방식(배수/표준편차)을 화면에서 그때그때 바꿔가며 볼 수 있게 한다.
+# 목적: 반품률이 유난히 높은 상품을 찾아 품질 문제·상품정보(사이즈/색상/사진/설명) 오류 여부를 점검하는 것.
+RR_BASIS_OPTIONS = ["전체 상품 평균", "중카테고리(아이템그룹) 평균", "소카테고리 평균", "아이템코드 평균"]
+RR_METHOD_OPTIONS = ["평균 대비 배수", "평균 + 표준편차"]
+
+
+def render_return_rate(df):
+    """🔄 반품률 분석 — 기간 내 품번별 판매수량 대비 반품수량이 평균보다 훨씬 많은 상품(품질/상품정보
+    오류 의심 후보)을 찾아내는 화면.
+
+    비교 기준(전체 / 중카테고리 / 소카테고리 / 아이템코드)을 화면에서 바꿀 수 있게 한 이유: 아이템 종류마다
+    원래 반품률 수준 자체가 다르다(예: 신발·정장은 사이즈 이슈로 반품률이 구조적으로 높을 수 있음) —
+    "평균보다 훨씬 높다"의 '평균'을 같은 종류 상품끼리로 좁혀야 공정한 비교가 된다.
+    """
+    st.subheader("🔄 반품률 분석")
+    if df is None or df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
+        st.info("데이터를 먼저 적재하세요.")
+        return
+    d = df[df["_판매일"].notna()].copy()
+    if "품번" not in d.columns or "판매수량" not in d.columns:
+        st.info("품번·판매수량 컬럼이 없어 반품률을 계산할 수 없어요.")
+        return
+
+    st.caption("매출 로우데이터에서 **반품은 판매수량이 음수인 행**으로 잡혀요(ERP 원본 방식) — 이 화면은 "
+               "품번별로 판매수량 대비 반품수량 비율(반품률)을 구해서, 비교 기준 평균보다 유난히 반품률이 "
+               "높은 상품을 걸러내요. 품질 문제·상품정보(사이즈·색상·사진·설명) 오류를 의심해볼 후보를 "
+               "찾는 용도예요.")
+
+    dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
+    default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=89), pd.to_datetime(dmin)).date()
+    rng = st.date_input("조회기간 (기본: 최근 90일)", value=(default_start, dmax),
+                        min_value=dmin, max_value=dmax, key="rr_rng")
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        st.info("기간(시작~끝)을 선택하세요.")
+        return
+    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    if e < s:
+        st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
+        return
+
+    # 카테고리 파생(중카테고리는 load_db가 이미 만들어 둔 '아이템그룹' 그대로 사용, 소카테고리는
+    # 추세분석과 동일한 아이템 마스터 기준 맵(_trend_cat_maps)을 그대로 재사용 — 단일 소스 유지)
+    mid_map, small_map, name_map = _trend_cat_maps()
+    if "아이템" in d.columns:
+        _ic = d["아이템"].astype(str).str.strip().str.upper()
+    elif "품번" in d.columns:
+        _ic = d["품번"].astype(str).str.strip().str.upper().str[1:3]
+    else:
+        _ic = pd.Series("", index=d.index, dtype="object")
+    d["_소카"] = _ic.map(small_map).fillna(d.get("아이템그룹", "기타"))
+    d["_아이템코드"] = _ic
+
+    # 공통 필터 (빈칸=전체) — 브랜드 · 시즌 · 중카테고리(아이템그룹)
+    f1, f2, f3 = st.columns(3)
+    brands = sorted(d["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in d.columns else []
+    seasons = sorted(d["시즌명"].dropna().astype(str).unique()) if "시즌명" in d.columns else []
+    groups = [g for g in ITEMGROUP_ORDER if g in set(d.get("아이템그룹", pd.Series(dtype=str)).astype(str))]
+    selb = f1.multiselect("브랜드", brands, default=[], placeholder="전체", key="rr_fb")
+    sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="rr_fs")
+    selg = f3.multiselect("중카테고리(아이템그룹)", groups, default=[], placeholder="전체", key="rr_fg")
+
+    base = d[(d["_판매일"] >= s) & (d["_판매일"] <= e)]
+    if selb and "브랜드명" in base.columns:
+        base = base[base["브랜드명"].astype(str).isin(selb)]
+    if sels and "시즌명" in base.columns:
+        base = base[base["시즌명"].astype(str).isin(sels)]
+    if selg and "아이템그룹" in base.columns:
+        base = base[base["아이템그룹"].astype(str).isin(selg)]
+    if base.empty:
+        st.info("선택한 기간·조건에 매출 데이터가 없어요.")
+        return
+
+    qty = pd.to_numeric(base["판매수량"], errors="coerce").fillna(0.0)
+    rev = pd.to_numeric(base["_매출액"], errors="coerce").fillna(0.0)
+    tmp = pd.DataFrame({
+        "품번": base["품번"].astype(str).str.strip(),
+        "아이템명": base["아이템명"].astype(str) if "아이템명" in base.columns else "",
+        "브랜드명": base["브랜드명"].astype(str) if "브랜드명" in base.columns else "",
+        "아이템그룹": base["아이템그룹"].astype(str) if "아이템그룹" in base.columns else "기타",
+        "소카테고리": base["_소카"].astype(str),
+        "아이템코드": base["_아이템코드"].astype(str),
+        "시즌명": base["시즌명"].astype(str) if "시즌명" in base.columns else "",
+        "판매수량_gross": np.where(qty > 0, qty, 0.0),
+        "반품수량": np.where(qty < 0, -qty, 0.0),
+        "반품금액": np.where(rev < 0, -rev, 0.0),
+    })
+    agg = tmp.groupby("품번").agg(
+        아이템명=("아이템명", "first"), 브랜드명=("브랜드명", "first"),
+        아이템그룹=("아이템그룹", "first"), 소카테고리=("소카테고리", "first"),
+        아이템코드=("아이템코드", "first"), 시즌명=("시즌명", "first"),
+        판매수량=("판매수량_gross", "sum"), 반품수량=("반품수량", "sum"),
+        반품금액=("반품금액", "sum")).reset_index()
+
+    # 이번 기간 판매는 0인데 반품만 잡힌 품번(전기 판매분 반품 가능성) — 반품률 정의 불가라 별도 분리
+    zero_sale = agg[(agg["판매수량"] <= 0) & (agg["반품수량"] > 0)]
+    agg = agg[agg["판매수량"] > 0].copy()
+    agg["반품률"] = agg["반품수량"] / agg["판매수량"]
+    if agg.empty:
+        st.info("선택한 조건에서 판매수량이 있는 품번이 없어요.")
+        return
+
+    # 노이즈 필터 — 최소 판매수량 (이 수량 미만은 반품률이 소수 케이스로 왜곡되기 쉬움)
+    q95 = int(agg["판매수량"].quantile(0.95)) if len(agg) else 10
+    slider_max = max(10, q95)
+    min_qty = st.slider("최소 판매수량 (이 수량 미만 상품은 반품률 왜곡 방지를 위해 분석에서 제외)",
+                        min_value=0, max_value=slider_max, value=min(10, slider_max), key="rr_minqty")
+    excluded_n = int((agg["판매수량"] < min_qty).sum())
+    pool = agg[agg["판매수량"] >= min_qty].copy()
+    if pool.empty:
+        st.info("최소 판매수량 조건을 만족하는 품번이 없어요. 기준을 낮춰 보세요.")
+        return
+
+    # 비교 기준 · 이상치 판정 방식 — 아이템 종류마다 반품률 수준 자체가 다를 수 있어 비교 기준을
+    # 전체/중카테고리/소카테고리/아이템코드 중 골라서 "같은 종류 상품끼리" 평균을 낼 수 있게 한다.
+    o1, o2, o3 = st.columns([1.3, 1.2, 1.6])
+    basis = o1.selectbox("비교 기준 (반품률 '평균'을 어느 범위에서 낼지)", RR_BASIS_OPTIONS,
+                         index=2, key="rr_basis",
+                         help="아이템 종류마다 원래 반품률 수준이 달라요(예: 신발·정장은 사이즈 이슈로 "
+                              "구조적으로 높을 수 있음) — 범위를 좁힐수록 '같은 종류 상품끼리' 공정하게 "
+                              "비교하지만, 그룹 표본이 작아지면 평균이 흔들릴 수 있어요(표의 '그룹내 상품수' 참고).")
+    method = o2.radio("이상치 판정 방식", RR_METHOD_OPTIONS, key="rr_method")
+    if method == "평균 대비 배수":
+        mult = o3.slider("평균의 몇 배 이상을 이상치로 볼지", min_value=1.2, max_value=5.0, value=2.0, step=0.1,
+                         key="rr_mult")
+    else:
+        kstd = o3.slider("평균 + 표준편차 × 배수", min_value=0.5, max_value=4.0, value=2.0, step=0.5,
+                         key="rr_kstd")
+
+    _basis_col = {"전체 상품 평균": None, "중카테고리(아이템그룹) 평균": "아이템그룹",
+                  "소카테고리 평균": "소카테고리", "아이템코드 평균": "아이템코드"}[basis]
+    if _basis_col is None:
+        avg_all = float(pool["반품률"].mean(skipna=True))
+        std_all = float(pool["반품률"].std(skipna=True) or 0.0)
+        pool["_avg"] = avg_all
+        pool["_std"] = std_all
+        pool["_그룹내상품수"] = len(pool)
+    else:
+        gstat = pool.groupby(_basis_col)["반품률"].agg(["mean", "std", "count"]).rename(
+            columns={"mean": "_avg", "std": "_std", "count": "_그룹내상품수"})
+        pool = pool.merge(gstat, left_on=_basis_col, right_index=True, how="left")
+    pool["_std"] = pool["_std"].fillna(0.0)
+
+    if method == "평균 대비 배수":
+        pool["_기준값"] = pool["_avg"] * mult
+    else:
+        pool["_기준값"] = pool["_avg"] + pool["_std"] * kstd
+    pool["이상치"] = pool["반품률"] >= pool["_기준값"]
+    pool = pool.sort_values(["이상치", "반품률"], ascending=[False, False])
+
+    n_out = int(pool["이상치"].sum())
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("분석 대상 품번", f"{len(pool):,}개")
+    k2.metric("전체 평균 반품률", f"{pool['반품률'].mean(skipna=True)*100:.1f}%")
+    k3.metric("이상치 후보", f"{n_out:,}개")
+    k4.metric("최소판매수량 미달 제외", f"{excluded_n:,}개")
+    if len(zero_sale):
+        st.caption(f"ℹ️ 이번 기간 판매는 0인데 반품만 발생한 품번 {len(zero_sale):,}개는 반품률 정의가 "
+                   "안 돼(전기 판매분 반품 가능성) 위 분석에서 제외했어요.")
+
+    disp = pd.DataFrame({
+        "품번": pool["품번"], "아이템명": pool["아이템명"], "브랜드명": pool["브랜드명"],
+        "아이템그룹": pool["아이템그룹"], "소카테고리": pool["소카테고리"], "시즌명": pool["시즌명"],
+        "판매수량": pool["판매수량"].map(lambda v: f"{v:,.0f}"),
+        "반품수량": pool["반품수량"].map(lambda v: f"{v:,.0f}"),
+        "반품률": pool["반품률"].map(lambda v: f"{v*100:.1f}%" if pd.notnull(v) else "–"),
+        "비교기준평균": pool["_avg"].map(lambda v: f"{v*100:.1f}%" if pd.notnull(v) else "–"),
+        "그룹내상품수": pool["_그룹내상품수"].map(lambda v: f"{int(v):,}" if pd.notnull(v) else "–"),
+        "이상치기준값": pool["_기준값"].map(lambda v: f"{v*100:.1f}%" if pd.notnull(v) else "–"),
+        "반품금액(백만)": pool["반품금액"].map(lambda v: f"{v/1e6:,.2f}"),
+        "이상치": pool["이상치"].map(lambda v: "⚠️ 의심" if v else ""),
+    })
+    disp = disp.set_index("품번")
+
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(f"**품번별 반품률 상세**  <span style='color:#888;font-size:0.8rem;'>"
+                f"({s.date()} → {e.date()} · 비교기준={basis} · 판정방식={method})</span>"
+                "<span style='float:right;color:#888;font-weight:400;font-size:0.78rem;'>"
+                "[반품금액: 백만원 · 반품률=반품수량÷판매수량]</span>", unsafe_allow_html=True)
+    h2.download_button("⬇ 엑셀", table_excel_bytes(disp, "반품률분석"),
+                       file_name=f"반품률분석_{e.date()}.xlsx", mime=XLSX_MIME,
+                       key="rr_dl", use_container_width=True)
+
+    _out_flag = pool.set_index("품번")["이상치"]
+
+    def _hl(row):
+        flag = bool(_out_flag.get(row.name, False))
+        return ["background-color:#ffe3e3;font-weight:600" if flag else "" for _ in row]
+
+    sty = disp.style.apply(_hl, axis=1).set_properties(**{"text-align": "right"})
+    render_styled_table(sty)
+    st.caption("※ 반품률 = 해당 기간 반품수량 ÷ 판매수량(양수). ⚠️ 의심 = 선택한 비교 기준·판정 방식에서 "
+               "이상치로 잡힌 품번 — 상품 품질, 사이즈/색상 등 상품정보 표기 오류, 사진·설명 오인 소지 등을 "
+               "우선적으로 점검해 볼 후보예요. 그룹내상품수가 적으면(예: 5개 미만) 평균·표준편차가 표본 "
+               "부족으로 흔들릴 수 있으니 참고만 하세요. 최소 판매수량 미만 품번은 위 슬라이더로 조정해서 "
+               "노이즈를 줄일 수 있어요.")
+
+    # 산점도: 판매수량 vs 반품률 (버블 크기=반품수량)
+    st.markdown("##### 📍 판매수량 대비 반품률 분포")
+    sc = pool.copy()
+    sc["_size"] = sc["반품수량"].clip(lower=1)
+    normal = sc[~sc["이상치"]]
+    outl = sc[sc["이상치"]]
+    fig = go.Figure()
+    fig.add_scatter(x=normal["판매수량"], y=normal["반품률"] * 100, mode="markers",
+                    name="정상 범위", text=normal["품번"] + " · " + normal["아이템명"],
+                    marker=dict(size=(normal["_size"] ** 0.5) * 3 + 4, color="#8fb3d9", opacity=0.6),
+                    hovertemplate="%{text}<br>판매수량 %{x:,.0f} · 반품률 %{y:.1f}%<extra></extra>")
+    fig.add_scatter(x=outl["판매수량"], y=outl["반품률"] * 100, mode="markers",
+                    name="⚠️ 이상치 후보", text=outl["품번"] + " · " + outl["아이템명"],
+                    marker=dict(size=(outl["_size"] ** 0.5) * 3 + 4, color="#c62828", opacity=0.85,
+                                line=dict(color="#7a0000", width=1)),
+                    hovertemplate="%{text}<br>판매수량 %{x:,.0f} · 반품률 %{y:.1f}%<extra></extra>")
+    fig.update_layout(height=420, margin=dict(t=10, b=0, l=0, r=0),
+                      xaxis_title="판매수량", yaxis_title="반품률(%)",
+                      legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("※ 점 크기 = 반품수량. 오른쪽 위(판매도 많은데 반품률도 높음)일수록 실제 영향(반품 처리비용·"
+               "재고 손실)이 크니 우선순위로 확인하세요.")
 
 
 # ==============================================================================
@@ -4517,12 +4797,13 @@ def main():
         render_inventory()
         return
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 주간회의 보고자료",
-                                                  "📅 연차·아이템 세부분석 (플래그십)",
-                                                  "📈 유통채널·브랜드 주간현황",
-                                                  "📊 종합 대시보드",
-                                                  "📉 추세분석",
-                                                  "🏷️ 재고 모니터링"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📋 주간회의 보고자료",
+                                                        "📅 연차·아이템 세부분석 (플래그십)",
+                                                        "📈 유통채널·브랜드 주간현황",
+                                                        "📊 종합 대시보드",
+                                                        "📉 추세분석",
+                                                        "🏷️ 재고 모니터링",
+                                                        "🔄 반품률 분석"])
     with tab1:
         render_weekly_report(df)
     with tab2:
@@ -4535,6 +4816,8 @@ def main():
         render_trend(df)
     with tab6:
         render_inventory()
+    with tab7:
+        render_return_rate(df)
 
 
 if __name__ == "__main__":
