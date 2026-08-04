@@ -4121,6 +4121,11 @@ def render_weather_admin():
 # 목적: 반품률이 유난히 높은 상품을 찾아 품질 문제·상품정보(사이즈/색상/사진/설명) 오류 여부를 점검하는 것.
 RR_BASIS_OPTIONS = ["전체 상품 평균", "중카테고리(아이템그룹) 평균", "소카테고리 평균", "아이템코드 평균"]
 RR_METHOD_OPTIONS = ["평균 대비 배수", "평균 + 표준편차"]
+# 260804(중태님 지시): 매장코드 SD185(SD 쿠팡(그로스))는 유통채널 특이성 때문에 기계적인 판매·반품이
+# 반복 발생해서 반품률 통계를 왜곡시킴 — 반품률 분석 전체(판매수량·반품수량·소계·이상치 판정 전부)에서
+# 이 매장의 매출은 통째로 제외한다. 다른 화면(채널랭킹 등)의 CH_MERGE(쿠팡토탈=SD185+SD184 합산)와는
+# 목적이 달라서 별도 상수로 관리 — CH_MERGE를 건드리면 안 됨.
+RR_EXCLUDE_STORES = {"SD185": "SD 쿠팡(그로스)"}
 
 
 def render_return_rate(df):
@@ -4140,10 +4145,25 @@ def render_return_rate(df):
         st.info("품번·판매수량 컬럼이 없어 반품률을 계산할 수 없어요.")
         return
 
+    # 260804(중태님 지시): SD185(SD 쿠팡(그로스)) 매장은 유통채널 특이성으로 기계적인 판매·반품이
+    # 반복 발생해 반품률 통계를 왜곡시키므로, 반품률 분석에서는 이 매장의 매출을 통째로 제외한다.
+    # 화면에서도 바로 보이게 눈에 띄는 안내를 띄운다(중태님 지시: "이 내용을 화면에도 표기해줘").
+    rr_excl_n = 0
+    if "매장코드" in d.columns:
+        _store_code = d["매장코드"].astype(str).str.strip().str.upper()
+        _excl_mask = _store_code.isin(RR_EXCLUDE_STORES.keys())
+        rr_excl_n = int(_excl_mask.sum())
+        d = d[~_excl_mask]
+
     st.caption("매출 로우데이터에서 **반품은 판매수량이 음수인 행**으로 잡혀요(ERP 원본 방식) — 이 화면은 "
                "품번별로 판매수량 대비 반품수량 비율(반품률)을 구해서, 비교 기준 평균보다 유난히 반품률이 "
                "높은 상품을 걸러내요. 품질 문제·상품정보(사이즈·색상·사진·설명) 오류를 의심해볼 후보를 "
                "찾는 용도예요.")
+    _excl_names = ", ".join(f"{v}({k})" for k, v in RR_EXCLUDE_STORES.items())
+    st.info(f"🚫 **{_excl_names}** 매장 매출은 이 화면(반품률 분석) 전체에서 제외하고 계산해요 — 유통채널 "
+            f"특이성으로 기계적인 판매·반품이 반복 발생해 반품률 통계를 왜곡시키기 때문이에요"
+            + (f" (적재된 데이터 전체 기준 제외 {rr_excl_n:,}행 — 아래 조회기간과 무관하게 미리 제외됨)."
+               if rr_excl_n else "."))
 
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=89), pd.to_datetime(dmin)).date()
