@@ -420,9 +420,12 @@ def delete_dates(date_isos):
 
 
 # 분석 화면이 실제로 쓰는 컬럼만 로드 (49만 행 × 60여 컬럼 전체 로드 시 메모리 초과 → OOM)
-LOAD_COLS = ["판매일자", "브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명",
+LOAD_COLS = ["판매일자", "브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명", "품명",
              "연도", "판매연도", "년월", "최초판매금액", "실판매금액", "현판매금액",
              "판매수량", "매장명", "매장코드", "품번"]
+# 품명(2026-08-04 추가): 매출 로우데이터에 품번 바로 옆에 있는 실제 상품명 컬럼(중태님 확인) —
+# DB(sales 테이블)에 이 컬럼이 없는 경우(과거 업로드분 등)에도 load_db()가 존재하는 컬럼만
+# 골라 쓰므로(위 use = [c for c in LOAD_COLS if c in have]) 에러 없이 안전하게 빠짐.
 LOAD_NUM = ["최초판매금액", "실판매금액", "현판매금액", "판매수량", "판매연도", "연도"]
 LOAD_CAT = ["브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명", "년월", "매장명", "매장코드"]
 
@@ -4214,7 +4217,10 @@ def render_return_rate(df):
     tmp = pd.DataFrame({
         "품번": base["품번"].astype(str).str.strip(),
         "아이템명": base["아이템명"].astype(str) if "아이템명" in base.columns else "",
-        "브랜드명": base["브랜드명"].astype(str) if "브랜드명" in base.columns else "",
+        # 260804(중태님 지시): 표에서 브랜드명 대신 품명(매출 로우데이터의 품번 옆 실제 상품명)을
+        # 보여준다. 브랜드 자체는 위쪽 "브랜드" 필터로 이미 좁힐 수 있어 표 안에서는 굳이 다시 안
+        # 보여줘도 되고, 어떤 상품인지 바로 알아볼 수 있는 품명이 더 유용하다는 판단.
+        "품명": base["품명"].astype(str) if "품명" in base.columns else "",
         "아이템그룹": base["아이템그룹"].astype(str) if "아이템그룹" in base.columns else "기타",
         "소카테고리": base["_소카"].astype(str),
         "아이템코드": base["_아이템코드"].astype(str),
@@ -4224,7 +4230,7 @@ def render_return_rate(df):
         "반품금액": np.where(rev < 0, -rev, 0.0),
     })
     agg = tmp.groupby("품번").agg(
-        아이템명=("아이템명", "first"), 브랜드명=("브랜드명", "first"),
+        아이템명=("아이템명", "first"), 품명=("품명", "first"),
         아이템그룹=("아이템그룹", "first"), 소카테고리=("소카테고리", "first"),
         아이템코드=("아이템코드", "first"), 시즌명=("시즌명", "first"),
         판매수량=("판매수량_gross", "sum"), 반품수량=("반품수량", "sum"),
@@ -4303,7 +4309,7 @@ def render_return_rate(df):
                    "안 돼(전기 판매분 반품 가능성) 위 분석에서 제외했어요.")
 
     disp = pd.DataFrame({
-        "품번": pool["품번"], "아이템명": pool["아이템명"], "브랜드명": pool["브랜드명"],
+        "품번": pool["품번"], "아이템명": pool["아이템명"], "품명": pool["품명"],
         "아이템그룹": pool["아이템그룹"], "소카테고리": pool["소카테고리"], "시즌명": pool["시즌명"],
         "판매수량": pool["판매수량"].map(lambda v: f"{v:,.0f}"),
         "반품수량": pool["반품수량"].map(lambda v: f"{v:,.0f}"),
@@ -4333,7 +4339,7 @@ def render_return_rate(df):
         row = {
             "품번": "■ 전체 합계" if _basis_col is None else f"■ 소계 · {name}",
             "아이템명": f"{'전체' if _basis_col is None else name} ({len(gdf):,}개 품번)",
-            "브랜드명": "", "아이템그룹": "", "소카테고리": "", "시즌명": "",
+            "품명": "", "아이템그룹": "", "소카테고리": "", "시즌명": "",
             "판매수량": f"{tot_sale:,.0f}", "반품수량": f"{tot_ret:,.0f}",
             "반품률": f"{tot_rate*100:.1f}%" if pd.notnull(tot_rate) else "–",
             "비교기준평균": f"{avg_v*100:.1f}%" if pd.notnull(avg_v) else "–",
