@@ -4322,40 +4322,75 @@ def render_return_rate(df):
     })
     disp = disp.set_index("품번")
 
-    # ── 표 맨 위 소계 — 지금 선택한 "비교 기준"(전체/중카테고리/소카테고리/아이템코드) 그룹별로
-    # 부분합을 먼저 보여준다(중태님 요청, 2026-08-04). 판매수량·반품수량은 그룹 합산 기준 반품률
-    # (반품수량합÷판매수량합 · 볼륨가중), 비교기준평균·이상치기준값은 위에서 이미 계산된 그룹값 그대로.
-    # 정렬 = 그룹 반품률 높은 순(가장 심각한 그룹이 맨 위).
-    sub_keys = [("전체", pool)] if _basis_col is None else list(pool.groupby(_basis_col))
-    sub_rows = []
-    for name, gdf in sub_keys:
-        tot_sale = float(gdf["판매수량"].sum())
-        tot_ret = float(gdf["반품수량"].sum())
-        tot_amt = float(gdf["반품금액"].sum())
-        tot_rate = (tot_ret / tot_sale) if tot_sale else np.nan
-        avg_v = float(gdf["_avg"].iloc[0]) if len(gdf) else np.nan
-        thr_v = float(gdf["_기준값"].iloc[0]) if len(gdf) else np.nan
-        n_out_g = int(gdf["이상치"].sum())
-        row = {
-            "품번": "■ 전체 합계" if _basis_col is None else f"■ 소계 · {name}",
-            "아이템명": f"{'전체' if _basis_col is None else name} ({len(gdf):,}개 품번)",
-            "품명": "", "아이템그룹": "", "소카테고리": "", "시즌명": "",
-            "판매수량": f"{tot_sale:,.0f}", "반품수량": f"{tot_ret:,.0f}",
-            "반품률": f"{tot_rate*100:.1f}%" if pd.notnull(tot_rate) else "–",
-            "비교기준평균": f"{avg_v*100:.1f}%" if pd.notnull(avg_v) else "–",
-            "그룹내상품수": f"{len(gdf):,}",
-            "이상치기준값": f"{thr_v*100:.1f}%" if pd.notnull(thr_v) else "–",
-            "반품금액(백만)": f"{tot_amt/1e6:,.2f}",
-            "이상치": f"{n_out_g:,}건 의심" if n_out_g else "0건",
-            "_sort": tot_rate if pd.notnull(tot_rate) else -1.0,
-        }
-        if _basis_col == "아이템그룹":
-            row["아이템그룹"] = str(name)
-        elif _basis_col == "소카테고리":
-            row["소카테고리"] = str(name)
-        sub_rows.append(row)
-    sub_df = pd.DataFrame(sub_rows).sort_values("_sort", ascending=False).drop(columns="_sort")
-    sub_df = sub_df.set_index("품번")
+    # ── 표 맨 위 소계 (2026-08-04 저녁 6차 수정 · 중태님 확인)
+    # 처음 버전은 비교 기준이 "전체 상품 평균"이 아닐 때 그룹별 소계만 보여줬는데, 그러면 진짜
+    # "전체 합계"(전 카테고리 총계) 숫자가 아예 안 보이는 문제가 있었고("전체 평균은 아예 숫자가
+    # 안 들어가 있는데"), 게다가 이 앱 다른 표들의 공통 규칙(룰6: 표의 첫 행=G.TOTAL/합계는 항상
+    # 노란 강조, _TBL_CSS의 `tbody tr:first-child` 규칙)과 충돌해서 그룹 소계 중 우연히 반품률이
+    # 가장 높아 맨 위로 온 행(예: 수트류)만 노란색으로 보이고 나머지는 파란색으로 보이는 것처럼
+    # 되어 있었음("슈트류만 컬러가 다르게 표현되고 있고") — 사실은 색이 "달라진" 게 아니라, 매 순간
+    # 맨 위(1등)에 오는 그룹이 이 공통 규칙 때문에 강제로 노란색이 되는 것이었음.
+    # → 지금은 비교 기준과 무관하게 "■ 전체 합계"(전체 필터 결과 총계) 행을 항상 맨 위 1줄로 고정
+    #   해서 이 앱의 공통 규칙(첫 행=노란 G.TOTAL)과 그대로 맞춘다. 비교 기준이 중카테고리/소카테고리/
+    #   아이템코드처럼 "그룹별로 나눠 보기"인 경우에는, 그 아래에 그룹별 소계(파란 배경, 반품률 높은
+    #   순 정렬)를 이어서 보여준다.
+    tot_sale = float(pool["판매수량"].sum())
+    tot_ret = float(pool["반품수량"].sum())
+    tot_amt = float(pool["반품금액"].sum())
+    tot_rate = (tot_ret / tot_sale) if tot_sale else np.nan
+    if _basis_col is None:
+        tot_avg = float(pool["_avg"].iloc[0]) if len(pool) else np.nan
+        tot_thr = float(pool["_기준값"].iloc[0]) if len(pool) else np.nan
+    else:
+        # 그룹별로 평균·기준값이 제각각이라 "전체 합계" 행 하나로는 단일 기준값을 못 정함 —
+        # 비교기준평균은 전체 품번 반품률의 단순평균(참고용)으로 보여주고, 이상치기준값은 그룹마다
+        # 달라서 "–"(해당 없음)로 비워 혼동을 방지한다.
+        tot_avg = float(pool["반품률"].mean(skipna=True))
+        tot_thr = np.nan
+    tot_out = int(pool["이상치"].sum())
+    sub_rows = [{
+        "품번": "■ 전체 합계", "아이템명": f"전체 ({len(pool):,}개 품번)",
+        "품명": "", "아이템그룹": "", "소카테고리": "", "시즌명": "",
+        "판매수량": f"{tot_sale:,.0f}", "반품수량": f"{tot_ret:,.0f}",
+        "반품률": f"{tot_rate*100:.1f}%" if pd.notnull(tot_rate) else "–",
+        "비교기준평균": f"{tot_avg*100:.1f}%" if pd.notnull(tot_avg) else "–",
+        "그룹내상품수": f"{len(pool):,}",
+        "이상치기준값": f"{tot_thr*100:.1f}%" if pd.notnull(tot_thr) else "–",
+        "반품금액(백만)": f"{tot_amt/1e6:,.2f}",
+        "이상치": f"{tot_out:,}건 의심" if tot_out else "0건",
+    }]
+    if _basis_col is not None:
+        grp_rows = []
+        for name, gdf in pool.groupby(_basis_col):
+            g_sale = float(gdf["판매수량"].sum())
+            g_ret = float(gdf["반품수량"].sum())
+            g_amt = float(gdf["반품금액"].sum())
+            g_rate = (g_ret / g_sale) if g_sale else np.nan
+            avg_v = float(gdf["_avg"].iloc[0]) if len(gdf) else np.nan
+            thr_v = float(gdf["_기준값"].iloc[0]) if len(gdf) else np.nan
+            n_out_g = int(gdf["이상치"].sum())
+            row = {
+                "품번": f"■ 소계 · {name}", "아이템명": f"{name} ({len(gdf):,}개 품번)",
+                "품명": "", "아이템그룹": "", "소카테고리": "", "시즌명": "",
+                "판매수량": f"{g_sale:,.0f}", "반품수량": f"{g_ret:,.0f}",
+                "반품률": f"{g_rate*100:.1f}%" if pd.notnull(g_rate) else "–",
+                "비교기준평균": f"{avg_v*100:.1f}%" if pd.notnull(avg_v) else "–",
+                "그룹내상품수": f"{len(gdf):,}",
+                "이상치기준값": f"{thr_v*100:.1f}%" if pd.notnull(thr_v) else "–",
+                "반품금액(백만)": f"{g_amt/1e6:,.2f}",
+                "이상치": f"{n_out_g:,}건 의심" if n_out_g else "0건",
+                "_sort": g_rate if pd.notnull(g_rate) else -1.0,
+            }
+            if _basis_col == "아이템그룹":
+                row["아이템그룹"] = str(name)
+            elif _basis_col == "소카테고리":
+                row["소카테고리"] = str(name)
+            grp_rows.append(row)
+        grp_rows.sort(key=lambda r: r["_sort"], reverse=True)
+        for r in grp_rows:
+            del r["_sort"]
+        sub_rows.extend(grp_rows)
+    sub_df = pd.DataFrame(sub_rows).set_index("품번")
     disp_full = pd.concat([sub_df, disp])
 
     h1, h2 = st.columns([5, 1])
@@ -4370,28 +4405,37 @@ def render_return_rate(df):
     _out_flag = pool.set_index("품번")["이상치"]
 
     def _hl(row):
-        if str(row.name).startswith("■"):
-            # 260804: 소계(■) 행 = 파란 배경 + 아래쪽 굵은 경계선. 바로 밑에 개별 품번(빨간 이상치
-            # 행 포함)이 이어지다 보니 "소계가 여러 줄인가?"로 오해될 수 있어(중태님 확인),
-            # 소계 블록과 상세 목록을 시각적으로 분리하는 경계선을 추가.
+        name = str(row.name)
+        if name == "■ 전체 합계":
+            # 260804 저녁 6차: 맨 첫 행 = 전체 합계는 이 앱 공통 규칙(룰6: 표의 첫 행=G.TOTAL은
+            # 항상 노란 강조, _TBL_CSS의 tr:first-child 규칙)에 맞춰 노란 배경으로 통일한다.
+            # 아래 인라인 스타일은 참고용이고, 실제 화면 색은 _TBL_CSS의 !important 규칙이 최종
+            # 적용됨(다른 표들과 똑같은 "첫 행=노란 총계" 느낌을 그대로 가져오기 위함).
+            return ["background-color:#fff2b8;font-weight:700;border-bottom:2px solid #29508c" for _ in row]
+        if name.startswith("■"):
+            # 그룹별 소계(예: ■ 소계 · 수트류) = 파란 배경 + 아래쪽 굵은 경계선. 바로 밑에 개별
+            # 품번(빨간 이상치 행 포함)이 이어지다 보니 "소계가 여러 줄인가?"로 오해될 수 있어
+            # (중태님 확인), 소계 블록과 상세 목록을 시각적으로 분리하는 경계선을 추가.
             return ["background-color:#e3ecf7;font-weight:700;border-bottom:2px solid #29508c" for _ in row]
         flag = bool(_out_flag.get(row.name, False))
         return ["background-color:#ffe3e3;font-weight:600" if flag else "" for _ in row]
 
     sty = disp_full.style.apply(_hl, axis=1).set_properties(**{"text-align": "right"})
     render_styled_table(sty)
-    n_sub = len(sub_df)
-    st.caption(f"※ 맨 위 파란 강조 행(■, 아래 굵은 선까지) = 지금 선택한 비교 기준(**{basis}**) 그룹별 "
-               f"소계예요 — 지금 필터·비교 기준에서는 **{n_sub}줄**만 나옵니다(예: 카테고리를 좁혀서 1개만 "
-               "선택했고 비교 기준도 '전체 상품 평균'이면 소계도 딱 1줄). 판매수량·반품수량 합산 기준 "
-               "반품률이며, 그룹 반품률이 높은 순으로 정렬돼요. 파란 선 아래부터는 **개별 품번** 목록이고, "
-               "그중 빨간 배경 행은 소계와 별개로 그 품번 하나하나가 이상치로 잡혔다는 표시예요(소계 줄이 "
-               "아니라 낱개 상품 경고입니다). 반품률 = 해당 기간 반품수량 ÷ 판매수량(양수). ⚠️ 의심 = "
-               "선택한 비교 기준·판정 방식에서 이상치로 잡힌 품번 — 상품 품질, 사이즈/색상 등 상품정보 "
-               "표기 오류, 사진·설명 오인 소지 등을 우선적으로 점검해 볼 후보예요. 그룹내상품수가 적으면"
-               "(예: 5개 미만) 평균·표준편차가 표본 부족으로 흔들릴 수 있으니 참고만 하세요. 최소 판매수량 "
-               "미만 품번은 위 입력란에 20, 50처럼 직접 값을 넣어 제외 기준을 조정해서 노이즈를 줄일 수 "
-               "있어요.")
+    n_grp = len(sub_df) - 1
+    st.caption(f"※ 맨 위 **노란 행(■ 전체 합계)**은 지금 필터 조건 전체를 합산한 총계예요(이 앱 다른 표들과 "
+               "동일하게 첫 행=노란 총계). "
+               + (f"그 아래 **파란 행({n_grp}줄)**은 지금 선택한 비교 기준(**{basis}**)별 소계이고, "
+                  "그룹 반품률이 높은 순으로 정렬돼요. " if n_grp else
+                  "지금은 비교 기준이 '전체 상품 평균'이라 그룹별 소계 없이 전체 총계 1줄만 나와요. ")
+               + "판매수량·반품수량은 합산 기준 반품률(볼륨가중)이에요. 노란·파란 선 아래부터는 "
+               "**개별 품번** 목록이고, 그중 빨간 배경 행은 총계·소계와 별개로 그 품번 하나하나가 "
+               "이상치로 잡혔다는 표시예요(총계·소계 줄이 아니라 낱개 상품 경고입니다). 반품률 = 해당 "
+               "기간 반품수량 ÷ 판매수량(양수). ⚠️ 의심 = 선택한 비교 기준·판정 방식에서 이상치로 잡힌 "
+               "품번 — 상품 품질, 사이즈/색상 등 상품정보 표기 오류, 사진·설명 오인 소지 등을 우선적으로 "
+               "점검해 볼 후보예요. 그룹내상품수가 적으면(예: 5개 미만) 평균·표준편차가 표본 부족으로 "
+               "흔들릴 수 있으니 참고만 하세요. 최소 판매수량 미만 품번은 위 입력란에 20, 50처럼 직접 값을 "
+               "넣어 제외 기준을 조정해서 노이즈를 줄일 수 있어요.")
 
     # 산점도: 판매수량 vs 반품률 (버블 크기=반품수량)
     st.markdown("##### 📍 판매수량 대비 반품률 분포")
