@@ -422,10 +422,15 @@ def delete_dates(date_isos):
 # 분석 화면이 실제로 쓰는 컬럼만 로드 (49만 행 × 60여 컬럼 전체 로드 시 메모리 초과 → OOM)
 LOAD_COLS = ["판매일자", "브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명", "품명",
              "연도", "판매연도", "년월", "최초판매금액", "실판매금액", "현판매금액",
-             "판매수량", "매장명", "매장코드", "품번"]
+             "판매수량", "매장명", "매장코드", "품번",
+             "순번", "주문번호", "판매번호", "판매연번",
+             "반품판매일자", "반품판매번호", "반품판매연번"]
 # 품명(2026-08-04 추가): 매출 로우데이터에 품번 바로 옆에 있는 실제 상품명 컬럼(중태님 확인) —
 # DB(sales 테이블)에 이 컬럼이 없는 경우(과거 업로드분 등)에도 load_db()가 존재하는 컬럼만
 # 골라 쓰므로(위 use = [c for c in LOAD_COLS if c in have]) 에러 없이 안전하게 빠짐.
+# 순번·주문번호·반품판매일자/번호/연번(2026-08-04 추가): "SET/단품 판매 분석" 탭 전용 — 세트
+# 그룹핑(주문번호+디자인키)과 반품↔원판매 매칭에 필요. 과거 업로드분에 이 컬럼이 없어도(구버전
+# 원본 파일) load_db()가 존재하는 컬럼만 골라 쓰므로 에러 없이 안전하게 빠짐(그 경우 이 탭만 데이터 부족).
 LOAD_NUM = ["최초판매금액", "실판매금액", "현판매금액", "판매수량", "판매연도", "연도"]
 LOAD_CAT = ["브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명", "년월", "매장명", "매장코드"]
 
@@ -4462,6 +4467,375 @@ def render_return_rate(df):
 
 
 # ==============================================================================
+# 🧩 SET/단품 판매 분석 (수트·셋업) — 260804 신규
+# 설계 문서: claude/수트_세트판매가능성_사이즈매칭_설계검토.md (부속 작업, v3 + 3-1절 + 6절)
+# ==============================================================================
+_SUITSET_LOOKBACK_DAYS = 60   # 3-1절: 그룹 정체성 판정용 룩업 윈도우(조회 시작일 이전). 성능 부담 크면 30으로.
+
+
+def _suitset_classify(j, p):
+    """세트그룹/단품그룹/제외 판정 — 순자켓·순하의 둘 다 0이 아니면 세트(부호 무관, 260804 실데이터
+    검증 중 확장: 반품만 있어 순수량이 음수인 그룹도 정확히 분류하려면 '>0'이 아니라 '!=0' 기준이어야 함)."""
+    if j != 0 and p != 0:
+        return "세트그룹"
+    elif j != 0 or p != 0:
+        return "단품그룹"
+    return "제외"
+
+
+def render_suitset(df):
+    """🧩 SET/단품 판매 분석 — 수트(SJ/SL)·셋업(EJ/EP)이 매장별로 몇 피스가 '세트로' 팔렸고 몇 피스가
+    '단품으로' 팔렸는지 집계. 판정 단위 = 주문번호+SET품번(품번 10자리 중 아이템 자리를 SJ/EJ 대표코드로,
+    라인·패턴·색상 3자리를 'SET'으로 치환한 공식 조인키 — set-product-code-generator 스킬/STO
+    sto_config.json 규칙) 그룹, 판매·반품은 그룹 순수량(net)으로 합쳐서 계산(반품이 원 주문의 세트/단품
+    소속을 그대로 물려받음). SD163(SD댄블)은 세트로 사도 라인마다 다른(인접) 주문번호가 찍히는 채널
+    특성이 있어 '인접 주문번호+SET품번'으로 별도 그룹핑. 그룹 성격(세트/단품) 판정은 조회 시작일 이전
+    최대 60일까지 넓혀서 봐서, 반품의 원 판매가 화면 기간 밖에 있어도 놓치지 않게 하되, 화면에 실제
+    더해지는 실적은 조회기간 '안'에서 발생한 판매·반품 델타만 반영(이중집계 방지, 설계문서 3-1절).
+    """
+    st.subheader("🧩 SET/단품 판매 분석 (수트·셋업)")
+    if df is None or df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
+        st.info("데이터를 먼저 적재하세요.")
+        return
+    need_cols = {"아이템", "매장코드", "매장명", "판매수량", "_매출액", "_판매일", "품번"}
+    if not need_cols.issubset(df.columns):
+        st.info("이 리포트에 필요한 컬럼(아이템·매장코드·품번·판매수량 등)이 없어요.")
+        return
+    if not {"순번", "주문번호"}.issubset(df.columns):
+        st.warning("이 화면은 순번·주문번호 컬럼이 있어야 정확히 계산돼요. 과거에 적재한 원본 파일에 "
+                   "이 컬럼이 없으면(구버전 업로드분) 최신 원본 파일로 다시 적재해 주세요.")
+        return
+
+    st.caption(
+        "슈트(SJ/SL)·셋업(EJ/EP)이 **같은 주문번호 + SET품번**(품번 10자리 중 아이템 자리를 SJ/EJ "
+        "대표코드로, 라인·패턴·색상 3자리를 'SET'으로 치환한 공식 조인키 — 예: SSJVB01CSK·SSLVB01CSK "
+        "→ 둘 다 SSJVB01SET)**으로 묶여 팔렸으면 "
+        "'세트로판매', 한쪽만 팔렸으면 '단품판매'로 집계해요. 판매·반품은 그룹 단위 순수량(net)으로 "
+        "합쳐서 계산하고(반품은 원래 세트/단품 소속을 그대로 물려받음), 전량 반품된 그룹은 세트·단품 "
+        "어디에도 안 잡히고 조용히 빠져요. SD163(SD댄블)은 세트로 사도 라인마다 다른(인접) 주문번호가 "
+        "찍히는 채널 특성이 있어 '인접 주문번호+SET품번'으로 따로 묶어요. 그룹이 세트인지 단품인지 "
+        f"판정할 땐 조회 시작일 이전 최대 {_SUITSET_LOOKBACK_DAYS}일까지 넓혀서 봐서(성능상 제한 — 실무상 "
+        "반품은 구매 후 1개월을 잘 안 넘긴다는 전제), 반품의 원 판매가 화면 기간 밖에 있어도 정확히 "
+        "판정해요. 다만 화면에 더해지는 실적 자체는 **조회기간 안에서 실제로 발생한 판매·반품만** — "
+        "그래서 '이번 기간엔 반품만 있었다' 같은 경우 세트로판매·단품판매가 마이너스로 보일 수 있는데, "
+        "이건 오류가 아니라 그 기간의 순감소를 있는 그대로 보여주는 정상적인 결과예요."
+    )
+
+    d = df[df["아이템"].astype(str).str.strip().str.upper().isin(["SJ", "SL", "EJ", "EP"])].copy()
+    if d.empty:
+        st.info("슈트/셋업(SJ·SL·EJ·EP) 판매 데이터가 없어요.")
+        return
+
+    dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
+    default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
+    rng = st.date_input("조회기간 (기본: 최근 7일)", value=(default_start, dmax),
+                        min_value=dmin, max_value=dmax, key="ss_rng")
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        st.info("기간(시작~끝)을 선택하세요.")
+        return
+    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    if e < s:
+        st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
+        return
+
+    # 공통룰10: 브랜드·시즌 필터(빈칸=전체). 디자인키에 브랜드·시즌이 이미 포함되므로 매칭 조건과
+    # 충돌 없이 미리 좁혀도 안전 — 세트를 이루는 자켓·하의는 항상 브랜드·시즌이 같기 때문.
+    f1, f2 = st.columns(2)
+    brands = sorted(d["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in d.columns else []
+    seasons = sorted(d["시즌명"].dropna().astype(str).unique()) if "시즌명" in d.columns else []
+    selb = f1.multiselect("브랜드", brands, default=[], placeholder="전체", key="ss_fb")
+    sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="ss_fs")
+
+    lb_start = s - pd.Timedelta(days=_SUITSET_LOOKBACK_DAYS)
+    uni = d[(d["_판매일"] >= lb_start) & (d["_판매일"] <= e)].copy()
+    if selb and "브랜드명" in uni.columns:
+        uni = uni[uni["브랜드명"].astype(str).isin(selb)]
+    if sels and "시즌명" in uni.columns:
+        uni = uni[uni["시즌명"].astype(str).isin(sels)]
+    if uni.empty:
+        st.info("선택한 조건에 슈트/셋업 데이터가 없어요.")
+        return
+
+    # ── SET품번(공식 조인키, set-product-code-generator 스킬/STO sto_config.json 규칙) & 상하의 구분
+    # 260804 심야: 처음엔 브랜드+연도+시즌+순번을 이어붙인 임시 "_디자인키"를 썼으나, 재고 마스터의
+    # 진짜 SET품번 생성 규칙(품번 10자리 중 아이템 자리를 그룹 대표코드로, 라인·패턴·색상 3자리를
+    # 'SET' 리터럴로 치환 — 예: SSJVB01CSK/SSLVB01CSK → 둘 다 SSJVB01SET)을 확인해서 그대로 적용.
+    # 회사 process_260731.py K/L/M 로직과 동일 결과(검증 완료). 이게 이제 진짜 "SET 품번"이라 표2에서
+    # 별도 대표품번 추정 없이 이 값 자체를 그대로 라벨로 쓸 수 있다.
+    item_u = uni["아이템"].astype(str).str.strip().str.upper()
+    uni["_상하의"] = item_u.map({"SJ": "상의", "EJ": "상의", "SL": "하의", "EP": "하의"})
+    _pn = uni["품번"].astype(str).str.strip().str.upper()
+    _item_repr = _pn.str.slice(1, 3).map({"SJ": "SJ", "SL": "SJ", "EJ": "EJ", "EP": "EJ"})
+    _pn_ok = (_pn.str.len() == 10) & _item_repr.notna()
+    _set_official = _pn.str.slice(0, 1) + _item_repr.fillna("") + _pn.str.slice(3, 7) + "SET"
+    # 폴백(품번이 10자리가 아닌 이례적 데이터일 때만): 브랜드명+연도+시즌명+순번 기반 대체 키.
+    # 그룹핑은 그대로 되지만 'SET품번'다운 표기는 아니므로 화면엔 "FB-" 접두어를 붙여 구분한다.
+    _brand = uni["브랜드명"].astype(str) if "브랜드명" in uni.columns else ""
+    _year = uni["연도"].astype(str) if "연도" in uni.columns else ""
+    _season = uni["시즌명"].astype(str) if "시즌명" in uni.columns else ""
+    _seq = pd.to_numeric(uni["순번"], errors="coerce").fillna(-1).astype(int).astype(str)
+    _fallback_key = "FB-" + _brand + "|" + _year + "|" + _season + "|" + _seq
+    uni["_디자인키"] = np.where(_pn_ok, _set_official, _fallback_key)
+    uni["_수량"] = pd.to_numeric(uni["판매수량"], errors="coerce").fillna(0.0)
+    uni["_매출"] = pd.to_numeric(uni["_매출액"], errors="coerce").fillna(0.0)
+    uni["_주문번호_num"] = pd.to_numeric(uni["주문번호"], errors="coerce")
+
+    store_code = uni["매장코드"].astype(str).str.strip().str.upper()
+    is_sd163 = store_code == "SD163"
+
+    # 일반 매장: 매장코드+주문번호+디자인키 그대로 그룹키.
+    normal_key = store_code + "‖" + uni["주문번호"].astype(str) + "‖" + uni["_디자인키"]
+
+    # SD163(설계문서 6절): 정렬 후 벡터화 diff로 "인접 주문번호 + 디자인키 일치" 클러스터링.
+    grp_id = pd.Series(index=uni.index, dtype="object")
+    grp_id.loc[~is_sd163] = normal_key.loc[~is_sd163]
+    sd_idx = uni.index[is_sd163]
+    if len(sd_idx):
+        sub = uni.loc[sd_idx].sort_values(["매장코드", "_주문번호_num"])
+        prev_num = sub["_주문번호_num"].shift()
+        prev_key = sub["_디자인키"].shift()
+        same_as_prev = ((sub["_주문번호_num"] - prev_num == 1) & (sub["_디자인키"] == prev_key)
+                        & sub["_주문번호_num"].notna() & prev_num.notna())
+        cluster_id = (~same_as_prev).cumsum()
+        grp_id.loc[sub.index] = ("SD163‖G" + cluster_id.astype(str)).values
+    uni["_그룹ID"] = grp_id
+
+    # ── ① 그룹 정체성(넓은 룩업 윈도우 전체) — 세트그룹/단품그룹 판정 ──────────
+    ident = uni.groupby("_그룹ID").apply(lambda g: pd.Series({
+        "_순상의": g.loc[g["_상하의"] == "상의", "_수량"].sum(),
+        "_순하의": g.loc[g["_상하의"] == "하의", "_수량"].sum(),
+    }))
+    ident["_분류"] = [ _suitset_classify(j, p) for j, p in zip(ident["_순상의"], ident["_순하의"]) ]
+    uni = uni.merge(ident[["_분류"]], left_on="_그룹ID", right_index=True, how="left")
+
+    # ── ② 조회기간 "안"에서 발생한 델타만 화면 실적에 반영 (3-1절, 이중집계 방지) ──
+    per = uni[(uni["_판매일"] >= s) & (uni["_판매일"] <= e)].copy()
+    if per.empty:
+        st.info("선택한 조회기간 안에 슈트/셋업 판매·반품이 없어요.")
+        return
+
+    g = per.groupby(["매장코드", "매장명", "_그룹ID", "_분류"]).apply(lambda x: pd.Series({
+        "_상의델타": x.loc[x["_상하의"] == "상의", "_수량"].sum(),
+        "_하의델타": x.loc[x["_상하의"] == "하의", "_수량"].sum(),
+        "_매출델타": x["_매출"].sum(),
+    })).reset_index()
+
+    def _rowmetrics(r):
+        j, p, cls = r["_상의델타"], r["_하의델타"], r["_분류"]
+        out = {"세트수": 0.0, "팬츠추가": 0.0, "자켓추가": 0.0, "세트로판매": 0.0, "단품판매": 0.0,
+               "세트매출": 0.0, "단품매출": 0.0, "_세트상의": 0.0, "_세트하의": 0.0}
+        if cls == "세트그룹":
+            out["세트수"] = (np.sign(j) * min(abs(j), abs(p))) if (j != 0 and p != 0) else 0.0
+            out["팬츠추가"] = max(0.0, p - j) if abs(p) > abs(j) else 0.0
+            out["자켓추가"] = max(0.0, j - p) if abs(j) > abs(p) else 0.0
+            out["세트로판매"] = j + p
+            out["세트매출"] = r["_매출델타"]
+            out["_세트상의"], out["_세트하의"] = j, p
+        elif cls == "단품그룹":
+            out["단품판매"] = j if j != 0 else p
+            out["단품매출"] = r["_매출델타"]
+        return pd.Series(out)
+
+    metrics = g.apply(_rowmetrics, axis=1)
+    g = pd.concat([g, metrics], axis=1)
+    g["자켓판매량"] = g["_상의델타"]
+    g["팬츠판매량"] = g["_하의델타"]
+
+    store = g.groupby(["매장코드", "매장명"], observed=True).agg(
+        자켓판매량=("자켓판매량", "sum"), 팬츠판매량=("팬츠판매량", "sum"),
+        세트수=("세트수", "sum"), 팬츠추가=("팬츠추가", "sum"), 자켓추가=("자켓추가", "sum"),
+        세트로판매=("세트로판매", "sum"), 단품판매=("단품판매", "sum"),
+        세트매출=("세트매출", "sum"), 단품매출=("단품매출", "sum"),
+        세트그룹상의=("_세트상의", "sum"), 세트그룹하의=("_세트하의", "sum"),
+    ).reset_index()
+    store["매장코드"] = store["매장코드"].astype(str)
+    store["매장명"] = store["매장명"].astype(str)
+    store = store[(store["자켓판매량"] != 0) | (store["팬츠판매량"] != 0)]  # 조회기간에 실적 없는 매장은 표에서 생략
+    if store.empty:
+        st.info("선택한 조회기간·조건에 슈트/셋업 실적이 있는 매장이 없어요.")
+        return
+    store["기간총판매"] = store["자켓판매량"] + store["팬츠판매량"]
+    store["기간매출"] = store["세트매출"] + store["단품매출"]
+    _tot = store["기간총판매"].replace(0, np.nan)
+    store["세트비중"] = store["세트로판매"] / _tot * 100
+    store["단품비중"] = store["단품판매"] / _tot * 100
+    _denom = store["세트그룹상의"].replace(0, np.nan)
+    store["자켓팬츠비율"] = store["세트그룹하의"] / _denom
+    store = store.sort_values("매장코드").reset_index(drop=True)
+
+    # ── 화면/엑셀 표시용 DataFrame — 룰1(백만원)·룰6(첫행 총계 노랑)·룰8/룰11/룰13 ─────
+    def _int(v):
+        return "–" if pd.isna(v) else f"{v:,.0f}"
+
+    def _money_mm(v):
+        return "–" if pd.isna(v) else f"{v/1e6:,.2f}"
+
+    def _pct(v):
+        return "–" if pd.isna(v) else f"{v:,.1f}%"
+
+    def _ratio(v):
+        return "–" if pd.isna(v) else f"{v:,.2f}"
+
+    cols = [("", "매장명"),
+            ("기간판매량", "자켓판매량"), ("기간판매량", "팬츠판매량"),
+            ("단품 기준 분석", "기간총판매"), ("단품 기준 분석", "기간매출"),
+            ("단품 기준 분석", "세트로판매"), ("단품 기준 분석", "단품판매"),
+            ("단품 기준 분석", "세트매출"), ("단품 기준 분석", "단품매출"),
+            ("단품 기준 분석", "세트비중"), ("단품 기준 분석", "단품비중"),
+            ("SET 분석", "세트수"), ("SET 분석", "팬츠추가"), ("SET 분석", "자켓추가"),
+            ("SET 분석", "자켓:팬츠비율")]
+
+    def _fmt_row(r):
+        return [r["매장명"], _int(r["자켓판매량"]), _int(r["팬츠판매량"]),
+                _int(r["기간총판매"]), _money_mm(r["기간매출"]),
+                _int(r["세트로판매"]), _int(r["단품판매"]),
+                _money_mm(r["세트매출"]), _money_mm(r["단품매출"]),
+                _pct(r["세트비중"]), _pct(r["단품비중"]),
+                _int(r["세트수"]), _int(r["팬츠추가"]), _int(r["자켓추가"]),
+                _ratio(r["자켓팬츠비율"])]
+
+    tot_row = {
+        "매장명": f"전체 ({len(store):,}개 매장)",
+        "자켓판매량": store["자켓판매량"].sum(), "팬츠판매량": store["팬츠판매량"].sum(),
+        "세트수": store["세트수"].sum(), "팬츠추가": store["팬츠추가"].sum(),
+        "자켓추가": store["자켓추가"].sum(),
+        "세트로판매": store["세트로판매"].sum(), "단품판매": store["단품판매"].sum(),
+        "세트매출": store["세트매출"].sum(), "단품매출": store["단품매출"].sum(),
+        "세트그룹상의": store["세트그룹상의"].sum(), "세트그룹하의": store["세트그룹하의"].sum(),
+    }
+    tot_row["기간총판매"] = tot_row["자켓판매량"] + tot_row["팬츠판매량"]
+    tot_row["기간매출"] = tot_row["세트매출"] + tot_row["단품매출"]
+    _tt = tot_row["기간총판매"] if tot_row["기간총판매"] else np.nan
+    tot_row["세트비중"] = tot_row["세트로판매"] / _tt * 100 if _tt else np.nan
+    tot_row["단품비중"] = tot_row["단품판매"] / _tt * 100 if _tt else np.nan
+    _td = tot_row["세트그룹상의"] if tot_row["세트그룹상의"] else np.nan
+    tot_row["자켓팬츠비율"] = tot_row["세트그룹하의"] / _td if _td else np.nan
+
+    rows = [_fmt_row(pd.Series(tot_row))] + [_fmt_row(r) for _, r in store.iterrows()]
+    idx = ["■ 전체 합계"] + list(store["매장코드"])
+    disp = pd.DataFrame(rows, index=idx, columns=pd.MultiIndex.from_tuples(cols))
+
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(f"**매장별 SET 판매 분석**{_NOTE_FLOAT}", unsafe_allow_html=True)
+    h2.download_button("⬇ 엑셀", table_excel_bytes(disp, "SET판매분석"),
+                       file_name=f"SET판매분석_{e.date()}.xlsx", mime=XLSX_MIME,
+                       key="ss_dl", use_container_width=True)
+
+    def _hl(row):
+        if str(row.name) == "■ 전체 합계":
+            return ["background-color:#fff2b8;font-weight:700" for _ in row]
+        return ["" for _ in row]
+
+    sty = disp.style.apply(_hl, axis=1).set_properties(**{"text-align": "right"})
+    sty = block_border(block_border(block_border(sty, 1), 3), 11)   # 룰12 활용: 매장명|기간판매량|단품기준분석|SET분석 블록 경계선
+    render_styled_table(sty)
+    st.caption("※ 자켓추가 컬럼(항상 0에 가까움)은 세트그룹인데 팬츠보다 자켓이 더 남는 이례 케이스 "
+               "발견용으로 항상 표시해요. 자켓:팬츠비율 = 세트그룹 순하의수량 ÷ 세트그룹 순자켓수량 "
+               "(정상적인 상의1:하의2 구성이면 2.00 근처).")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 특정매장 SET 품번별 분석 — 260804 심야 추가
+    # ══════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown(f"**특정매장 SET 품번별 분석**{_NOTE_FLOAT}", unsafe_allow_html=True)
+    st.caption(
+        "SET 품번 = 품번 10자리 중 아이템 자리를 세트 대표코드(SJ 또는 EJ)로, 라인·패턴·색상 3자리를 "
+        "'SET'으로 치환한 값이에요(예: SSJVB01CSK·SSLVB01CSK → 둘 다 SSJVB01SET) — 재고 마스터에서 "
+        "쓰는 것과 같은 공식 SET품번 생성 규칙이라, 자켓·팬츠가 자동으로 같은 코드로 묶여요."
+    )
+    store_opts = sorted(uni["매장코드"].astype(str).unique())
+    if not store_opts:
+        st.info("선택 가능한 매장이 없어요.")
+        return
+    _name_lookup = dict(zip(uni["매장코드"].astype(str), uni["매장명"].astype(str)))
+    sel_store = st.selectbox(
+        "매장선택", store_opts,
+        format_func=lambda c: f"{c} · {_name_lookup.get(c, '')}", key="ss_store_pick")
+
+    g2 = g[g["매장코드"].astype(str) == sel_store].copy()
+    id2design = uni.drop_duplicates("_그룹ID").set_index("_그룹ID")["_디자인키"]
+    g2["_디자인키"] = g2["_그룹ID"].map(id2design)
+    g2 = g2[g2["_디자인키"].notna()]
+    if g2.empty:
+        st.info(f"{sel_store} 매장은 선택한 조회기간에 슈트/셋업 실적이 없어요.")
+        return
+
+    style = g2.groupby("_디자인키", observed=True).agg(
+        자켓판매량=("자켓판매량", "sum"), 팬츠판매량=("팬츠판매량", "sum"),
+        세트수=("세트수", "sum"), 팬츠추가=("팬츠추가", "sum"), 자켓추가=("자켓추가", "sum"),
+        세트로판매=("세트로판매", "sum"), 단품판매=("단품판매", "sum"),
+        세트매출=("세트매출", "sum"), 단품매출=("단품매출", "sum"),
+        세트그룹상의=("_세트상의", "sum"), 세트그룹하의=("_세트하의", "sum"),
+    ).reset_index()
+    style = style[(style["자켓판매량"] != 0) | (style["팬츠판매량"] != 0)]
+    if style.empty:
+        st.info(f"{sel_store} 매장은 선택한 조회기간에 슈트/셋업 실적이 없어요.")
+        return
+    style["SET 품번"] = style["_디자인키"]
+    style["기간총판매"] = style["자켓판매량"] + style["팬츠판매량"]
+    style["기간매출"] = style["세트매출"] + style["단품매출"]
+    _tot2 = style["기간총판매"].replace(0, np.nan)
+    style["세트비중"] = style["세트로판매"] / _tot2 * 100
+    style["단품비중"] = style["단품판매"] / _tot2 * 100
+    _den2 = style["세트그룹상의"].replace(0, np.nan)
+    style["자켓팬츠비율"] = style["세트그룹하의"] / _den2
+    style = style.sort_values("SET 품번").reset_index(drop=True)
+
+    def _fmt_row2(r):
+        return [sel_store, r["SET 품번"], _int(r["자켓판매량"]), _int(r["팬츠판매량"]),
+                _int(r["기간총판매"]), _money_mm(r["기간매출"]),
+                _int(r["세트로판매"]), _int(r["단품판매"]),
+                _money_mm(r["세트매출"]), _money_mm(r["단품매출"]),
+                _pct(r["세트비중"]), _pct(r["단품비중"]),
+                _int(r["세트수"]), _int(r["팬츠추가"]), _int(r["자켓추가"]),
+                _ratio(r["자켓팬츠비율"])]
+
+    tot2 = {
+        "자켓판매량": style["자켓판매량"].sum(), "팬츠판매량": style["팬츠판매량"].sum(),
+        "세트수": style["세트수"].sum(), "팬츠추가": style["팬츠추가"].sum(),
+        "자켓추가": style["자켓추가"].sum(),
+        "세트로판매": style["세트로판매"].sum(), "단품판매": style["단품판매"].sum(),
+        "세트매출": style["세트매출"].sum(), "단품매출": style["단품매출"].sum(),
+        "세트그룹상의": style["세트그룹상의"].sum(), "세트그룹하의": style["세트그룹하의"].sum(),
+    }
+    tot2["기간총판매"] = tot2["자켓판매량"] + tot2["팬츠판매량"]
+    tot2["기간매출"] = tot2["세트매출"] + tot2["단품매출"]
+    _tt2 = tot2["기간총판매"] if tot2["기간총판매"] else np.nan
+    tot2["세트비중"] = tot2["세트로판매"] / _tt2 * 100 if _tt2 else np.nan
+    tot2["단품비중"] = tot2["단품판매"] / _tt2 * 100 if _tt2 else np.nan
+    _td2 = tot2["세트그룹상의"] if tot2["세트그룹상의"] else np.nan
+    tot2["자켓팬츠비율"] = tot2["세트그룹하의"] / _td2 if _td2 else np.nan
+    tot2["SET 품번"] = f"■ {sel_store} 합계 ({len(style):,}개 SET품번)"
+
+    cols2 = [("", "매장코드"), ("", "SET 품번"),
+             ("기간판매량", "자켓판매량"), ("기간판매량", "팬츠판매량"),
+             ("단품 기준 분석", "기간총판매"), ("단품 기준 분석", "기간매출"),
+             ("단품 기준 분석", "세트로판매"), ("단품 기준 분석", "단품판매"),
+             ("단품 기준 분석", "세트매출"), ("단품 기준 분석", "단품매출"),
+             ("단품 기준 분석", "세트비중"), ("단품 기준 분석", "단품비중"),
+             ("SET 분석", "세트수"), ("SET 분석", "팬츠추가"), ("SET 분석", "자켓추가"),
+             ("SET 분석", "자켓:팬츠비율")]
+    rows2 = [_fmt_row2(pd.Series(tot2))] + [_fmt_row2(r) for _, r in style.iterrows()]
+    idx2 = ["■ 합계"] + list(style["SET 품번"])
+    disp2 = pd.DataFrame(rows2, index=idx2, columns=pd.MultiIndex.from_tuples(cols2))
+
+    h3, h4 = st.columns([5, 1])
+    h3.markdown(f"**{sel_store} · SET 품번별 분석**", unsafe_allow_html=True)
+    h4.download_button("⬇ 엑셀", table_excel_bytes(disp2, "SET품번분석"),
+                       file_name=f"SET품번분석_{sel_store}_{e.date()}.xlsx", mime=XLSX_MIME,
+                       key="ss_dl2", use_container_width=True)
+
+    def _hl2(row):
+        if str(row.name).startswith("■"):
+            return ["background-color:#fff2b8;font-weight:700" for _ in row]
+        return ["" for _ in row]
+
+    sty2 = disp2.style.apply(_hl2, axis=1).set_properties(**{"text-align": "right"})
+    sty2 = block_border(block_border(block_border(sty2, 2), 4), 12)
+    render_styled_table(sty2)
+
+
+# ==============================================================================
 # 로그인 / 사용자 관리  ─ 개인 계정 + 역할(admin=관리자 / viewer=뷰어)
 # ==============================================================================
 USERS_TABLE = "app_users"
@@ -4926,13 +5300,14 @@ def main():
         render_inventory()
         return
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📋 주간회의 보고자료",
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["📋 주간회의 보고자료",
                                                         "📅 연차·아이템 세부분석 (플래그십)",
                                                         "📈 유통채널·브랜드 주간현황",
                                                         "📊 종합 대시보드",
                                                         "📉 추세분석",
                                                         "🏷️ 재고 모니터링",
-                                                        "🔄 반품률 분석"])
+                                                        "🔄 반품률 분석",
+                                                        "🧩 SET/단품 판매 분석"])
     with tab1:
         render_weekly_report(df)
     with tab2:
@@ -4947,6 +5322,8 @@ def main():
         render_inventory()
     with tab7:
         render_return_rate(df)
+    with tab8:
+        render_suitset(df)
 
 
 if __name__ == "__main__":
