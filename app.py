@@ -785,14 +785,17 @@ _NOTE_FLOAT = ("<span style='float:right;color:#888;font-weight:400;font-size:0.
 # 공통 표 CSS: 옵션A 여백(3px 9px) + 헤더·구분 검정 + G.TOTAL(첫 행) 노란 강조 + 증감 색 유지
 _TBL_CSS = """
 <style>
-.erp-wrap{overflow-x:auto;margin:0 0 8px;}
-table.erp-tbl{border-collapse:collapse;font-size:0.82rem;}
-table.erp-tbl th, table.erp-tbl td{padding:3px 6px;border:1px solid #e6e6e6;white-space:nowrap;}
-table.erp-tbl thead th{color:#111;font-weight:700;background:#f4f4f6;text-align:center;}
-table.erp-tbl tbody th{color:#111;font-weight:600;text-align:left;background:#fafafa;}
-table.erp-tbl td{color:#111;text-align:right;}
+.erp-wrap{overflow-x:auto;margin:0 0 10px;background:#fff;
+    border:1px solid #e8e8ed;border-radius:12px;}
+table.erp-tbl{border-collapse:collapse;font-size:0.82rem;
+    font-variant-numeric:tabular-nums;font-feature-settings:"tnum";}
+table.erp-tbl th, table.erp-tbl td{padding:4px 9px;border:1px solid #f0f0f3;white-space:nowrap;}
+table.erp-tbl thead th{color:#1d1d1f;font-weight:600;background:#f5f5f7;text-align:center;
+    border-bottom:1px solid #e8e8ed;}
+table.erp-tbl tbody th{color:#1d1d1f;font-weight:600;text-align:left;background:#fbfbfd;}
+table.erp-tbl td{color:#1d1d1f;text-align:right;}
 table.erp-tbl tbody tr:first-child th, table.erp-tbl tbody tr:first-child td{
-    background:#fff2b8 !important;font-weight:700;}
+    background:#fff4cc !important;font-weight:700;}
 </style>
 """
 
@@ -803,12 +806,99 @@ _SEASON_ROW_CSS = """
 <style>
 table.erp-season tbody tr:nth-child(2) th, table.erp-season tbody tr:nth-child(2) td,
 table.erp-season tbody tr:nth-child(3) th, table.erp-season tbody tr:nth-child(3) td{
-    background:#e3ecf7 !important;font-weight:700;}
+    background:#e5eefb !important;font-weight:700;}
 table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) th,
-table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) td{background:#f4f8fc !important;}
+table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) td{background:#f4f8fd !important;}
 table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) th{padding-left:18px;font-weight:500;}
 </style>
 """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 전역 테마 (2026-08-05) — Apple 스토어 톤: 옅은 회색 배경 · SF Pro 계열 타이포 ·
+#   라운드 카드/알약 버튼 · 애플 블루(#0071e3) 포인트 · 사이드바 라디오를 메뉴처럼.
+#   ※ 폰트는 맥=SF Pro, 윈도우=Pretendard→맑은 고딕 순으로 자연 대체된다.
+# ─────────────────────────────────────────────────────────────────────────────
+_APPLE_CSS = """
+<style>
+/* 타이포 · 배경 --------------------------------------------------------- */
+html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stSidebar"]{
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",
+    "Apple SD Gothic Neo","Pretendard","Noto Sans KR","Malgun Gothic",sans-serif;
+  letter-spacing:-0.019em;-webkit-font-smoothing:antialiased;}
+.stApp{background:#f5f5f7;}
+[data-testid="stHeader"]{background:transparent;}
+[data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3, [data-testid="stMarkdownContainer"] h4,
+[data-testid="stMarkdownContainer"] h5{color:#1d1d1f;letter-spacing:-0.03em;}
+h1, [data-testid="stMarkdownContainer"] h1{font-weight:700;letter-spacing:-0.035em;}
+/* 여백 축소(기존 규칙 유지) */
+[data-testid="stVerticalBlock"]{gap:0.4rem;}
+[data-testid="stMarkdownContainer"] h3,
+[data-testid="stMarkdownContainer"] h5{margin-bottom:0.35rem;padding-bottom:0;}
+
+/* 버튼 : 알약형 --------------------------------------------------------- */
+.stButton>button, [data-testid="stFormSubmitButton"]>button,
+[data-testid="stDownloadButton"]>button{
+  border-radius:980px;border:1px solid #d2d2d7;background:#fff;color:#1d1d1f;
+  font-weight:600;letter-spacing:-0.01em;transition:.15s;}
+.stButton>button:hover, [data-testid="stFormSubmitButton"]>button:hover,
+[data-testid="stDownloadButton"]>button:hover{
+  border-color:#0071e3;color:#0071e3;background:#fff;}
+.stButton>button[kind="primary"], [data-testid="stFormSubmitButton"]>button[kind="primary"]{
+  background:#0071e3;border-color:#0071e3;color:#fff;}
+
+/* 사이드바 -------------------------------------------------------------- */
+[data-testid="stSidebar"]{background:#fbfbfd;border-right:1px solid #e8e8ed;}
+[data-testid="stSidebar"] [data-testid="stMetric"]{
+  background:#fff;border:1px solid #e8e8ed;border-radius:14px;padding:10px 14px;}
+[data-testid="stMetricValue"]{font-weight:600;letter-spacing:-0.03em;}
+
+/* 사이드바 조회 메뉴(라디오) → 메뉴 리스트처럼 ------------------------- */
+[data-testid="stSidebar"] [role="radiogroup"]{gap:2px;}
+[data-testid="stSidebar"] [role="radiogroup"] label{
+  width:100%;padding:7px 12px;border-radius:11px;margin:0;transition:.12s;}
+[data-testid="stSidebar"] [role="radiogroup"] label:hover{background:#eceef1;}
+[data-testid="stSidebar"] [role="radiogroup"] label p{
+  font-size:0.88rem;font-weight:500;letter-spacing:-0.02em;}
+/* 라디오 동그라미 숨김 (구조: label > span(input) > div > div > div:first-child = 동그라미) */
+[data-testid="stSidebar"] [role="radiogroup"] label>div>div>div:first-child{display:none;}
+/* 선택 항목 = 애플 블루 알약 (data-selected 우선, 미지원 브라우저는 :has 폴백) */
+[data-testid="stSidebar"] [role="radiogroup"] label[data-selected="true"]{background:#0071e3;}
+[data-testid="stSidebar"] [role="radiogroup"] label[data-selected="true"] p{
+  color:#fff;font-weight:600;}
+@supports selector(:has(*)){
+  [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked){background:#0071e3;}
+  [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) p{
+    color:#fff;font-weight:600;}
+}
+
+/* 입력·컨테이너 --------------------------------------------------------- */
+[data-testid="stFileUploader"] section{
+  border-radius:12px;border:1px dashed #d2d2d7;background:#fff;}
+[data-testid="stExpander"]{
+  border-radius:14px;border:1px solid #e8e8ed;background:#fff;}
+[data-baseweb="select"]>div, .stTextInput input, .stNumberInput input, .stDateInput input{
+  border-radius:10px;border-color:#d2d2d7;}
+[data-testid="stAlert"]{border-radius:14px;}
+a{color:#0071e3;text-decoration:none;}
+</style>
+"""
+
+
+# 사이드바 조회 메뉴 (2026-08-05: 탭 → 사이드바 전환. 순서·명칭 = 사용자 확정본)
+#   ※ 탭 방식은 안 보는 탭까지 매 실행마다 전부 계산돼서 느렸다.
+#      사이드바 메뉴는 '선택된 1개'만 실행되므로 메뉴가 늘어도 속도가 유지된다.
+MENU_DASH = "📊 종합 대시보드"
+MENU_WEEK = "📋 주간회의 보고자료"
+MENU_FLAG = "📅 연차·아이템 세부분석"
+MENU_CHAN = "📈 유통채널·브랜드 주간현황"
+MENU_INV  = "🏷️ 재고 가공"
+MENU_TRND = "📉 추세분석"
+MENU_RTN  = "🔄 반품률 분석"
+MENU_SET  = "🧩 SET/단품 판매 분석"
+MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN,
+         MENU_INV, MENU_TRND, MENU_RTN, MENU_SET]
 
 
 def block_border(sty, n):
@@ -1540,7 +1630,9 @@ def render_channel_brand(df):
     st.markdown("### A. 유통채널별 (매출 순)")
     # 매장명(행) → 담당자 매핑: 표 맨 앞 '담당자' 컬럼으로 표시
     _cm = d[["_채널", "_담당자"]].astype(str).drop_duplicates(subset=["_채널"])
-    chan_mgr = {c: ("" if m.strip().lower() in ("nan", "none") else m.strip())
+    # 260805: pandas 3.x에서는 astype(str) 후에도 결측이 float(nan)으로 남아 .strip()이 터진다.
+    #         매장 기준정보 미업로드 시 담당자가 전부 결측이므로 str()로 한 번 더 감싼다.
+    chan_mgr = {c: ("" if str(m).strip().lower() in ("nan", "none", "") else str(m).strip())
                 for c, m in zip(_cm["_채널"], _cm["_담당자"])}
     perf_table(cur, prev, "_채널", None, "유통채널별 매출현황", "cb_ch", extra=("담당자", chan_mgr))
     st.caption("※ 채널을 자사몰/외부몰 등 그룹으로 묶으려면 '채널 기준정보(매핑)'가 필요해요 — 준비되면 그룹 집계도 추가해드릴게요.")
@@ -2988,8 +3080,8 @@ def _inv_group_ui(codes, key_prefix):
 
 
 def render_inventory():
-    """🏷️ 재고 모니터링 탭 — 로우데이터 업로드 → 가공 → v3 엑셀 다운로드 (전 팀원 사용 가능)."""
-    st.subheader("🏷️ 쇼핑몰 재고 모니터링 · 1차 가공 (260731 확정 기준 · v3 106열)")
+    """🏷️ 재고 가공 메뉴 — 로우데이터 업로드 → 가공 → v3 엑셀 다운로드 (전 팀원 사용 가능)."""
+    st.subheader("🏷️ 쇼핑몰 재고 가공 · 1차 (260731 확정 기준 · v3 106열)")
     st.caption("재고모니터링 로우데이터(93열)를 올리면 AA·AB 5등급, AF(AI제안방향), "
                "사이즈 등급(AC), SET 판정(AD·AE)을 부여한 106열 v3 엑셀을 만들어 드려요. "
                "재고 데이터는 DB에 저장하지 않아요(가공 → 다운로드만).")
@@ -3089,7 +3181,7 @@ def render_inventory():
                                                      cat_level=cat_level)
                     st.session_state["inv_result"] = {
                         "bytes": xls, "report": rep,
-                        "fname": f"재고모니터링_1차가공_{_safe_name(workdate.strip() or 'result')}.xlsx"}
+                        "fname": f"재고가공_{_safe_name(workdate.strip() or 'result')}.xlsx"}
                 except ValueError as ex:
                     st.session_state.pop("inv_result", None)
                     st.error(f"[중단] {ex}")
@@ -4632,7 +4724,13 @@ def render_suitset(df):
             out["세트매출"] = r["_매출델타"]
             out["_세트상의"], out["_세트하의"] = j, p
         elif cls == "단품그룹":
-            out["단품판매"] = j if j != 0 else p
+            # 260804: 그룹 성격(세트/단품) 판정은 넓은 룩업 윈도우 기준이라, 조회기간(period)만 보면
+            # '단품그룹'인데도 그 기간 안에 상의·하의가 둘 다 델타를 갖는 경우가 생길 수 있음
+            # (예: 자켓은 룩업기간 내 다른 시점에 팔려 순상의=0이라 단품 판정, 팬츠는 기간 중 반품되어
+            # 하의델타가 발생한 케이스). 이때 "j if j!=0 else p"로 하나만 집계하면 팬츠판매량 등
+            # 기간총판매엔 반영되는데 단품판매엔 안 잡혀 세트비중/단품비중 합이 100%를 벗어나는
+            # 버그가 있었음 — j+p로 둘 다 반영해서 기간총판매(세트로판매+단품판매)와 항상 일치시킴.
+            out["단품판매"] = j + p
             out["단품매출"] = r["_매출델타"]
         return pd.Series(out)
 
@@ -5131,13 +5229,8 @@ def render_user_admin():
 
 def main():
     st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
-    # 전역 여백 축소: 요소 간격·헤더 하단여백을 줄여 타이틀을 표에 바짝 붙임
-    st.markdown("""
-        <style>
-        [data-testid="stVerticalBlock"]{gap:0.4rem;}
-        [data-testid="stMarkdownContainer"] h3,
-        [data-testid="stMarkdownContainer"] h5{margin-bottom:0.35rem;padding-bottom:0;}
-        </style>""", unsafe_allow_html=True)
+    # 전역 여백 축소 + Apple 스타일 테마(2026-08-05) — 배경/폰트/버튼/사이드바 메뉴
+    st.markdown(_APPLE_CSS, unsafe_allow_html=True)
     # ── 로그인 게이트 ──────────────────────────────────────────────
     ensure_users_table()
     if not st.session_state.get("auth_user"):
@@ -5157,7 +5250,15 @@ def main():
     touch_session()   # 사용 중엔 매 동작마다 2시간 카운트 리셋
     is_admin = st.session_state.get("auth_role") == "admin"
 
-    st.title("📊 온라인팀 미니 ERP · 매출 분석")
+    # 타이틀 (2026-08-05 확정): 애플 스타일 2톤 — 검정 볼드 + 회색 서브카피
+    st.markdown(
+        "<div style='margin:2px 0 6px;'>"
+        "<div style='font-size:2.3rem;font-weight:700;letter-spacing:-0.035em;"
+        "color:#1d1d1f;line-height:1.15;'>온라인팀 ERP</div>"
+        "<div style='font-size:1.35rem;font-weight:600;letter-spacing:-0.03em;"
+        "color:#6e6e73;line-height:1.3;margin-top:2px;'>"
+        "Data to Insight, Insight to Action !</div></div>",
+        unsafe_allow_html=True)
     fresh_slot = st.container()   # 타이틀 바로 아래: 매출 데이터 최종 업데이트 일자 표기 자리
 
     with st.sidebar:
@@ -5175,6 +5276,11 @@ def main():
         st.metric("현재 DB 누적", f"{db_row_count():,} 건")
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
             load_db.clear(); load_master.clear(); load_size_master.clear(); st.rerun()
+
+        # ── 조회 메뉴 (탭 대체) ──────────────────────────────────────
+        st.divider()
+        st.caption("📂 **조회 메뉴**")
+        menu = st.radio("조회 메뉴", MENUS, key="nav_menu", label_visibility="collapsed")
 
         if not is_admin:
             st.divider()
@@ -5253,7 +5359,7 @@ def main():
 
             st.divider()
             st.caption(f"📏 사이즈 마스터(품번→사이즈코드): 현재 **{size_master_row_count():,}개** 품번")
-            sup = st.file_uploader("사이즈 마스터 업로드 (재고 모니터링 가공용 · C열=품번, D열=사이즈코드)",
+            sup = st.file_uploader("사이즈 마스터 업로드 (재고 가공용 · C열=품번, D열=사이즈코드)",
                                    type=["xlsx"], accept_multiple_files=False, key="sizemaster_up")
             if sup is not None:
                 if st.button("📏 사이즈 마스터 적용(전체 교체)", use_container_width=True):
@@ -5266,7 +5372,7 @@ def main():
 
             st.divider()
             st.caption(f"🗂️ 아이템 마스터(아이템코드→대/중/소카테고리): 현재 **{item_master_row_count():,}개** 코드"
-                       " · 재고모니터링 중카테고리·판매분석 아이템그룹이 모두 여기서 나와요(단일 기준)")
+                       " · 재고 가공 중카테고리·판매분석 아이템그룹이 모두 여기서 나와요(단일 기준)")
             iup = st.file_uploader("아이템 마스터 업로드 ('아이템코드와 카테고리 구분' 시트 포함 워크북)",
                                    type=["xlsx"], accept_multiple_files=False, key="itemmaster_up")
             if iup is not None:
@@ -5276,7 +5382,7 @@ def main():
                         load_item_master.clear()
                         get_itemgroup_map.clear()
                         st.success(f"아이템 마스터 갱신 완료 ✅ {n:,}개 코드 "
-                                  "(재고모니터링·판매분석에 즉시 반영돼요)")
+                                  "(재고 가공·판매분석에 즉시 반영돼요)")
                     except Exception as ex:
                         st.error(f"아이템 마스터 오류: {ex}")
 
@@ -5295,35 +5401,31 @@ def main():
             f"🗓️ **매출 로우데이터 최종 업데이트 일자 : {_last.year}년 {_last.month:02d}월 {_last.day:02d}일**"
             "  (이 날짜까지의 매출이 입력되어 있어요)")
     if df.empty:
-        st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요.")
-        # 재고 모니터링 가공은 매출 DB와 무관하므로 매출 데이터가 없어도 사용 가능하게 유지
+        st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요."
+                "  (🏷️ 재고 가공은 매출 데이터 없이도 바로 쓸 수 있어요)")
+        # 재고 가공은 매출 DB와 무관하므로 매출 데이터가 없어도 사용 가능하게 유지
         render_inventory()
         return
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["📋 주간회의 보고자료",
-                                                        "📅 연차·아이템 세부분석 (플래그십)",
-                                                        "📈 유통채널·브랜드 주간현황",
-                                                        "📊 종합 대시보드",
-                                                        "📉 추세분석",
-                                                        "🏷️ 재고 모니터링",
-                                                        "🔄 반품률 분석",
-                                                        "🧩 SET/단품 판매 분석"])
-    with tab1:
-        render_weekly_report(df)
-    with tab2:
-        render_flagship(df)
-    with tab3:
-        render_channel_brand(df)
-    with tab4:
+    # 사이드바에서 고른 메뉴 '1개만' 실행 (탭 방식은 8개가 매번 전부 계산돼 느렸다)
+    if menu == MENU_DASH:
         render_dashboard(df)
-    with tab5:
-        render_trend(df)
-    with tab6:
+    elif menu == MENU_WEEK:
+        render_weekly_report(df)
+    elif menu == MENU_FLAG:
+        render_flagship(df)
+    elif menu == MENU_CHAN:
+        render_channel_brand(df)
+    elif menu == MENU_INV:
         render_inventory()
-    with tab7:
+    elif menu == MENU_TRND:
+        render_trend(df)
+    elif menu == MENU_RTN:
         render_return_rate(df)
-    with tab8:
+    elif menu == MENU_SET:
         render_suitset(df)
+    else:
+        render_dashboard(df)
 
 
 if __name__ == "__main__":
