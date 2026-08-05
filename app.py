@@ -1008,11 +1008,19 @@ def render_flagship(df):
 
     tot_c = cur["_매출액"].sum()
     tot_p = prev["_매출액"].sum()
-    k1, k2, k3 = st.columns(3)
+    orig_c = cur["_최초가매출"].sum() if "_최초가매출" in cur.columns else 0
+    orig_p = prev["_최초가매출"].sum() if "_최초가매출" in prev.columns else 0
+    pg_c = (tot_c / orig_c) if orig_c else None
+    pg_p = (tot_p / orig_p) if orig_p else None
+    k1, k2, k3, k4, k5, k6 = st.columns(6, gap="small")
     k1.metric(f"{cy} 매출(백만)", f"{_mm(tot_c):,.0f}")
     k2.metric(f"{cy-1} 매출(백만)", f"{_mm(tot_p):,.0f}")
     g = ((tot_c - tot_p) / tot_p) if tot_p else None
     k3.metric("전년비 성장률", "신규/–" if g is None else f"{g*100:+.1f}%")
+    k4.metric(f"{cy} 판가율", f"{pg_c*100:.1f}%" if pg_c is not None else "–")
+    k5.metric(f"{cy-1} 판가율", f"{pg_p*100:.1f}%" if pg_p is not None else "–")
+    pg_diff = (pg_c - pg_p) if (pg_c is not None and pg_p is not None) else None
+    k6.metric("판가율 증감", "–" if pg_diff is None else f"{pg_diff*100:+.1f}%p")
     if not tot_p:
         st.warning(f"전년({cy-1}) 동기간 데이터가 없어요. {cy-1}년 로우데이터를 적재하면 채워집니다.")
 
