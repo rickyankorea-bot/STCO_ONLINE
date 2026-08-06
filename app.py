@@ -882,6 +882,12 @@ h1, [data-testid="stMarkdownContainer"] h1{font-weight:700;letter-spacing:-0.035
   border-radius:10px;border-color:#d2d2d7;}
 [data-testid="stAlert"]{border-radius:14px;}
 a{color:#0071e3;text-decoration:none;}
+
+/* 표 제목 줄(perf_table) 전용: 제목+엑셀버튼 컬럼 행의 높이가 버튼 높이(약 40px) 기준으로
+   맞춰지면서 제목 글자 아래로 빈 공간이 생겨 "표와 멀어 보이는" 문제(2026-08-06 중태님 지적)
+   → 이 행만 아래쪽 정렬로 바꿔서 제목 글자가 버튼과 같은 라인의 '아래쪽'에 붙게 함
+   (.perf-title 마커가 있는 행에만 적용 — 다른 필터/컬럼 레이아웃에는 영향 없음). */
+div[data-testid="stHorizontalBlock"]:has(.perf-title){align-items:flex-end;}
 </style>
 """
 
@@ -922,7 +928,7 @@ def render_styled_table(sty, extra_class="", extra_css=""):
 
 
 def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False,
-               month=None, blk_labels=("당월누계", "연간누계"), preview=False):
+               month=None, blk_labels=("당월누계", "연간누계"), preview=False, big_title=False):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
 
     extra=(컬럼명, {행라벨: 값})이면 표 맨 앞(행이름 바로 옆)에 텍스트 컬럼을 삽입
@@ -932,6 +938,11 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     preview=True(2026-08-06 추가)면 '🔍 조회 누르기 전' 안내용 — cur/prev가 빈 DataFrame이라
     yoy_frame이 전부 0/"–"로 채운 스켈레톤을 반환하는 걸 이용해, 실제 계산 없이 이 화면에서
     나올 표의 헤더·행 구조만 미리 보여준다(엑셀 다운로드 버튼은 숨김 — 아직 실데이터가 아니므로).
+    big_title=True(2026-08-06 추가)면 제목 글자를 1.5배로 키운다 — 바로 위에 별도 큰 섹션
+    제목(### ...)이 이미 있는 표(그룹의 첫 표)는 False로 두고, 그런 제목 없이 표만 연달아
+    나오는 나머지 표들(신상+내년신상·1년차·2년차·3년차 등)에 True를 준다(중태님 컨펌 완료,
+    2026-08-06). 제목-자기표 간격은 좁히고 이전표-제목 간격은 넓혀서 "이 제목이 어느 표
+    것인지" 헷갈리지 않게 한다(가운데 컨펌 캡처 기준).
     """
     if month is not None:
         cur_m, prev_m = month
@@ -945,12 +956,22 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
                  ["" if k == "G.TOTAL" else str(_map.get(str(k), "") or "") for k in D.index])
     nblk = sum(1 for c in D.columns if c[0] == blk_labels[0]) if month is not None else None
     h1, h2 = st.columns([4, 1])
+    # 2026-08-06 (중태님 컨펌): 제목↔자기표 간격은 좁히고, 이전표↔제목 간격은 넓혀서
+    # "이 제목이 바로 아래 표 것"임을 분명하게 함. big_title=True면 글자도 1.5배.
+    # class="perf-title"가 있으면 _APPLE_CSS의 규칙이 이 행을 아래쪽 정렬로 바꿔
+    # (엑셀버튼 높이 때문에 생기던) 제목 아래 빈 공간을 없앤다 — 실측 기반 확정(2026-08-06).
+    _tsz = "1.5rem" if big_title else "1rem"
+    _tmt = "0px" if preview else "22px"   # 이전 표와의 간격 (미리보기는 화면 첫 요소라 0)
+    _tstyle = (f"margin:{_tmt} 0 12px;font-weight:700;font-size:{_tsz};"
+               "letter-spacing:-0.01em;color:#1d1d1f;line-height:1.3;")
     if preview:
-        h1.markdown(f"**{title}**"
+        h1.markdown(f"<div class='perf-title' style='{_tstyle}'>{title}"
                      "<span style='color:#888;font-weight:400;font-size:0.78rem;'>"
-                     " — 미리보기(조회 전) · 실제 숫자는 🔍 조회 후 표시돼요</span>", unsafe_allow_html=True)
+                     " — 미리보기(조회 전) · 실제 숫자는 🔍 조회 후 표시돼요</span></div>",
+                     unsafe_allow_html=True)
     else:
-        h1.markdown(f"**{title}**{_NOTE_FLOAT}", unsafe_allow_html=True)
+        h1.markdown(f"<div class='perf-title' style='{_tstyle}'>{title}{_NOTE_FLOAT}</div>",
+                   unsafe_allow_html=True)
         h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28], first_block_cols=nblk),
                            file_name=f"{_safe_name(title)[:24]}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1089,7 +1110,7 @@ def render_flagship(df):
         prevb_m = prev_m[prev_m["연차"].isin(ages)]
         perf_table(curb, prevb, "아이템그룹", ITEMGROUP_ORDER,
                    f"아이템그룹별 성과표 ({name})", f"grp_{name}",
-                   month=(curb_m, prevb_m), blk_labels=blk)
+                   month=(curb_m, prevb_m), blk_labels=blk, big_title=True)
 
 
 # ── 대시보드 채널 통합 (2026-07-31): 수수료 조건 때문에 2개로 나눠 등록한 매장을 실제 채널로 합산 ──
@@ -2413,6 +2434,13 @@ def render_weekly_report(df):
 #    260803부터 니트류·티셔츠류가 "니트/티셔츠류" 한 중카테고리로 통일됨(마스터 미등록 시엔 구 분리판 폴백)
 #  · AF(AI제안방향) 8룰 매트릭스 (재고 분기 200, 온라인창고 기준)
 #  · AC/AD/AE = 사이즈 등급 · SET 상태 구분 · SET 등급 (size-grade-classifier 로직 내장, X·Y 변수)
+#  · 260806 세트 판정 기준서(260731 확정) 동기화 4건:
+#    ① 매칭표 확장 — 95→74·76 추가, 110→92·94·98 추가(115와 동일 구성)
+#    ② 하의 잔여 1.3배 규칙 — 하의총재고÷상의총재고 > 1.3 일 때만 '하의단품'. 1.3 정확히는 미초과.
+#       상의 잔여에는 미적용(자켓이 남는 건 곧 상의단품 신호).
+#    ③ SET 등급 A → A-1/A-2 분리 — 핵심 2개 상의 '실재고'가 둘 다 Y 이상이면 A-1, 아니면 A-2.
+#       (C-2/C-3은 여전히 '세트 가능 수량' 기준 — 두 수량을 혼동하지 말 것)
+#    ④ A09↔A09 세트업 지원 + 상/하 판별을 사이즈코드가 아닌 아이템 코드로 변경
 #  · 출력: 106열 v3 — 서식은 저장소 동봉 템플릿(inventory_template.xlsx = 최신 v3 결과물)에서 1:1 복제
 #  · 260802 서식 확정: C·K·L·M·AA·AB·AF·AG·AH·AI 노란색 / BA·BG·BH·BI 초록색 / BK~CM 숨김
 # ※ 사이즈 마스터(품번→사이즈코드)는 DB(size_master)에 저장 — 사이드바(관리자)에서 업로드/교체.
@@ -2450,12 +2478,52 @@ _INV_TOP = {3: 95, 5: 100, 7: 105, 9: 110, 10: 115, 11: 120, 13: 130}
 _INV_BOT = {1: 74, 2: 76, 3: 78, 5: 82, 6: 84, 7: 86, 9: 90, 11: 94, 12: 98, 13: 102}
 _INV_TOP_IDX = {v: k for k, v in _INV_TOP.items()}
 _INV_BOT_IDX = {v: k for k, v in _INV_BOT.items()}
-_INV_MATCH = {95: [78, 80, 82], 100: [80, 82, 84], 105: [82, 84, 86, 88], 110: [84, 86, 88, 90],
+# 260806 갱신: size-grade-classifier 스킬 최신본 매칭표와 동기화
+#   · 95  → 74·76 추가 (기존 78·80·82)
+#   · 110 → 92·94·98 추가 (기존 84·86·88·90) → 115와 동일 구성
+_INV_MATCH = {95: [74, 76, 78, 80, 82], 100: [80, 82, 84], 105: [82, 84, 86, 88],
+              110: [84, 86, 88, 90, 92, 94, 98],
               115: [84, 86, 88, 90, 92, 94, 98], 120: [86, 88, 90, 92, 94, 98, 102, 106],
               130: [88, 90, 92, 94, 98, 102, 106]}
+# 하의 잔여 → '하의단품' 전환 문턱 (하의 총재고 ÷ 상의 총재고). 초과일 때만 단품 전환.
+_INV_BOT_LEFT_RATIO = 1.3
 _INV_SET_CORE = (100, 105)
 _INV_SET_SMALL = (95,)
 _INV_SET_BIG = (110, 115, 120, 130)
+
+# ── A09(M/L/X) 세트 지원 — 세트판정_기준서_260731 §1·§2·§4 ────────────
+_INV_A09 = {2: "XS", 3: "S", 4: "M", 5: "L", 6: "XL", 7: "XXL"}
+_INV_A09_IDX = {v: k for k, v in _INV_A09.items()}
+_INV_MATCH_A09 = {"XS": ["XS", "S"], "S": ["XS", "S", "M"], "M": ["S", "M", "L"],
+                  "L": ["M", "L", "XL"], "XL": ["L", "XL", "XXL"], "XXL": ["XL", "XXL"]}
+_INV_SET_CORE_A09 = ("M", "L")
+_INV_SET_SMALL_A09 = ("XS", "S")
+_INV_SET_BIG_A09 = ("XL", "XXL")
+
+# 지원 조합: (상의 사이즈코드, 하의 사이즈코드) → (상의 idx맵, 하의 idx맵, 매칭표, 핵심, 스몰, 빅)
+_INV_SET_SYS = {
+    ("A16", "A17"): (_INV_TOP, _INV_BOT, _INV_MATCH,
+                     _INV_SET_CORE, _INV_SET_SMALL, _INV_SET_BIG),
+    ("A09", "A09"): (_INV_A09, _INV_A09, _INV_MATCH_A09,
+                     _INV_SET_CORE_A09, _INV_SET_SMALL_A09, _INV_SET_BIG_A09),
+}
+
+# 상/하 판별은 아이템 코드로 한다 (수트류는 중카테고리가 전부 '수트류'라 카테고리로 못 가름).
+_INV_TOP_ITEMS = {"SJ", "EJ", "JP", "JA", "CT", "DJ", "TS", "KT", "NT", "SH"}
+_INV_BOT_ITEMS = {"SL", "EP", "PA"}
+
+
+def _inv_set_side(rec):
+    """세트 그룹 안에서 이 행이 상의인지 하의인지 — 아이템 코드 우선, 중카테고리 보조."""
+    it = (rec.get("item") or "").strip().upper()
+    if it in _INV_TOP_ITEMS:
+        return "top"
+    if it in _INV_BOT_ITEMS:
+        return "bot"
+    c = str(rec.get("cat") or "")
+    if "팬츠" in c or "하의" in c:
+        return "bot"
+    return None
 
 # 260802 확정: 컬럼 전체(헤더+데이터) 채우기 색 강제 지정 + 상시 숨김 컬럼
 _INV_YELLOW_COLS = {3, 11, 12, 13, 27, 28, 32, 33, 34, 35}   # C,K,L,M,AA,AB,AF,AG,AH,AI
@@ -2498,16 +2566,29 @@ def _inv_grade_one(s14, sd, X, Y):
     return "판정불가"
 
 
-def _inv_set_grade(mq, Y):
-    """SET 등급(AE) 판정 — 매칭된 세트 사이즈(mq={상의사이즈: 세트가능수량}) 기준."""
+def _inv_set_grade(mq, Y, top_stock=None, core=None, small=None, big=None):
+    """SET 등급(AE) 판정 — 매칭된 세트 사이즈(mq={상의사이즈: 세트가능수량}) 기준.
+
+    260806: 기존 A를 A-1 / A-2로 분리 (스킬 최신본 반영).
+      A-1 = 핵심 2개 성립 & 다른 사이즈 1개↑ 성립 & 핵심 2개의 '상의 재고'가 둘 다 Y 이상
+      A-2 = 위와 같으나 핵심 상의 재고가 하나라도 Y 미만
+    판정 기준이 '세트 가능 수량'이 아니라 '상의 재고'이므로 top_stock({상의사이즈: 재고})을 받는다.
+    top_stock이 없으면(구 호출부) 안전하게 A-2로 떨어뜨린다.
+    """
     if not mq:
         return "해당없음"
-    core = [s for s in mq if s in _INV_SET_CORE]
-    others = [s for s in mq if s not in _INV_SET_CORE]
-    sm = [s for s in mq if s in _INV_SET_SMALL]
-    bg = [s for s in mq if s in _INV_SET_BIG]
+    CORE = core if core is not None else _INV_SET_CORE
+    SMALL = small if small is not None else _INV_SET_SMALL
+    BIG = big if big is not None else _INV_SET_BIG
+    core = [s for s in mq if s in CORE]
+    others = [s for s in mq if s not in CORE]
+    sm = [s for s in mq if s in SMALL]
+    bg = [s for s in mq if s in BIG]
     if len(core) == 2:
-        return "A" if others else "B"
+        if not others:
+            return "B"
+        ts = top_stock or {}
+        return "A-1" if all(ts.get(s, 0) >= Y for s in core) else "A-2"
     if len(core) == 1:
         if others:
             return "C-1"
@@ -2935,25 +3016,46 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             bysets[r["L"]].append(r)
     pairs = nopair = 0
     for g in bysets.values():
-        tops = [r for r in g if r["scode"] == "A16"]
-        bots = [r for r in g if r["scode"] == "A17"]
+        # 260806: 상/하 판별을 사이즈코드(A16/A17)가 아니라 아이템 코드로 한다 — A09↔A09 세트업을
+        #         잡으려면 필수. 지원 조합은 A16↔A17(숫자 정사이즈) · A09↔A09(문자) 둘.
+        #         그 외(A09↔A17 변환표 미정 · A18 아동 · A06 FREE · 단독행)는 모두 '해당없음'.
+        tops = [r for r in g if _inv_set_side(r) == "top"]
+        bots = [r for r in g if _inv_set_side(r) == "bot"]
         if not tops or not bots:
             nopair += 1; continue
-        ti, bi = tops[0], bots[0]; pairs += 1
-        top_ok = [_INV_TOP[k] for k in _INV_TOP if ti["size14"][k] >= X]
-        bot_ok = [_INV_BOT[k] for k in _INV_BOT if bi["size14"][k] >= X]
+        ti, bi = tops[0], bots[0]
+        sys_key = (ti["scode"], bi["scode"])
+        if sys_key not in _INV_SET_SYS:
+            nopair += 1; continue
+        TMAP, BMAP, MTBL, S_CORE, S_SMALL, S_BIG = _INV_SET_SYS[sys_key]
+        T_IDX = {v: k for k, v in TMAP.items()}
+        B_IDX = {v: k for k, v in BMAP.items()}
+        pairs += 1
+        top_ok = [TMAP[k] for k in TMAP if ti["size14"][k] >= X]
+        bot_ok = [BMAP[k] for k in BMAP if bi["size14"][k] >= X]
         matched = {}; used = set()
         for ts in top_ok:
-            cand = [bs for bs in _INV_MATCH.get(ts, []) if bs in bot_ok]
+            cand = [bs for bs in MTBL.get(ts, []) if bs in bot_ok]
             if cand:
-                matched[ts] = min(ti["size14"][_INV_TOP_IDX[ts]],
-                                  max(bi["size14"][_INV_BOT_IDX[b]] for b in cand))
+                matched[ts] = min(ti["size14"][T_IDX[ts]],
+                                  max(bi["size14"][B_IDX[b]] for b in cand))
                 used.update(cand)
         tl = set(top_ok) - set(matched); bl = set(bot_ok) - used
+        # 260806: 하의 잔여 1.3배 규칙 — 세트가 성립한 경우, 남는 하의는 세트 구매자가 고를 수 있는
+        #         '선택 버퍼'로 본다. 하의 총재고 ÷ 상의 총재고가 1.3을 초과할 때만 하의단품으로 전환.
+        #         경계값 1.3 정확히는 미초과(→ 버퍼) 처리. 상의 총재고 0이면 비율은 무한대로 본다.
+        #         상의 잔여(tl)에는 적용하지 않는다 — 자켓이 남는 건 곧 상의단품 전환 신호.
+        if matched and bl:
+            _tt = sum(ti["size14"].values()); _bt = sum(bi["size14"].values())
+            _ratio = float("inf") if _tt <= 0 else _bt / _tt
+            if _ratio <= _INV_BOT_LEFT_RATIO:
+                bl = set()
         if matched:
             stt = "세트만" if not tl and not bl else \
                 ("세트&상하단품" if tl and bl else ("세트&상의단품" if tl else "세트&하의단품"))
-            sg = _inv_set_grade(matched, Y)
+            sg = _inv_set_grade(matched, Y,
+                                {s: ti["size14"][T_IDX[s]] for s in matched},
+                                S_CORE, S_SMALL, S_BIG)
         else:
             stt = "단품만-상하모두" if tl and bl else \
                 ("단품만-상의만" if tl else ("단품만-하의만" if bl else "품절근처"))
