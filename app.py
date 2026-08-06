@@ -922,13 +922,16 @@ def render_styled_table(sty, extra_class="", extra_css=""):
 
 
 def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False,
-               month=None, blk_labels=("당월누계", "연간누계")):
+               month=None, blk_labels=("당월누계", "연간누계"), preview=False):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
 
     extra=(컬럼명, {행라벨: 값})이면 표 맨 앞(행이름 바로 옆)에 텍스트 컬럼을 삽입
     — 예: 유통채널별 표의 '담당자'. 엑셀 다운로드에도 그대로 포함된다. (month와 병용 불가)
     season_rows=True면 G.TOTAL 아래 시즌 7행(S/S·F/W TOTAL + Z·A·B·C·D) 삽입.
     month=(cur_m, prev_m)이면 당월누계+연간누계 2블록 표(플래그십 탭 전용, 2026-07-31).
+    preview=True(2026-08-06 추가)면 '🔍 조회 누르기 전' 안내용 — cur/prev가 빈 DataFrame이라
+    yoy_frame이 전부 0/"–"로 채운 스켈레톤을 반환하는 걸 이용해, 실제 계산 없이 이 화면에서
+    나올 표의 헤더·행 구조만 미리 보여준다(엑셀 다운로드 버튼은 숨김 — 아직 실데이터가 아니므로).
     """
     if month is not None:
         cur_m, prev_m = month
@@ -942,11 +945,16 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
                  ["" if k == "G.TOTAL" else str(_map.get(str(k), "") or "") for k in D.index])
     nblk = sum(1 for c in D.columns if c[0] == blk_labels[0]) if month is not None else None
     h1, h2 = st.columns([4, 1])
-    h1.markdown(f"**{title}**{_NOTE_FLOAT}", unsafe_allow_html=True)
-    h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28], first_block_cols=nblk),
-                       file_name=f"{_safe_name(title)[:24]}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       key=f"dl_{key}", use_container_width=True)
+    if preview:
+        h1.markdown(f"**{title}**"
+                     "<span style='color:#888;font-weight:400;font-size:0.78rem;'>"
+                     " — 미리보기(조회 전) · 실제 숫자는 🔍 조회 후 표시돼요</span>", unsafe_allow_html=True)
+    else:
+        h1.markdown(f"**{title}**{_NOTE_FLOAT}", unsafe_allow_html=True)
+        h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28], first_block_cols=nblk),
+                           file_name=f"{_safe_name(title)[:24]}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key=f"dl_{key}", use_container_width=True)
     sty = style_yoy(D)
     if nblk:
         sty = block_border(sty, nblk)   # 룰12: 당월/연간 경계 두꺼운 선
@@ -1007,6 +1015,12 @@ def render_flagship(df):
                    "(실제 집계는 기준기간 날짜를 따라요)")
         run = st.form_submit_button("🔍 조회", type="primary")
     if _need_search("fs_go", run):
+        # 2026-08-06: 조회 전에도 "이 화면이 뭘 보여주는 표인지" 헤더만 미리 보여줌 —
+        # 빈 DataFrame으로 perf_table을 부르면 yoy_frame이 G.TOTAL+시즌7행을 전부 "–"로
+        # 채운 스켈레톤을 만들어서, 실제 51만 건 계산 없이 표 구조만 공짜로 보인다.
+        _empty = pd.DataFrame()
+        perf_table(_empty, _empty, "연차", None, "시즌별/연차별 한눈에 보기", "fs_preview",
+                   season_rows=True, month=(_empty, _empty), preview=True)
         return
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
@@ -1638,6 +1652,12 @@ def render_channel_brand(df):
             st.caption("※ 매장 기준정보(담당자)가 없어 담당자 컬럼·필터가 비어 있어요 — 사이드바에서 매장 기준정보를 업로드하면 채워져요.")
         run = st.form_submit_button("🔍 조회", type="primary")
     if _need_search("cb_go", run):
+        # 2026-08-06: 조회 전에도 표 헤더(구조)만 미리 보여줌 — 실제 계산 없음(perf_table 참고).
+        _empty = pd.DataFrame()
+        perf_table(_empty, _empty, "_채널", None, "유통채널별 매출현황", "cb_ch_preview",
+                   extra=("담당자", {}), preview=True)
+        perf_table(_empty, _empty, "브랜드명", None, "브랜드별 매출현황", "cb_br_preview",
+                   preview=True)
         return
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
@@ -3603,6 +3623,8 @@ def render_trend_weekly(df):
         run = st.form_submit_button("🔍 조회", type="primary")
 
     if _need_search("tr_go", run):
+        st.caption(f"🔍 조회하면 **{axis}별 {metric} 추세 그래프**(주 단위)와 그 아래 "
+                   "**시점요약표·주별데이터표**가 나와요. 위 ①에서 기준·지표·스무딩을 먼저 정해 보세요.")
         return
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
         st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
@@ -4337,6 +4359,9 @@ def render_return_rate(df):
         selg = f3.multiselect("중카테고리(아이템그룹)", groups, default=[], placeholder="전체", key="rr_fg")
         run = st.form_submit_button("🔍 조회", type="primary")
     if _need_search("rr_go", run):
+        st.caption("🔍 조회하면 **품번별 반품률 상세표**가 나와요 — 컬럼: 품번·아이템명·품명·"
+                   "아이템그룹·소카테고리·시즌명·판매수량·반품수량·**반품률**·비교기준평균·"
+                   "그룹내상품수·이상치기준값·반품금액·이상치 여부.")
         return
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
         st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
@@ -4694,6 +4719,8 @@ def render_suitset(df):
         sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="ss_fs")
         run = st.form_submit_button("🔍 조회", type="primary")
     if _need_search("ss_go", run):
+        st.caption("🔍 조회하면 **매장별 SET 판매 분석표**(자켓·팬츠 판매량, 세트로판매/단품판매, "
+                   "세트매출/단품매출, 세트비중 등)와 그 아래 **특정매장 SET 품번별 분석**이 나와요.")
         return
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
         st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
@@ -5320,7 +5347,7 @@ def main():
         "<div style='margin:2px 0 6px;'>"
         "<div style='font-size:2.3rem;font-weight:700;letter-spacing:-0.035em;"
         "color:#1d1d1f;line-height:1.15;'>온라인팀 ERP</div>"
-        "<div style='font-size:1.35rem;font-weight:600;letter-spacing:-0.03em;"
+        "<div style='font-size:2.3rem;font-weight:600;letter-spacing:-0.03em;"
         "color:#6e6e73;line-height:1.3;margin-top:2px;'>"
         "Data to Insight, Insight to Action !</div></div>",
         unsafe_allow_html=True)
