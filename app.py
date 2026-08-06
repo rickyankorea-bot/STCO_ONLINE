@@ -445,7 +445,7 @@ def _existing_columns(conn, eng):
     return [r[0] for r in rows]
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=21600)
 def load_db():
     """필요한 컬럼만 청크 단위로 읽어 category/downcast로 적재 (대용량 메모리 최적화)."""
     eng = get_engine()
@@ -1690,7 +1690,7 @@ def replace_master(m):
     return len(m)
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=21600)
 def load_master():
     eng = get_engine()
     try:
@@ -1780,7 +1780,7 @@ def replace_plan(p):
     return len(p)
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=21600)
 def load_plan():
     eng = get_engine()
     try:
@@ -2511,7 +2511,7 @@ def replace_size_master(m):
     return len(m)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=21600)
 def load_size_master():
     """DB의 사이즈 마스터를 dict{품번: 사이즈코드}로 반환. 없으면 빈 dict."""
     eng = get_engine()
@@ -2586,7 +2586,7 @@ def replace_item_master(m):
     return len(m)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=21600)
 def load_item_master():
     """DB의 아이템 마스터를 dict{아이템코드: {name,large,mid,small,topbottom}}로 반환. 없으면 빈 dict."""
     eng = get_engine()
@@ -2661,7 +2661,7 @@ def _inv_cat_level_value(item_code, cat_level):
 _ITEMGROUP_OVERRIDE_SPLIT = {"FW": "신발", "NT": "넥타이", "BE": "벨트", "SC": "양말"}
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=21600)
 def get_itemgroup_map():
     """판매분석 아이템그룹 맵 — 아이템 마스터(item_master) 기준 + 팀 커스텀 분리 + 구 하드코딩 폴백."""
     m = load_item_master()
@@ -3323,7 +3323,7 @@ _TREND_SEASON_LABEL = {"공통": "Z (공통)", "봄": "A (봄)", "여름": "B (�
 _TREND_SEASON_ORDER = ["Z (공통)", "A (봄)", "B (여름)", "C (가을)", "D (겨울)", "E (RUNNING)"]
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=21600)
 def _trend_cat_maps():
     """아이템코드 → (중카테고리, 소카테고리, 아이템명) 맵.
 
@@ -4098,7 +4098,7 @@ def merge_weather(new_df):
     return len(both)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=21600)
 def load_weather(raw=False):
     """DB의 기온 일자료 DF[date, stn, avg_ta, min_ta, max_ta]. 없으면 빈 DF."""
     eng = get_engine()
@@ -5283,7 +5283,10 @@ def main():
             st.rerun()
         st.metric("현재 DB 누적", f"{db_row_count():,} 건")
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
-            load_db.clear(); load_master.clear(); load_size_master.clear(); st.rerun()
+            load_db.clear(); load_master.clear(); load_plan.clear()
+            load_size_master.clear(); load_item_master.clear(); load_weather.clear()
+            get_itemgroup_map.clear(); _trend_cat_maps.clear()
+            st.rerun()
 
         # ── 조회 메뉴 (탭 대체) ──────────────────────────────────────
         st.divider()
