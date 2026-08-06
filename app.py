@@ -956,6 +956,23 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
         render_styled_table(sty)   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
 
 
+def _need_search(flag_key, submitted):
+    """조회 버튼 게이트 (2026-08-06 메모리 개선).
+
+    필터를 st.form으로 묶으면 폼 안 위젯은 아무리 바꿔도 화면이 다시 계산되지 않고,
+    '🔍 조회'(form_submit_button)를 눌러야 그때 1번만 계산된다 — 회사 ERP의
+    [기간 선택 → 조회 버튼] 방식과 동일. 이 함수는 '화면 첫 진입 때 아직 조회를
+    한 번도 안 눌렀으면 계산을 건너뛰는' 공용 게이트다. 한 번 조회한 뒤에는
+    마지막으로 조회했던 조건으로 결과가 계속 표시된다.
+    """
+    if submitted:
+        st.session_state[flag_key] = True
+    if not st.session_state.get(flag_key):
+        st.info("👆 기간과 조건을 고른 뒤 **🔍 조회** 버튼을 눌러 주세요 — 조회 전에는 계산하지 않아요.")
+        return True
+    return False
+
+
 def render_flagship(df):
     st.subheader("📅 연차 · 아이템별 전년 대비 분석")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
@@ -965,27 +982,35 @@ def render_flagship(df):
     years = sorted(d["_판매일"].dt.year.dropna().astype(int).unique(), reverse=True)
 
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 단위 백만원 · 판가율=실판가÷최초가(가중)")
-    f1, f2 = st.columns([1, 2.4])
-    with f1:
-        cy = st.selectbox("기준연도", years, index=0)
-    cur_all = d[d["_판매일"].dt.year == cy]
-    dmin, dmax = cur_all["_판매일"].min().date(), cur_all["_판매일"].max().date()
-    with f2:
-        rng = st.date_input(f"기준기간 (전년 {cy-1} 동기간 자동)", value=(dmin, dmax),
-                            min_value=d["_판매일"].min().date(), max_value=d["_판매일"].max().date())
-    # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 · 빈칸=전체
-    fb1, fb2, fb3 = st.columns(3)
-    brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
-    ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
-    seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
-    selb = fb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="fs_b")
-    sela = fb2.multiselect("연차별", ages, default=[], placeholder="전체", key="fs_a")
-    sels = fb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="fs_s")
-    chans = sorted(d["_채널"].dropna().unique()) if "_채널" in d.columns else []
-    selc = st.multiselect("매장/채널", chans, default=[], placeholder="전체", key="fs_c")
+    # ── 조건 폼 (2026-08-06): 안의 위젯은 아무리 바꿔도 계산이 안 돌고, 🔍 조회를 눌러야 1번 계산 ──
+    with st.form("fs_form"):
+        f1, f2 = st.columns([1, 2.4])
+        with f1:
+            cy = st.selectbox("기준연도", years, index=0, key="fs_y")
+        cur_all = d[d["_판매일"].dt.year == cy]
+        dmin, dmax = cur_all["_판매일"].min().date(), cur_all["_판매일"].max().date()
+        with f2:
+            rng = st.date_input(f"기준기간 (전년 {cy-1} 동기간 자동)", value=(dmin, dmax),
+                                min_value=d["_판매일"].min().date(), max_value=d["_판매일"].max().date(),
+                                key="fs_rng")
+        # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 · 빈칸=전체
+        fb1, fb2, fb3 = st.columns(3)
+        brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
+        ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
+        seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
+        selb = fb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="fs_b")
+        sela = fb2.multiselect("연차별", ages, default=[], placeholder="전체", key="fs_a")
+        sels = fb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="fs_s")
+        chans = sorted(d["_채널"].dropna().unique()) if "_채널" in d.columns else []
+        selc = st.multiselect("매장/채널", chans, default=[], placeholder="전체", key="fs_c")
+        st.caption("※ 기준연도를 바꿨다면 기준기간 날짜도 그 연도로 맞춘 뒤 🔍 조회를 눌러 주세요. "
+                   "(실제 집계는 기준기간 날짜를 따라요)")
+        run = st.form_submit_button("🔍 조회", type="primary")
+    if _need_search("fs_go", run):
+        return
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
-        st.info("기간(시작~끝)을 선택하세요.")
+        st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
         return
     s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
     base = d.copy()
@@ -1594,21 +1619,26 @@ def render_channel_brand(df):
     default_start = (pd.to_datetime(dmax) - pd.Timedelta(days=6)).date()
 
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 백만원 · 판가율=실판가÷최초가(가중) · 기본기간=최근 1주")
-    rng = st.date_input("조회기간 (기본: 최근 1주)", value=(default_start, dmax),
-                        min_value=dmin, max_value=dmax, key="cb_rng")
-    # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 → 매장 담당 · 빈칸=전체
-    cb1, cb2, cb3, cb4 = st.columns(4)
-    brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
-    ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
-    seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
-    _mans = sorted({str(m).strip() for m in d["_담당자"].dropna().astype(str)
-                    if str(m).strip() and str(m).strip().lower() not in ("nan", "none")})
-    selb = cb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cb_brand")
-    sela = cb2.multiselect("연차별", ages, default=[], placeholder="전체", key="cb_age")
-    sels = cb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cb_season")
-    selm = cb4.multiselect("매장 담당", _mans, default=[], placeholder="전체", key="cb_mgr")
-    if not _mans:
-        st.caption("※ 매장 기준정보(담당자)가 없어 담당자 컬럼·필터가 비어 있어요 — 사이드바에서 매장 기준정보를 업로드하면 채워져요.")
+    # ── 조건 폼 (2026-08-06): 조건 변경 중엔 계산 안 함, 🔍 조회 때 1번만 ──
+    with st.form("cb_form"):
+        rng = st.date_input("조회기간 (기본: 최근 1주)", value=(default_start, dmax),
+                            min_value=dmin, max_value=dmax, key="cb_rng")
+        # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 → 매장 담당 · 빈칸=전체
+        cb1, cb2, cb3, cb4 = st.columns(4)
+        brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
+        ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
+        seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
+        _mans = sorted({str(m).strip() for m in d["_담당자"].dropna().astype(str)
+                        if str(m).strip() and str(m).strip().lower() not in ("nan", "none")})
+        selb = cb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cb_brand")
+        sela = cb2.multiselect("연차별", ages, default=[], placeholder="전체", key="cb_age")
+        sels = cb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cb_season")
+        selm = cb4.multiselect("매장 담당", _mans, default=[], placeholder="전체", key="cb_mgr")
+        if not _mans:
+            st.caption("※ 매장 기준정보(담당자)가 없어 담당자 컬럼·필터가 비어 있어요 — 사이드바에서 매장 기준정보를 업로드하면 채워져요.")
+        run = st.form_submit_button("🔍 조회", type="primary")
+    if _need_search("cb_go", run):
+        return
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
         st.info("기간(시작~끝)을 선택하세요.")
@@ -3475,101 +3505,119 @@ def render_trend_weekly(df):
     st.caption("주(월요일 시작) 단위로 계열별 판매 흐름을 그려서 **언제 붙기 시작하고, 언제 피크를 찍고, "
                "언제 꺾이는지**를 잡아내는 화면이에요. 조회 기간은 최대 1년(53주)까지 선택할 수 있어요.")
 
-    # ── 기준축 · 지표 · 기간 ─────────────────────────────────────────
-    st.markdown("##### ① 무엇을 볼지 정하기")
-    c1, c2, c3 = st.columns([1.15, 1.0, 1.15])
-    axis = c1.selectbox("📊 기준 — 그래프의 **선을 무엇으로 나눌지** (여기를 바꿔야 선이 바뀝니다)",
-                        TREND_AXES, index=0, key="tr_axis",
-                        help="아이템그룹(중카테고리)별로 선을 보고 싶으면 여기를 '중카테고리'로 바꾸세요. "
-                             "아래쪽 '중카테고리'는 조회 대상을 걸러내는 필터라서 선을 나누지 않아요.")
-    metric = c2.selectbox("지표 (세로축)", TREND_METRICS, index=0, key="tr_metric")
-    smooth_key = c3.selectbox("〰️ 추세 다듬기 (스무딩)", list(TREND_SMOOTH.keys()),
-                              index=list(TREND_SMOOTH).index(TREND_SMOOTH_DEFAULT), key="tr_smooth",
-                              help="한 주만 튀는 프로모션·단발 대형주문 때문에 선이 들쭉날쭉할 때 씁니다. "
-                                   "앞뒤 주를 함께 평균 내는 '중앙 정렬'이라 피크 시점이 뒤로 밀리지 않아요. "
-                                   "한 주짜리 폭증이 심하면 '3주 중앙값'이 가장 강하게 눌러줍니다. "
-                                   "정확한 원본 수치는 아래 '주별 데이터' 표에 그대로 남아 있어요.")
-    smooth_mode = TREND_SMOOTH[smooth_key]
-    smooth_tag = _trend_smooth_tag(smooth_key)
+    # ── 조건 폼 (2026-08-06): 폼 안 위젯은 바꿔도 계산 안 함, 🔍 조회 때 1번만 계산 ──
+    with st.form("tr_form"):
+        # ── 기준축 · 지표 · 기간 ─────────────────────────────────────
+        st.markdown("##### ① 무엇을 볼지 정하기")
+        c1, c2, c3 = st.columns([1.15, 1.0, 1.15])
+        axis = c1.selectbox("📊 기준 — 그래프의 **선을 무엇으로 나눌지** (여기를 바꿔야 선이 바뀝니다)",
+                            TREND_AXES, index=0, key="tr_axis",
+                            help="아이템그룹(중카테고리)별로 선을 보고 싶으면 여기를 '중카테고리'로 바꾸세요. "
+                                 "아래쪽 '중카테고리'는 조회 대상을 걸러내는 필터라서 선을 나누지 않아요.")
+        metric = c2.selectbox("지표 (세로축)", TREND_METRICS, index=0, key="tr_metric")
+        smooth_key = c3.selectbox("〰️ 추세 다듬기 (스무딩)", list(TREND_SMOOTH.keys()),
+                                  index=list(TREND_SMOOTH).index(TREND_SMOOTH_DEFAULT), key="tr_smooth",
+                                  help="한 주만 튀는 프로모션·단발 대형주문 때문에 선이 들쭉날쭉할 때 씁니다. "
+                                       "앞뒤 주를 함께 평균 내는 '중앙 정렬'이라 피크 시점이 뒤로 밀리지 않아요. "
+                                       "한 주짜리 폭증이 심하면 '3주 중앙값'이 가장 강하게 눌러줍니다. "
+                                       "정확한 원본 수치는 아래 '주별 데이터' 표에 그대로 남아 있어요.")
+        smooth_mode = TREND_SMOOTH[smooth_key]
+        smooth_tag = _trend_smooth_tag(smooth_key)
 
-    default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=TREND_MAX_DAYS - 7), pd.to_datetime(dmin)).date()
-    rng = st.date_input(f"조회기간 (최대 1년 · 기본 = 최근 {TREND_MAX_WEEKS}주)",
-                        value=(default_start, dmax), min_value=dmin, max_value=dmax, key="tr_rng")
-    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
-        st.info("기간(시작~끝)을 선택하세요.")
+        default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=TREND_MAX_DAYS - 7), pd.to_datetime(dmin)).date()
+        rng = st.date_input(f"조회기간 (최대 1년 · 기본 = 최근 {TREND_MAX_WEEKS}주)",
+                            value=(default_start, dmax), min_value=dmin, max_value=dmax, key="tr_rng")
+
+        o0, o1, o2, o3, o4 = st.columns([1.05, 0.95, 0.95, 1.5, 0.95])
+        show_total = o0.checkbox("전체 실판가 배경선", value=True, key="tr_total",
+                                 help="**회사 전체** 실판매금액을 굵은 회색 반투명 선으로 뒤에 깔아줘요. "
+                                      "필터·기준축을 어떻게 바꿔도 이 선은 그대로라서, 특정 아이템·시즌이 "
+                                      "전체 흐름과 얼마나 다르게 움직이는지 바로 비교할 수 있어요. "
+                                      "숫자 크기가 달라 다른 선이 눌리지 않도록 별도 보조축을 씁니다.")
+        show_prev = o1.checkbox("전년 동기간 점선 비교", value=False, key="tr_prev",
+                                help="같은 색 점선으로 전년 같은 주(52주 전)를 겹쳐 그려요 — "
+                                     "'작년 이맘때보다 빠른가/늦은가'를 볼 수 있어요.")
+        show_peak = o2.checkbox("피크 시점 자동 표시", value=True, key="tr_peak",
+                                help="계열마다 최고점 주에 마커와 '○○ 피크' 라벨을 찍어줘요.")
+        thr_pct = o3.slider("시점 판정 기준선 (피크 대비 %)", min_value=30, max_value=80, value=50, step=5,
+                            key="tr_thr",
+                            help="이 선을 처음 넘은 주 = 본격 상승 시점, 피크 뒤 처음 내려온 주 = 피크아웃 시점.")
+        font_key = o4.selectbox("글자 크기", list(TREND_FONT_PRESETS.keys()),
+                                index=list(TREND_FONT_PRESETS).index(TREND_FONT_DEFAULT), key="tr_font",
+                                help="회의 때 화면에 띄우면 '아주 크게'가 잘 보여요. 글자를 키우면 "
+                                     "가로축 날짜가 겹치지 않게 라벨 간격(1주→2주)이 자동으로 벌어져요.")
+        FS = TREND_FONT_PRESETS[font_key]
+
+        # ── 🌡️ 서울 기온 겹쳐보기 (2026-08-03) ─────────────────────
+        #    "아침 최저기온이 20도 아래로 떨어진 주에 니트가 붙는다" 같은 임계 온도를 눈으로도, 표로도 확인.
+        n_wx = weather_row_count()
+        show_wx, wx_lines, wx_key = False, [], "최저기온"
+        if n_wx:
+            wd0, wd1 = weather_span()
+            g1, g2, g3 = st.columns([1, 1.5, 1.2])
+            show_wx = g1.checkbox("🌡️ 서울 기온 겹쳐보기", value=False, key="tr_wx",
+                                  help=f"기상청 ASOS 일자료 {wd0}~{wd1} 적재됨. 주 평균으로 보조축(오른쪽)에 겹쳐 그려요.")
+            wx_lines = g2.multiselect("겹쳐 그릴 기온", WEATHER_KINDS, default=["최저기온", "최고기온"],
+                                      key="tr_wxlines", placeholder="선택")
+            wx_key = g3.selectbox("임계 기온 기준", WEATHER_KINDS, index=1, key="tr_wxkey",
+                                  help="시점 요약표의 '그때 기온' 컬럼에 쓸 기준이에요. "
+                                       "가을 시즌 진입은 보통 아침 최저기온이 가장 잘 맞아요.")
+        else:
+            st.caption("🌡️ 서울 기온을 겹쳐 보려면 관리자가 사이드바 **기온 데이터 업로드**에서 "
+                       "기상자료개방포털 ASOS 일자료를 올리거나, 기상청 API로 자동 수집하면 돼요.")
+
+        # ── 데이터 준비: 필요한 날짜 구간만 잘라서 파생 컬럼 부착 (메모리 절약) ──
+        #    폼 안에서는 ② 필터의 선택지(브랜드·시즌·카테고리 목록)를 만들기 위해서만 자른다.
+        #    기간이 아직 미완성(시작일만 선택 등)이면 기본 기간으로 대체해 선택지만 구성하고,
+        #    실제 기간 검증·오류 안내는 폼 밖(조회 버튼 이후)에서 한다.
+        _rng_ok = (isinstance(rng, (list, tuple)) and len(rng) == 2
+                   and pd.to_datetime(rng[1]) >= pd.to_datetime(rng[0])
+                   and (pd.to_datetime(rng[1]) - pd.to_datetime(rng[0])).days <= TREND_MAX_DAYS)
+        if _rng_ok:
+            s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+        else:
+            s, e = pd.to_datetime(default_start), pd.to_datetime(dmax)
+        s_load = (s - pd.Timedelta(days=TREND_PREV_SHIFT_DAYS)) if show_prev else s
+        base = d[(d["_판매일"] >= s_load) & (d["_판매일"] <= e)]
+        if not base.empty:
+            base = _trend_prep(base)
+
+        # ── 공통 필터 (빈칸=전체) — 브랜드 · 시즌 · 중카테고리 · 소카테고리 ──
+        #    ⚠️ 여기는 '조회 대상을 걸러내는' 필터일 뿐, 그래프의 선을 나누지 않는다(선을 나누는 건 위 ① 기준).
+        #    실제로 중카테고리 필터를 걸어놓고 "왜 아이템그룹별로 안 보이지?" 하는 혼동이 있었어서(260803),
+        #    라벨을 ②로 번호 붙이고, 아래에 '기준 바꾸기' 원클릭 버튼 안내를 띄운다.
+        st.markdown("##### ② 조회 대상 좁히기 (필터 · 빈칸=전체)"
+                    "<span style='color:#888;font-weight:400;font-size:0.78rem;'> — 여기는 데이터를 "
+                    "걸러내기만 해요. 선을 나누는 건 위 ①의 **기준**입니다.</span>", unsafe_allow_html=True)
+        f1, f2, f3, f4 = st.columns(4)
+        brands = sorted(base["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in base.columns else []
+        seasons = ([x for x in _TREND_SEASON_ORDER if x in set(base["_시즌축"])] +
+                   sorted(x for x in set(base["_시즌축"]) if x not in _TREND_SEASON_ORDER)) \
+            if "_시즌축" in base.columns else []
+        mids = sorted(set(base["_중카"])) if "_중카" in base.columns else []
+        smalls = sorted(set(base["_소카"])) if "_소카" in base.columns else []
+        selb = f1.multiselect("브랜드", brands, default=[], placeholder="전체", key="tr_fb")
+        sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="tr_fs")
+        selm = f3.multiselect("중카테고리", mids, default=[], placeholder="전체", key="tr_fm")
+        selsm = f4.multiselect("소카테고리", smalls, default=[], placeholder="전체", key="tr_fsm")
+        run = st.form_submit_button("🔍 조회", type="primary")
+
+    if _need_search("tr_go", run):
         return
-    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
-    if e < s:
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
+        return
+    _s0, _e0 = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    if _e0 < _s0:
         st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
         return
-    if (e - s).days > TREND_MAX_DAYS:
+    if (_e0 - _s0).days > TREND_MAX_DAYS:
         st.error(f"조회 기간은 최대 1년({TREND_MAX_WEEKS}주)까지예요. "
-                 f"현재 선택 {(e - s).days + 1}일 — 기간을 줄여 주세요.")
+                 f"현재 선택 {(_e0 - _s0).days + 1}일 — 기간을 줄여 주세요.")
         return
-
-    o0, o1, o2, o3, o4 = st.columns([1.05, 0.95, 0.95, 1.5, 0.95])
-    show_total = o0.checkbox("전체 실판가 배경선", value=True, key="tr_total",
-                             help="**회사 전체** 실판매금액을 굵은 회색 반투명 선으로 뒤에 깔아줘요. "
-                                  "필터·기준축을 어떻게 바꿔도 이 선은 그대로라서, 특정 아이템·시즌이 "
-                                  "전체 흐름과 얼마나 다르게 움직이는지 바로 비교할 수 있어요. "
-                                  "숫자 크기가 달라 다른 선이 눌리지 않도록 별도 보조축을 씁니다.")
-    show_prev = o1.checkbox("전년 동기간 점선 비교", value=False, key="tr_prev",
-                            help="같은 색 점선으로 전년 같은 주(52주 전)를 겹쳐 그려요 — "
-                                 "'작년 이맘때보다 빠른가/늦은가'를 볼 수 있어요.")
-    show_peak = o2.checkbox("피크 시점 자동 표시", value=True, key="tr_peak",
-                            help="계열마다 최고점 주에 마커와 '○○ 피크' 라벨을 찍어줘요.")
-    thr_pct = o3.slider("시점 판정 기준선 (피크 대비 %)", min_value=30, max_value=80, value=50, step=5,
-                        key="tr_thr",
-                        help="이 선을 처음 넘은 주 = 본격 상승 시점, 피크 뒤 처음 내려온 주 = 피크아웃 시점.")
-    font_key = o4.selectbox("글자 크기", list(TREND_FONT_PRESETS.keys()),
-                            index=list(TREND_FONT_PRESETS).index(TREND_FONT_DEFAULT), key="tr_font",
-                            help="회의 때 화면에 띄우면 '아주 크게'가 잘 보여요. 글자를 키우면 "
-                                 "가로축 날짜가 겹치지 않게 라벨 간격(1주→2주)이 자동으로 벌어져요.")
-    FS = TREND_FONT_PRESETS[font_key]
-
-    # ── 🌡️ 서울 기온 겹쳐보기 (2026-08-03) ─────────────────────────
-    #    "아침 최저기온이 20도 아래로 떨어진 주에 니트가 붙는다" 같은 임계 온도를 눈으로도, 표로도 확인.
-    n_wx = weather_row_count()
-    show_wx, wx_lines, wx_key = False, [], "최저기온"
-    if n_wx:
-        wd0, wd1 = weather_span()
-        g1, g2, g3 = st.columns([1, 1.5, 1.2])
-        show_wx = g1.checkbox("🌡️ 서울 기온 겹쳐보기", value=False, key="tr_wx",
-                              help=f"기상청 ASOS 일자료 {wd0}~{wd1} 적재됨. 주 평균으로 보조축(오른쪽)에 겹쳐 그려요.")
-        wx_lines = g2.multiselect("겹쳐 그릴 기온", WEATHER_KINDS, default=["최저기온", "최고기온"],
-                                  key="tr_wxlines", placeholder="선택")
-        wx_key = g3.selectbox("임계 기온 기준", WEATHER_KINDS, index=1, key="tr_wxkey",
-                              help="시점 요약표의 '그때 기온' 컬럼에 쓸 기준이에요. "
-                                   "가을 시즌 진입은 보통 아침 최저기온이 가장 잘 맞아요.")
-    else:
-        st.caption("🌡️ 서울 기온을 겹쳐 보려면 관리자가 사이드바 **기온 데이터 업로드**에서 "
-                   "기상자료개방포털 ASOS 일자료를 올리거나, 기상청 API로 자동 수집하면 돼요.")
-
-    # ── 데이터 준비: 필요한 날짜 구간만 잘라서 파생 컬럼 부착 (메모리 절약) ──
-    s_load = (s - pd.Timedelta(days=TREND_PREV_SHIFT_DAYS)) if show_prev else s
-    base = d[(d["_판매일"] >= s_load) & (d["_판매일"] <= e)]
     if base.empty:
         st.info("선택한 기간에 매출 데이터가 없어요.")
         return
-    base = _trend_prep(base)
-
-    # ── 공통 필터 (빈칸=전체) — 브랜드 · 시즌 · 중카테고리 · 소카테고리 ──
-    #    ⚠️ 여기는 '조회 대상을 걸러내는' 필터일 뿐, 그래프의 선을 나누지 않는다(선을 나누는 건 위 ① 기준).
-    #    실제로 중카테고리 필터를 걸어놓고 "왜 아이템그룹별로 안 보이지?" 하는 혼동이 있었어서(260803),
-    #    라벨을 ②로 번호 붙이고, 아래에 '기준 바꾸기' 원클릭 버튼 안내를 띄운다.
-    st.markdown("##### ② 조회 대상 좁히기 (필터 · 빈칸=전체)"
-                "<span style='color:#888;font-weight:400;font-size:0.78rem;'> — 여기는 데이터를 "
-                "걸러내기만 해요. 선을 나누는 건 위 ①의 **기준**입니다.</span>", unsafe_allow_html=True)
-    f1, f2, f3, f4 = st.columns(4)
-    brands = sorted(base["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in base.columns else []
-    seasons = [x for x in _TREND_SEASON_ORDER if x in set(base["_시즌축"])] + \
-              sorted(x for x in set(base["_시즌축"]) if x not in _TREND_SEASON_ORDER)
-    mids = sorted(set(base["_중카"]))
-    smalls = sorted(set(base["_소카"]))
-    selb = f1.multiselect("브랜드", brands, default=[], placeholder="전체", key="tr_fb")
-    sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="tr_fs")
-    selm = f3.multiselect("중카테고리", mids, default=[], placeholder="전체", key="tr_fm")
-    selsm = f4.multiselect("소카테고리", smalls, default=[], placeholder="전체", key="tr_fsm")
     if selb and "브랜드명" in base.columns:
         base = base[base["브랜드명"].astype(str).isin(selb)]
     if sels:
@@ -4275,10 +4323,23 @@ def render_return_rate(df):
 
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=89), pd.to_datetime(dmin)).date()
-    rng = st.date_input("조회기간 (기본: 최근 90일)", value=(default_start, dmax),
-                        min_value=dmin, max_value=dmax, key="rr_rng")
+    # ── 조건 폼 (2026-08-06): 조건 변경 중엔 계산 안 함, 🔍 조회 때 1번만 ──
+    with st.form("rr_form"):
+        rng = st.date_input("조회기간 (기본: 최근 90일)", value=(default_start, dmax),
+                            min_value=dmin, max_value=dmax, key="rr_rng")
+        # 공통 필터 (빈칸=전체) — 브랜드 · 시즌 · 중카테고리(아이템그룹)
+        f1, f2, f3 = st.columns(3)
+        brands = sorted(d["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in d.columns else []
+        seasons = sorted(d["시즌명"].dropna().astype(str).unique()) if "시즌명" in d.columns else []
+        groups = [g for g in ITEMGROUP_ORDER if g in set(d.get("아이템그룹", pd.Series(dtype=str)).astype(str))]
+        selb = f1.multiselect("브랜드", brands, default=[], placeholder="전체", key="rr_fb")
+        sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="rr_fs")
+        selg = f3.multiselect("중카테고리(아이템그룹)", groups, default=[], placeholder="전체", key="rr_fg")
+        run = st.form_submit_button("🔍 조회", type="primary")
+    if _need_search("rr_go", run):
+        return
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
-        st.info("기간(시작~끝)을 선택하세요.")
+        st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
         return
     s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
     if e < s:
@@ -4287,6 +4348,7 @@ def render_return_rate(df):
 
     # 카테고리 파생(중카테고리는 load_db가 이미 만들어 둔 '아이템그룹' 그대로 사용, 소카테고리는
     # 추세분석과 동일한 아이템 마스터 기준 맵(_trend_cat_maps)을 그대로 재사용 — 단일 소스 유지)
+    # ※ 2026-08-06: 조회 게이트 뒤로 이동 — 조회 전 화면 진입만으로는 이 파생 계산이 돌지 않게.
     mid_map, small_map, name_map = _trend_cat_maps()
     if "아이템" in d.columns:
         _ic = d["아이템"].astype(str).str.strip().str.upper()
@@ -4296,15 +4358,6 @@ def render_return_rate(df):
         _ic = pd.Series("", index=d.index, dtype="object")
     d["_소카"] = _ic.map(small_map).fillna(d.get("아이템그룹", "기타"))
     d["_아이템코드"] = _ic
-
-    # 공통 필터 (빈칸=전체) — 브랜드 · 시즌 · 중카테고리(아이템그룹)
-    f1, f2, f3 = st.columns(3)
-    brands = sorted(d["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in d.columns else []
-    seasons = sorted(d["시즌명"].dropna().astype(str).unique()) if "시즌명" in d.columns else []
-    groups = [g for g in ITEMGROUP_ORDER if g in set(d.get("아이템그룹", pd.Series(dtype=str)).astype(str))]
-    selb = f1.multiselect("브랜드", brands, default=[], placeholder="전체", key="rr_fb")
-    sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="rr_fs")
-    selg = f3.multiselect("중카테고리(아이템그룹)", groups, default=[], placeholder="전체", key="rr_fg")
 
     base = d[(d["_판매일"] >= s) & (d["_판매일"] <= e)]
     if selb and "브랜드명" in base.columns:
@@ -4628,23 +4681,27 @@ def render_suitset(df):
 
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
-    rng = st.date_input("조회기간 (기본: 최근 7일)", value=(default_start, dmax),
-                        min_value=dmin, max_value=dmax, key="ss_rng")
+    # ── 조건 폼 (2026-08-06): 조건 변경 중엔 계산 안 함, 🔍 조회 때 1번만 ──
+    with st.form("ss_form"):
+        rng = st.date_input("조회기간 (기본: 최근 7일)", value=(default_start, dmax),
+                            min_value=dmin, max_value=dmax, key="ss_rng")
+        # 공통룰10: 브랜드·시즌 필터(빈칸=전체). 디자인키에 브랜드·시즌이 이미 포함되므로 매칭 조건과
+        # 충돌 없이 미리 좁혀도 안전 — 세트를 이루는 자켓·하의는 항상 브랜드·시즌이 같기 때문.
+        f1, f2 = st.columns(2)
+        brands = sorted(d["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in d.columns else []
+        seasons = sorted(d["시즌명"].dropna().astype(str).unique()) if "시즌명" in d.columns else []
+        selb = f1.multiselect("브랜드", brands, default=[], placeholder="전체", key="ss_fb")
+        sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="ss_fs")
+        run = st.form_submit_button("🔍 조회", type="primary")
+    if _need_search("ss_go", run):
+        return
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
-        st.info("기간(시작~끝)을 선택하세요.")
+        st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
         return
     s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
     if e < s:
         st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
         return
-
-    # 공통룰10: 브랜드·시즌 필터(빈칸=전체). 디자인키에 브랜드·시즌이 이미 포함되므로 매칭 조건과
-    # 충돌 없이 미리 좁혀도 안전 — 세트를 이루는 자켓·하의는 항상 브랜드·시즌이 같기 때문.
-    f1, f2 = st.columns(2)
-    brands = sorted(d["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in d.columns else []
-    seasons = sorted(d["시즌명"].dropna().astype(str).unique()) if "시즌명" in d.columns else []
-    selb = f1.multiselect("브랜드", brands, default=[], placeholder="전체", key="ss_fb")
-    sels = f2.multiselect("시즌", seasons, default=[], placeholder="전체", key="ss_fs")
 
     lb_start = s - pd.Timedelta(days=_SUITSET_LOOKBACK_DAYS)
     uni = d[(d["_판매일"] >= lb_start) & (d["_판매일"] <= e)].copy()
