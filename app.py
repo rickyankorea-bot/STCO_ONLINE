@@ -2451,6 +2451,12 @@ INV_TEMPLATE_FILE = "inventory_template.xlsx"   # GitHub 저장소에 weekly_tem
 SIZE_MASTER_TABLE = "size_master"
 ITEM_MASTER_TABLE = "item_master"
 
+# 260806: 아이템 마스터에도 폴백에도 없는 아이템 코드의 표기값. 예전엔 이런 코드를 만나면 가공을
+#         통째로 중단했는데(팀 요청으로 변경), 이제는 해당 상품 행만 이 값으로 표기하고 등급
+#         모집단에서 빼서 나머지 상품은 정상 가공한다. 마스터에 코드를 추가한 뒤 다시 돌리면
+#         자동으로 정상 등급을 받는다.
+_INV_UNMAPPED = "미분류"
+
 # ── 중카테고리 매핑 폴백 (260731 니트류/티셔츠류 분리판 — 아이템 마스터 미등록/미매칭 코드용) ──
 # 260803부터 진짜 소스는 DB 아이템 마스터(item_master) — _inv_cat_lookup()이 그걸 우선 쓰고,
 # 마스터에 없는 코드만 아래로 폴백한다.
@@ -2925,9 +2931,22 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     _item_master = load_item_master()
     fallback_items = sorted({r["item"] for r in recs if r["item"] not in _item_master})
 
+    # 260806: 중카테고리 매핑 없는 아이템 코드를 만나도 '중단'하지 않는다 (팀 요청).
+    #   · 해당 상품 행은 결과 파일에 그대로 남긴다 — 재고가 눈앞에서 사라지면 총재고가 원본과
+    #     안 맞고 "이 상품 왜 없지?" 사고가 나므로.
+    #   · 다만 C열과 AA/AB 등급 모집단에서는 뺀다 — 카테고리를 모르는 상품을 남의 모집단에
+    #     끼워 넣으면 그 모집단 전체의 랭킹이 오염되기 때문.
+    #   · AA·AB·AF는 '미분류'로 표기. AC(사이즈 등급)·SET 판정은 사이즈 마스터 기준이라
+    #     아이템 코드 매핑과 무관 → 그대로 정상 판정된다.
+    #   · 아이템 마스터에 코드를 추가하고 다시 돌리면 자동으로 정상 등급을 받는다.
     unk_item = sorted({r["item"] for r in recs if r["cat"] is None})
-    if unk_item:
-        raise ValueError(f"중카테고리 매핑 없는 아이템 코드 발견: {unk_item} — 확인 후 매핑 추가가 필요해요.")
+    unk_rows = 0
+    for rec in recs:
+        rec["unmapped"] = rec["cat"] is None
+        if rec["unmapped"]:
+            unk_rows += 1
+            if rec["cat_level_val"] in (None, ""):
+                rec["cat_level_val"] = _INV_UNMAPPED
 
     # K/L/M (세트 키)
     for rec in recs:
@@ -2940,7 +2959,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # AA (기간판매 랭킹 등급) — 모집단 = 카테고리(cat_level 선택) × 년도 비교대상군(묶음) × 시즌 비교대상군(묶음)
     groups = defaultdict(list)
     for r in recs:
-        if not r["off"] and r["stock"] >= 20 and r["sales"] > 0:
+        if not r["unmapped"] and not r["off"] and r["stock"] >= 20 and r["sales"] > 0:
             groups[(r["cat_level_val"], r["year_grp"], r["season_grp"])].append(r)
     for g in groups.values():
         gs = sorted(g, key=lambda r: -r["sales"]); n = len(gs)
@@ -2953,11 +2972,14 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             r["AA"] = "재고20미만"
         elif r["sales"] <= 0:
             r["AA"] = "E"
+    for r in recs:                       # 260806: 미분류가 최우선 — 모집단에 없으므로 AA 키 자체가 없다
+        if r["unmapped"]:
+            r["AA"] = _INV_UNMAPPED
 
     # AB (소진 속도 등급) — 모집단 = AA와 동일 기준(카테고리(cat_level 선택) × 년도 비교대상군 × 시즌 비교대상군)
     groupsb = defaultdict(list)
     for r in recs:
-        if not r["off"] and r["sales"] > 0:
+        if not r["unmapped"] and not r["off"] and r["sales"] > 0:
             groupsb[(r["cat_level_val"], r["year_grp"], r["season_grp"])].append(r)
     INF = float("inf")
     for g in groupsb.values():
@@ -2969,9 +2991,14 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             r["AB"] = "오프라인"
         elif r["sales"] <= 0:
             r["AB"] = "E"
+    for r in recs:                       # 260806: AA와 동일 — 미분류 우선
+        if r["unmapped"]:
+            r["AB"] = _INV_UNMAPPED
 
     # AF 매트릭스 (AI제안방향)
     for r in recs:
+        if r["unmapped"]:                # 260806: 카테고리를 모르면 제안 방향도 낼 수 없다
+            r["AF"] = _INV_UNMAPPED; continue
         if r["off"]:
             r["AF"] = "오프라인"; continue
         if r["stock"] < 20:
@@ -3209,6 +3236,10 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         "year_group_summary": year_group_summary,
         "year_group_map": dict(_year_code_to_grp),
         "fallback_items": fallback_items,
+        # 260806: 매핑 없는 아이템 코드 — 중단 대신 리포트로 알린다(마스터 보강 신호)
+        "unmapped_items": unk_item,
+        "unmapped_rows": unk_rows,
+        "unmapped_pns": sorted({r["pn"] for r in recs if r["unmapped"]}),
         "cat_level": cat_level,
     }
     return buf.getvalue(), report
@@ -3366,6 +3397,16 @@ def render_inventory():
             st.warning(f"⚠️ 사이즈 마스터 미매칭 {len(rep['unmatched'])}건 — AC/SET '해당없음' 처리. "
                        f"예: {', '.join(rep['unmatched'][:10])}"
                        + (" …" if len(rep["unmatched"]) > 10 else ""))
+        if rep.get("unmapped_items"):
+            st.warning(
+                f"⚠️ 중카테고리 매핑 없는 아이템 코드 {len(rep['unmapped_items'])}종 "
+                f"(**{', '.join(rep['unmapped_items'])}**) · 상품 {rep['unmapped_rows']:,}행 — "
+                f"가공은 정상 완료했고, 이 상품들만 C열·AA·AB·AF를 '{_INV_UNMAPPED}'로 표기했어요. "
+                f"사이즈 등급(AC)·SET 판정은 사이즈 마스터 기준이라 정상입니다. "
+                f"아이템 마스터에 코드를 추가하고 다시 돌리면 정상 등급을 받아요.")
+            with st.expander(f"🔎 '{_INV_UNMAPPED}' 처리된 품번 {len(rep.get('unmapped_pns', []))}건 보기"):
+                st.dataframe(pd.DataFrame({"품번": rep.get("unmapped_pns", [])}),
+                             use_container_width=True, height=240)
         if rep.get("fallback_items"):
             st.info(f"ℹ️ 아이템 마스터에 없어서 구 기준(폴백)으로 중카테고리를 처리한 아이템 코드: "
                    f"{', '.join(rep['fallback_items'])} — 실사용 코드라면 아이템 마스터에 추가해주세요.")
