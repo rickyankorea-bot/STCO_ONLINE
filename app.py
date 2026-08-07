@@ -424,14 +424,21 @@ LOAD_COLS = ["판매일자", "브랜드명", "시즌명", "시즌그룹", "아�
              "연도", "판매연도", "년월", "최초판매금액", "실판매금액", "현판매금액",
              "판매수량", "매장명", "매장코드", "품번",
              "순번", "주문번호", "판매번호", "판매연번",
-             "반품판매일자", "반품판매번호", "반품판매연번"]
+             "반품판매일자", "반품판매번호", "반품판매연번",
+             "원가(VAT+)", "최초가"]
+# 원가(VAT+)·최초가(2026-08-07 추가): 품번별 상세 드릴다운(아이템그룹별/연차별 표 하단)용.
+# 원가(VAT+)는 실판매금액처럼 거래줄 단위 금액이라 기간 합산(SUM), 최초가는 품번당 고정 단가라
+# 대표값(그룹 내 첫 값) 사용 — 자세한 배경은 claude/원가컬럼_반영_260807.md 참고.
+# 이 두 컬럼은 append_to_db가 원본 파일 컬럼을 그대로 저장해왔기 때문에(스키마 자동확장),
+# LOAD_COLS에만 추가하면 과거 업로드분도 이미 DB에 값이 있을 가능성이 높음(재업로드 불필요할 수 있음).
 # 품명(2026-08-04 추가): 매출 로우데이터에 품번 바로 옆에 있는 실제 상품명 컬럼(중태님 확인) —
 # DB(sales 테이블)에 이 컬럼이 없는 경우(과거 업로드분 등)에도 load_db()가 존재하는 컬럼만
 # 골라 쓰므로(위 use = [c for c in LOAD_COLS if c in have]) 에러 없이 안전하게 빠짐.
 # 순번·주문번호·반품판매일자/번호/연번(2026-08-04 추가): "SET/단품 판매 분석" 탭 전용 — 세트
 # 그룹핑(주문번호+디자인키)과 반품↔원판매 매칭에 필요. 과거 업로드분에 이 컬럼이 없어도(구버전
 # 원본 파일) load_db()가 존재하는 컬럼만 골라 쓰므로 에러 없이 안전하게 빠짐(그 경우 이 탭만 데이터 부족).
-LOAD_NUM = ["최초판매금액", "실판매금액", "현판매금액", "판매수량", "판매연도", "연도"]
+LOAD_NUM = ["최초판매금액", "실판매금액", "현판매금액", "판매수량", "판매연도", "연도",
+            "원가(VAT+)", "최초가"]
 LOAD_CAT = ["브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명", "년월", "매장명", "매장코드"]
 
 
@@ -491,6 +498,9 @@ def load_db():
     df["_매출액"] = df[rev] if rev else 0.0
     df["_최초가매출"] = df["최초판매금액"] if "최초판매금액" in df.columns else 0.0
     df["_수량"] = df[QTY_COL] if QTY_COL in df.columns else 0.0
+    # 2026-08-07 추가: 품번별 상세 드릴다운용 원가(VAT+) — 없으면(과거 미백필분) NaN 유지해서
+    # "0원"과 "값 없음"을 구분한다(_pn_detail에서 전부 NaN이면 "–"로 표시).
+    df["_원가"] = df["원가(VAT+)"] if "원가(VAT+)" in df.columns else np.nan
     df["_채널"] = df["매장명"] if "매장명" in df.columns else df.get("매장코드", "기타")
     if "판매일자" in df.columns:
         df["_판매일"] = pd.to_datetime(df["판매일자"], errors="coerce")
@@ -1016,6 +1026,112 @@ def _need_search(flag_key, submitted):
     return False
 
 
+# ── 품번별 상세 드릴다운 (2026-08-07 · 중태님 지시) ────────────────────────
+# "이 44.1백만원, 실제로 어떤 품번들이 만든 숫자야?"를 표 아래에서 바로 확인.
+# 표 자체(HTML 렌더)는 그대로 두고, 표 아래에 아이템그룹/연차 선택 + 🔍 상세보기 버튼을 붙여
+# 누르면 품번별 리스트를 팝업(st.dialog)으로 띄운다. st.dialog 미지원 구버전 Streamlit에서도
+# 안 죽도록 st.expander로 자동 대체.
+def _dialog_or_expander(title):
+    if hasattr(st, "dialog"):
+        return st.dialog(title, width="large")
+
+    def _wrap(fn):
+        def _inner(*a, **kw):
+            with st.expander(f"🔍 {title}", expanded=True):
+                fn(*a, **kw)
+        return _inner
+    return _wrap
+
+
+def _pn_detail(sub):
+    """필터된 원본 행(sub)을 품번별로 묶어 드릴다운 표 반환.
+
+    기간판매수량·기간총실판가=합산(SUM, 실판매금액과 동일 원리) · 원가(VAT+)도 거래줄 단위
+    금액이라 동일하게 합산 · 최초가=품번당 고정 단가라 대표값(그룹 내 첫 값) · 평균판매가=
+    기간총실판가÷수량 · 판가율=기간총실판가÷최초가매출 합(가중, 다른 표와 동일 정의).
+    원가(VAT+)는 아직 백필 전 구간이면 전부 NaN일 수 있어 그 경우 "–"로 표시(0원과 구분).
+    """
+    cols_out = ["품번", "품명", "기간판매수량", "기간총실판가(백만)",
+                "원가(VAT+)(백만)", "최초가", "평균판매가", "판가율"]
+    if sub is None or sub.empty or "품번" not in sub.columns:
+        return pd.DataFrame(columns=cols_out)
+    s = sub.copy()
+    s["_수량n"] = pd.to_numeric(s.get("_수량", 0), errors="coerce").fillna(0.0)
+    s["_매출n"] = pd.to_numeric(s.get("_매출액", 0), errors="coerce").fillna(0.0)
+    s["_최초n"] = pd.to_numeric(s.get("_최초가매출", 0), errors="coerce").fillna(0.0)
+    has_cost = "_원가" in s.columns
+    if has_cost:
+        s["_원가n"] = pd.to_numeric(s["_원가"], errors="coerce")
+    g = s.groupby("품번", observed=True)
+    qty = g["_수량n"].sum()
+    rev = g["_매출n"].sum()
+    orig = g["_최초n"].sum()
+    name = (g["품명"].first() if "품명" in s.columns else pd.Series("", index=qty.index)).reindex(qty.index)
+    price0 = (g["최초가"].first() if "최초가" in s.columns
+              else pd.Series(np.nan, index=qty.index)).reindex(qty.index)
+    cost = (g["_원가n"].sum(min_count=1) if has_cost
+            else pd.Series(np.nan, index=qty.index)).reindex(qty.index)   # 전부 NaN이면 NaN 유지
+
+    out = pd.DataFrame({
+        "품번": qty.index.astype(str),
+        "품명": name.fillna("").astype(str).values,
+        "기간판매수량": qty.round(0).astype(int).values,
+        "_rev": rev.values, "_orig": orig.values,
+        "_cost": cost.values, "_price0": price0.values,
+    })
+    out["기간총실판가(백만)"] = (out["_rev"] / 1e6).round(1)
+    out["원가(VAT+)(백만)"] = out["_cost"].apply(lambda v: "–" if pd.isna(v) else f"{v/1e6:,.1f}")
+    out["최초가"] = out["_price0"].apply(lambda v: "–" if pd.isna(v) else f"{v:,.0f}")
+    out["평균판매가"] = out.apply(
+        lambda r: "–" if r["기간판매수량"] == 0 else f"{r['_rev']/r['기간판매수량']:,.0f}", axis=1)
+    out["판가율"] = out.apply(
+        lambda r: "–" if r["_orig"] == 0 else f"{r['_rev']/r['_orig']*100:.1f}%", axis=1)
+    out = out.sort_values("기간총실판가(백만)", ascending=False).reset_index(drop=True)
+    return out[cols_out]
+
+
+@_dialog_or_expander("품번별 상세")
+def _show_pn_dialog(detail_df, title_str, total_str):
+    st.markdown(f"**{title_str}**")
+    st.caption(total_str + " · [금액: 백만원 / VAT+] · 원가·최초가·평균판매가는 원 단위")
+    if detail_df.empty:
+        st.info("해당 조건에 판매된 품번이 없어요.")
+        return
+    st.dataframe(detail_df, use_container_width=True, height=420, hide_index=True)
+    if (detail_df["원가(VAT+)(백만)"] == "–").all():
+        st.caption("ℹ️ 원가(VAT+)가 전부 '–'예요 — 이 기간 로우데이터가 아직 원가 백필 전이라 그래요. "
+                   "해당 기간 로우데이터를 덮어쓰기 모드로 재업로드하면 채워져요.")
+
+
+def pn_drilldown(cur_m, prev_m, cur_y, prev_y, dim, dim_values, cy, blk_labels, ctx_label, key):
+    """표 하단 드릴다운 컨트롤(아이템그룹/연차 선택 → 🔍 상세보기 → 품번별 팝업).
+
+    cur_m/prev_m=당월누계 원본 필터전 df, cur_y/prev_y=연간누계 원본 필터전 df.
+    dim='아이템그룹' 또는 '연차', dim_values=선택지(표에 실제 나온 값만, 순서 유지).
+    """
+    if not dim_values:
+        return
+    yr_cur, yr_prev = f"{cy % 100:02d}년", f"{(cy - 1) % 100:02d}년"
+    c1, c2, c3, c4 = st.columns([1.7, 1.5, 1, 1.1])
+    dv = c1.selectbox(f"{dim} 선택", dim_values, key=f"{key}_dv", label_visibility="collapsed",
+                       placeholder=f"{dim} 선택")
+    period_lbl = c2.selectbox("기간", list(blk_labels), key=f"{key}_pd", label_visibility="collapsed")
+    yr_lbl = c3.selectbox("연도", [yr_cur, yr_prev], key=f"{key}_yr", label_visibility="collapsed")
+    go = c4.button("🔍 상세보기", key=f"{key}_go", use_container_width=True)
+    st.caption(f"※ 위 표의 **{ctx_label}** 숫자가 어떤 품번들로 이뤄졌는지 확인해요.")
+    if not go:
+        return
+    is_month = (period_lbl == blk_labels[0])
+    src = (cur_m if is_month else cur_y) if (yr_lbl == yr_cur) else (prev_m if is_month else prev_y)
+    if src is None or src.empty or dim not in getattr(src, "columns", []):
+        detail = pd.DataFrame()
+    else:
+        detail = _pn_detail(src[src[dim].astype(str) == str(dv)])
+    total = 0.0 if detail.empty else float(detail["기간총실판가(백만)"].sum())
+    total_str = f"기간총실판가 합계 {total:,.1f}백만원 · 품번 {len(detail)}건"
+    _show_pn_dialog(detail, f"{ctx_label} · {dv} · {period_lbl} · {yr_lbl}", total_str)
+
+
 def render_flagship(df):
     st.subheader("📅 연차 · 아이템별 전년 대비 분석")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
@@ -1105,10 +1221,17 @@ def render_flagship(df):
     st.markdown("### 시즌별/연차별 한눈에 보기")
     perf_table(cur, prev, "연차", age_order, "시즌별/연차별 한눈에 보기", "age",
                season_rows=True, month=(cur_m, prev_m), blk_labels=blk, cy=cy)
+    pn_drilldown(cur_m, prev_m, cur, prev, "연차", age_order, cy, blk,
+                 "시즌별/연차별 한눈에 보기", "age")
 
     st.markdown("### 아이템그룹별 성과표 (전연차 토탈 + 연차별)")
     perf_table(cur, prev, "아이템그룹", ITEMGROUP_ORDER, "아이템그룹별 성과표 (전연차)", "grp_all",
                month=(cur_m, prev_m), blk_labels=blk, cy=cy)
+    _grp_all_present = [g for g in ITEMGROUP_ORDER
+                         if g in set(cur.get("아이템그룹", pd.Series(dtype=str)).astype(str))
+                         or g in set(prev.get("아이템그룹", pd.Series(dtype=str)).astype(str))]
+    pn_drilldown(cur_m, prev_m, cur, prev, "아이템그룹", _grp_all_present or ITEMGROUP_ORDER, cy, blk,
+                 "아이템그룹별 성과표 (전연차)", "grp_all")
     # 연차별 버킷
     buckets = []
     sinsang = [a for a in ["신상", "내년신상"] if a in age_order]
@@ -1125,6 +1248,11 @@ def render_flagship(df):
         perf_table(curb, prevb, "아이템그룹", ITEMGROUP_ORDER,
                    f"아이템그룹별 성과표 ({name})", f"grp_{name}",
                    month=(curb_m, prevb_m), blk_labels=blk, big_title=True, cy=cy)
+        _grp_b_present = [g for g in ITEMGROUP_ORDER
+                          if g in set(curb.get("아이템그룹", pd.Series(dtype=str)).astype(str))
+                          or g in set(prevb.get("아이템그룹", pd.Series(dtype=str)).astype(str))]
+        pn_drilldown(curb_m, prevb_m, curb, prevb, "아이템그룹", _grp_b_present or ITEMGROUP_ORDER, cy, blk,
+                     f"아이템그룹별 성과표 ({name})", f"grp_{name}")
 
 
 # ── 대시보드 채널 통합 (2026-07-31): 수수료 조건 때문에 2개로 나눠 등록한 매장을 실제 채널로 합산 ──
