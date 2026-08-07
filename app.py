@@ -1036,16 +1036,23 @@ def _need_search(flag_key, submitted):
 # st.dialog에 width= 같은 부가 kwarg는 일부러 안 씀 — 지난번 크래시 원인 후보였다가 아니었던
 # 것으로 확인된 지점이라, 표면적을 최대한 줄이는 쪽으로 설계.
 
-def _dialog_or_expander(title):
+def _dialog_or_expander(title, on_dismiss=None):
     """st.dialog가 없는 구버전 streamlit 대비 안전판 — 있으면 진짜 팝업, 없으면 expander.
 
     width="large"(2026-08-07 추가): 컬럼 8개가 스크롤 없이 한 화면에 보이도록 팝업을 넓게.
     지난 크래시 때 width kwarg를 의심해 방어코드를 넣었다가 뺀 적이 있는데, 그때도 크래시가
     안 풀렸던 걸로 봐서 width 자체는 원인이 아니었던 것으로 확인됨 — try/except로만 안전하게 사용.
+
+    on_dismiss(2026-08-07 2단계 드릴다운 추가): X로 팝업을 닫을 때 세션 상태(어느 단계
+    팝업을 보여줄지)를 정리하는 콜백. 안 넘기면(None) st.dialog 기본 동작(on_dismiss="ignore")
+    그대로 — 상태 정리가 필요 없는 단순 팝업(예: 빈 expander 폴백)에서는 안 써도 무방.
     """
     if hasattr(st, "dialog"):
+        kwargs = {"width": "large"}
+        if on_dismiss is not None:
+            kwargs["on_dismiss"] = on_dismiss
         try:
-            return st.dialog(title, width="large")
+            return st.dialog(title, **kwargs)
         except TypeError:
             return st.dialog(title)
 
@@ -1057,11 +1064,16 @@ def _dialog_or_expander(title):
     return _fallback
 
 
-def _pn_detail(sub):
-    """조건에 맞는 원본 거래행(sub)을 받아 품번별 상세 DataFrame을 만든다."""
-    if sub is None or sub.empty or "품번" not in sub.columns:
+def _agg_detail(sub, group_col):
+    """조건에 맞는 원본 거래행(sub)을 group_col(품번 또는 매장코드) 기준으로 묶어 상세 DataFrame을 만든다.
+
+    2026-08-07 2단계 드릴다운 추가: 원래 품번 전용이던 _pn_detail을 group_col로 일반화해서
+    같은 로직을 매장코드 단위 집계에도 재사용(품번별 상세 팝업에서 행을 클릭하면 그 품번의
+    매장별 상세를 같은 컬럼 구성으로 다시 보여주는 용도).
+    """
+    if sub is None or sub.empty or group_col not in sub.columns:
         return pd.DataFrame()
-    g = sub.groupby("품번", observed=True)
+    g = sub.groupby(group_col, observed=True)
     qty = g["_수량"].sum() if "_수량" in sub.columns else pd.Series(dtype="float64")
     if qty.empty:
         return pd.DataFrame()
@@ -1073,7 +1085,7 @@ def _pn_detail(sub):
 
     out = pd.DataFrame({"기간판매수량": qty, "기간총실판가": rev, "_orig": orig,
                          "품명": name, "_cost_amt": cost_amt})
-    out.index.name = "품번"
+    out.index.name = group_col
     out = out.reset_index()
     out["기간판매수량"] = pd.to_numeric(out["기간판매수량"], errors="coerce").astype("float64")
     out["기간총실판가"] = pd.to_numeric(out["기간총실판가"], errors="coerce").astype("float64")
@@ -1088,12 +1100,23 @@ def _pn_detail(sub):
         out["원가(VAT+)"] = np.nan
     out["판가율"] = out["기간총실판가"] / orig_safe
     out = out.sort_values("기간총실판가", ascending=False)
-    return out[["품번", "품명", "기간판매수량", "기간총실판가", "원가(VAT+)", "최초가", "평균판매가", "판가율"]]
+    return out[[group_col, "품명", "기간판매수량", "기간총실판가", "원가(VAT+)", "최초가", "평균판매가", "판가율"]]
 
 
-def _show_pn_dialog(title, sub_title, detail):
-    """품번별 상세 DataFrame을 팝업(또는 expander)으로 렌더링."""
-    @_dialog_or_expander(title)
+def _pn_detail(sub):
+    """조건에 맞는 원본 거래행(sub)을 받아 품번별 상세 DataFrame을 만든다."""
+    return _agg_detail(sub, "품번")
+
+
+def _show_pn_dialog(title, sub_title, detail, group_col="품번", key_prefix="pn",
+                     on_row_click=None, on_dismiss=None):
+    """품번별(또는 매장코드별) 상세 DataFrame을 팝업(또는 expander)으로 렌더링.
+
+    on_row_click(선택값): 지정하면 표 행 선택을 켜서(단일행), 행을 클릭했을 때 그 행의
+    group_col 값으로 콜백을 호출한다 — 품번별 표에서 행 클릭 → 매장별 2차 팝업 연결용.
+    on_dismiss: 팝업을 X로 닫을 때 세션 상태를 정리하는 콜백(안 넘기면 st.dialog 기본 동작).
+    """
+    @_dialog_or_expander(title, on_dismiss=on_dismiss)
     def _popup():
         st.caption(sub_title)
         if detail.empty:
@@ -1104,7 +1127,16 @@ def _show_pn_dialog(title, sub_title, detail):
         for c in ("원가(VAT+)", "최초가", "평균판매가"):
             disp[c] = disp[c].apply(lambda v: f"{v:,.0f}" if pd.notna(v) else "–")
         disp["판가율"] = disp["판가율"].apply(lambda v: f"{v*100:.0f}%" if pd.notna(v) else "–")
-        st.dataframe(disp, hide_index=True, use_container_width=True)
+        if on_row_click is not None:
+            st.caption("💡 행을 클릭하면 매장별 상세를 볼 수 있어요.")
+            ev = st.dataframe(disp, hide_index=True, use_container_width=True,
+                               on_select="rerun", selection_mode="single-row",
+                               key=f"{key_prefix}_df")
+            rows = list(ev.selection.rows) if ev is not None and getattr(ev, "selection", None) else []
+            if rows:
+                on_row_click(detail.iloc[rows[0]][group_col])
+        else:
+            st.dataframe(disp, hide_index=True, use_container_width=True, key=f"{key_prefix}_df")
         if detail["원가(VAT+)"].isna().all():
             st.caption("⚠️ 원가(VAT+)가 과거 업로드분에는 없어 전부 '–'로 나올 수 있어요 — "
                        "이후 로우데이터부터 채워집니다.")
@@ -1112,11 +1144,17 @@ def _show_pn_dialog(title, sub_title, detail):
 
 
 def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_prefix, cy):
-    """표 아래 [아이템그룹/연차 선택 + 기간 + 연도 + 🔍 상세보기] 컨트롤 + 팝업 연결.
+    """표 아래 [🔍 상세보기 + 아이템그룹/연차 선택 + 기간 + 연도] 컨트롤 + 2단계 팝업 연결.
 
     dim: "아이템그룹" 또는 "연차" — 이 표가 어떤 기준으로 나뉘는지.
     dim_values: 셀렉트박스 옵션(표에 실제로 나오는 값들).
     cur/prev: 연간누계 기준으로 이미 필터된 데이터, cur_m/prev_m: 당월누계 기준.
+
+    1단계(품번별 상세) 팝업에서 행을 클릭하면 세션 상태에 선택 품번을 저장하고 전체 재실행
+    (st.rerun)해서, 다음 실행에서는 같은 조건으로 2단계(매장코드별 상세) 팝업을 대신 띄운다.
+    st.dialog는 중첩 호출이 안 되므로(Streamlit 제약) 두 팝업을 동시에 열지 않고 이렇게
+    "단계 전환" 방식으로 이어붙임 — 사용자 입장에선 품번 클릭 → 매장별 팝업으로 바로 이어지는
+    것처럼 보인다.
     """
     if not dim_values:
         return
@@ -1127,20 +1165,52 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
     sel_v = c2.selectbox(dim, dim_values, key=f"{key_prefix}_dv")
     period = c3.selectbox("기간", ["당월누계", "연간누계"], key=f"{key_prefix}_pd")
     yr = c4.selectbox("연도", [cy, cy - 1], key=f"{key_prefix}_yr")
-    if not go:
+
+    stage_key, pn_key = f"{key_prefix}_stage", f"{key_prefix}_pnsel"
+    if go:
+        st.session_state[stage_key] = "pn"
+        st.session_state.pop(pn_key, None)
+    stage = st.session_state.get(stage_key)
+    if not stage:
         return
+
     base_cur, base_prev = (cur_m, prev_m) if period == "당월누계" else (cur, prev)
     src = base_cur if yr == cy else base_prev
-    if src is None or src.empty or dim not in src.columns:
-        _show_pn_dialog(f"{title_prefix} · {sel_v} · {period} · {yr}년 품번별 상세",
-                         "데이터 없음", pd.DataFrame())
+    if src is not None and not src.empty and dim in src.columns:
+        sub = src[src[dim].astype(str) == str(sel_v)]
+    else:
+        sub = pd.DataFrame()
+
+    def _close_all():
+        st.session_state.pop(stage_key, None)
+        st.session_state.pop(pn_key, None)
+
+    if stage == "store":
+        pn_sel = st.session_state.get(pn_key)
+        if pn_sel is not None and "품번" in sub.columns:
+            store_sub = sub[sub["품번"].astype(str) == str(pn_sel)]
+        else:
+            store_sub = pd.DataFrame()
+        store_detail = _agg_detail(store_sub, "매장코드")
+        total_rev = store_detail["기간총실판가"].sum() if not store_detail.empty else 0
+        _show_pn_dialog(f"{pn_sel} · {sel_v} · {period} · {yr}년 매장별 상세",
+                         f"실판매금액 큰 순 정렬 · 합계 {_mm(total_rev):,.1f}백만원",
+                         store_detail, group_col="매장코드", key_prefix=f"{key_prefix}_st",
+                         on_dismiss=_close_all)
         return
-    sub = src[src[dim].astype(str) == str(sel_v)]
+
     detail = _pn_detail(sub)
     total_rev = detail["기간총실판가"].sum() if not detail.empty else 0
+
+    def _drill_to_store(pn_val):
+        st.session_state[pn_key] = pn_val
+        st.session_state[stage_key] = "store"
+        st.rerun()
+
     _show_pn_dialog(f"{title_prefix} · {sel_v} · {period} · {yr}년 품번별 상세",
                      f"실판매금액 큰 순 정렬 · 합계 {_mm(total_rev):,.1f}백만원",
-                     detail)
+                     detail, group_col="품번", key_prefix=key_prefix,
+                     on_row_click=_drill_to_store, on_dismiss=_close_all)
 
 
 def render_flagship(df):
