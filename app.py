@@ -1031,16 +1031,34 @@ def _need_search(flag_key, submitted):
 # 표 자체(HTML 렌더)는 그대로 두고, 표 아래에 아이템그룹/연차 선택 + 🔍 상세보기 버튼을 붙여
 # 누르면 품번별 리스트를 팝업(st.dialog)으로 띄운다. st.dialog 미지원 구버전 Streamlit에서도
 # 안 죽도록 st.expander로 자동 대체.
-def _dialog_or_expander(title):
-    if hasattr(st, "dialog"):
-        return st.dialog(title, width="large")
-
+def _wrap_expander(title):
     def _wrap(fn):
         def _inner(*a, **kw):
             with st.expander(f"🔍 {title}", expanded=True):
                 fn(*a, **kw)
         return _inner
     return _wrap
+
+
+def _dialog_or_expander(title):
+    """st.dialog가 있으면 그걸(팝업), 없거나(구버전) 시그니처가 안 맞으면 st.expander로 안전 대체.
+
+    2026-08-07: st.dialog(title, width="large")가 배포 환경 Streamlit 버전에서
+    width 인자를 안 받는 시그니처일 수 있어 — 이 경우 모듈 로드 시점(데코레이터 적용 시)에
+    TypeError가 나면서 앱이 통째로 뜨지도 못하고 죽는 사고가 났었음(2026-08-07 배포 직후 확인).
+    데코레이터는 import 시 바로 실행되므로 여기서 반드시 방어적으로 감싼다.
+    """
+    if hasattr(st, "dialog"):
+        try:
+            return st.dialog(title, width="large")
+        except TypeError:
+            try:
+                return st.dialog(title)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    return _wrap_expander(title)
 
 
 def _pn_detail(sub):
