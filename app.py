@@ -1037,9 +1037,17 @@ def _need_search(flag_key, submitted):
 # 것으로 확인된 지점이라, 표면적을 최대한 줄이는 쪽으로 설계.
 
 def _dialog_or_expander(title):
-    """st.dialog가 없는 구버전 streamlit 대비 안전판 — 있으면 진짜 팝업, 없으면 expander."""
+    """st.dialog가 없는 구버전 streamlit 대비 안전판 — 있으면 진짜 팝업, 없으면 expander.
+
+    width="large"(2026-08-07 추가): 컬럼 8개가 스크롤 없이 한 화면에 보이도록 팝업을 넓게.
+    지난 크래시 때 width kwarg를 의심해 방어코드를 넣었다가 뺀 적이 있는데, 그때도 크래시가
+    안 풀렸던 걸로 봐서 width 자체는 원인이 아니었던 것으로 확인됨 — try/except로만 안전하게 사용.
+    """
     if hasattr(st, "dialog"):
-        return st.dialog(title)
+        try:
+            return st.dialog(title, width="large")
+        except TypeError:
+            return st.dialog(title)
 
     def _fallback(fn):
         def _inner(*a, **kw):
@@ -1112,12 +1120,13 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
     """
     if not dim_values:
         return
-    c1, c2, c3, c4 = st.columns([1.4, 1.3, 0.9, 1])
-    sel_v = c1.selectbox(dim, dim_values, key=f"{key_prefix}_dv")
-    period = c2.selectbox("기간", ["당월누계", "연간누계"], key=f"{key_prefix}_pd")
-    yr = c3.selectbox("연도", [cy, cy - 1], key=f"{key_prefix}_yr")
-    c4.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-    go = c4.button("🔍 상세보기", key=f"{key_prefix}_go", use_container_width=True)
+    # 2026-08-07: 버튼을 맨 왼쪽으로 이동(중태님 요청) — 나머지 셀렉트는 뒤로.
+    c1, c2, c3, c4 = st.columns([1, 1.4, 1.3, 0.9])
+    c1.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+    go = c1.button("🔍 상세보기", key=f"{key_prefix}_go", use_container_width=True)
+    sel_v = c2.selectbox(dim, dim_values, key=f"{key_prefix}_dv")
+    period = c3.selectbox("기간", ["당월누계", "연간누계"], key=f"{key_prefix}_pd")
+    yr = c4.selectbox("연도", [cy, cy - 1], key=f"{key_prefix}_yr")
     if not go:
         return
     base_cur, base_prev = (cur_m, prev_m) if period == "당월누계" else (cur, prev)
