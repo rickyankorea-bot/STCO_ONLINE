@@ -5489,10 +5489,11 @@ def delete_user(username):
 # ── 로그인 유지(쿠키 세션) ────────────────────────────────────────────
 # 로그인 상태를 브라우저 메모리(st.session_state)에만 두면 새로고침·잠깐 방치로
 # 바로 재로그인이 필요했음 → 로그인 시 토큰을 발급해 브라우저 쿠키 + DB(app_sessions,
-# 해시만 저장)에 두고, '마지막 사용 후 2시간'까지는 자동으로 로그인을 이어준다.
+# 해시만 저장)에 두고, '마지막 사용 후 6시간'까지는 자동으로 로그인을 이어준다.
+# (2026-08-07: 2시간→6시간 상향 + 쿠키 기록 방식 보강 — "몇 분만 방치해도 재로그인" 개선)
 SESSIONS_TABLE = "app_sessions"
 AUTH_COOKIE = "erp_auth"
-IDLE_LIMIT_HOURS = 2          # 이 시간 동안 사용이 없으면 자동 만료 → 재로그인
+IDLE_LIMIT_HOURS = 6          # 이 시간 동안 사용이 없으면 자동 만료 → 재로그인
 _TS_FMT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -5522,7 +5523,7 @@ def create_session(username):
 
 
 def _session_user(token):
-    """쿠키 토큰 검증: 마지막 사용이 2시간 이내면 사용자명 반환(+시간 갱신), 아니면 None."""
+    """쿠키 토큰 검증: 마지막 사용이 IDLE_LIMIT_HOURS 이내면 사용자명 반환(+시간 갱신), 아니면 None."""
     if not token:
         return None
     th = _hash_token(token)
@@ -5550,7 +5551,7 @@ def _session_user(token):
 
 
 def touch_session():
-    """화면을 쓸 때마다 마지막 사용시간 갱신 → 2시간 카운트가 계속 리셋됨."""
+    """화면을 쓸 때마다 마지막 사용시간 갱신 → IDLE_LIMIT_HOURS 카운트가 계속 리셋됨."""
     tok = st.session_state.get("auth_token")
     if not tok:
         return
@@ -5579,10 +5580,17 @@ def _write_cookie(value, max_age):
 
     ※ 쿠키 기록이 실패해도 로그인은 st.session_state로 이미 성공한 상태라 사용엔 지장 없음
       (그 경우 하드새로고침 때만 재로그인 — 기존과 동일).
+
+    2026-08-07: 컴포넌트 iframe 안에서 document.cookie만 쓰면 브라우저·상황에 따라
+    실제 저장이 누락되는 경우가 있어(=잦은 재로그인 원인 추정), 부모 문서(window.parent)에도
+    동일하게 한 번 더 기록해 저장 성공률을 높임. 각각 독립적으로 try/catch 처리해 하나가
+    막혀도 다른 하나·기존 로그인 흐름에는 영향이 없도록 함.
     """
+    cookie_str = f"{AUTH_COOKIE}={value}; path=/; max-age={int(max_age)}; SameSite=Lax"
     components.html(
         "<script>"
-        f'document.cookie = "{AUTH_COOKIE}={value}; path=/; max-age={int(max_age)}; SameSite=Lax";'
+        f'try {{ document.cookie = "{cookie_str}"; }} catch(e) {{}}'
+        f'try {{ window.parent.document.cookie = "{cookie_str}"; }} catch(e) {{}}'
         "</script>", height=0)
 
 
@@ -5702,7 +5710,7 @@ def main():
     # ── 로그인 게이트 ──────────────────────────────────────────────
     ensure_users_table()
     if not st.session_state.get("auth_user"):
-        # 1) 쿠키(로그인 유지 토큰)로 자동 로그인 — 마지막 사용 2시간 이내면 유지
+        # 1) 쿠키(로그인 유지 토큰)로 자동 로그인 — 마지막 사용 IDLE_LIMIT_HOURS 이내면 유지
         tok = _cookie_token()
         uname = _session_user(tok) if tok else None
         rec = get_user(uname) if uname else None
@@ -5715,7 +5723,7 @@ def main():
             # 2) 유효한 토큰이 없으면 로그인 화면
             _render_login()
             return
-    touch_session()   # 사용 중엔 매 동작마다 2시간 카운트 리셋
+    touch_session()   # 사용 중엔 매 동작마다 IDLE_LIMIT_HOURS 카운트 리셋
     is_admin = st.session_state.get("auth_role") == "admin"
 
     # 타이틀 (2026-08-05 확정): 애플 스타일 2톤 — 검정 볼드 + 회색 서브카피
@@ -5730,7 +5738,8 @@ def main():
     fresh_slot = st.container()   # 타이틀 바로 아래: 매출 데이터 최종 업데이트 일자 표기 자리
 
     with st.sidebar:
-        # 로그인 유지 쿠키를 매 실행 기록/갱신 (수명 30일 — 실제 만료는 서버가 '마지막 사용 2시간'으로 판정)
+        # 로그인 유지 쿠키를 매 실행 기록/갱신 (수명 30일 — 실제 만료는 서버가
+        # '마지막 사용 IDLE_LIMIT_HOURS'로 판정하므로 쿠키 자체 수명은 넉넉히 둠)
         if st.session_state.get("auth_token"):
             _write_cookie(st.session_state["auth_token"], 30 * 24 * 3600)
         st.caption(f"👋 **{st.session_state.get('auth_name','')}**님 "
