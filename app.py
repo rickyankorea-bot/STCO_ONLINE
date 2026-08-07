@@ -2670,6 +2670,9 @@ def render_weekly_report(df):
 #    ③ SET 등급 A → A-1/A-2 분리 — 핵심 2개 상의 '실재고'가 둘 다 Y 이상이면 A-1, 아니면 A-2.
 #       (C-2/C-3은 여전히 '세트 가능 수량' 기준 — 두 수량을 혼동하지 말 것)
 #    ④ A09↔A09 세트업 지원 + 상/하 판별을 사이즈코드가 아닌 아이템 코드로 변경
+#  · 260807 개정(size-grade-classifier 스킬 반영): A09 핵심 사이즈 M·L(2개) → M·L·XL(3개) 확장,
+#    빅은 XXL만 남음. 단품 등급(_INV_SYSTEMS["A09"])·SET 등급(_INV_SET_CORE_A09 등) 둘 다 반영.
+#    A16(핵심 2개 그대로)은 영향 없음.
 #  · 출력: 106열 v3 — 서식은 저장소 동봉 템플릿(inventory_template.xlsx = 최신 v3 결과물)에서 1:1 복제
 #  · 260802 서식 확정: C·K·L·M·AA·AB·AF·AG·AH·AI 노란색 / BA·BG·BH·BI 초록색 / BK~CM 숨김
 # ※ 사이즈 마스터(품번→사이즈코드)는 DB(size_master)에 저장 — 사이드바(관리자)에서 업로드/교체.
@@ -2705,7 +2708,8 @@ _INV_SYSTEMS = {
     "A16": {"core": [5, 7], "small": [3], "big": [9, 10, 11, 13], "all": [3, 5, 7, 9, 10, 11, 13]},
     "A17": {"core": [5, 6, 7], "small": [1, 2, 3], "big": [9, 11, 12, 13],
             "all": [1, 2, 3, 5, 6, 7, 9, 11, 12, 13]},
-    "A09": {"core": [4, 5], "small": [2, 3], "big": [6, 7], "all": [2, 3, 4, 5, 6, 7]},
+    # 260807 개정(size-grade-classifier 스킬 반영): 핵심 M·L(2개) → M·L·XL(3개) 확장, 빅은 XXL만 남음.
+    "A09": {"core": [4, 5, 6], "small": [2, 3], "big": [7], "all": [2, 3, 4, 5, 6, 7]},
     "A05": {"core": [7, 8, 9, 10], "small": [1, 2, 3, 4, 5, 6], "big": [11, 12],
             "all": list(range(1, 13)), "shoe_rule": True},
 }
@@ -2731,9 +2735,10 @@ _INV_A09 = {2: "XS", 3: "S", 4: "M", 5: "L", 6: "XL", 7: "XXL"}
 _INV_A09_IDX = {v: k for k, v in _INV_A09.items()}
 _INV_MATCH_A09 = {"XS": ["XS", "S"], "S": ["XS", "S", "M"], "M": ["S", "M", "L"],
                   "L": ["M", "L", "XL"], "XL": ["L", "XL", "XXL"], "XXL": ["XL", "XXL"]}
-_INV_SET_CORE_A09 = ("M", "L")
+# 260807 개정: SET 등급용 핵심도 단품과 동일하게 M·L·XL(3개)로 확장, 빅은 XXL만 남음.
+_INV_SET_CORE_A09 = ("M", "L", "XL")
 _INV_SET_SMALL_A09 = ("XS", "S")
-_INV_SET_BIG_A09 = ("XL", "XXL")
+_INV_SET_BIG_A09 = ("XXL",)
 
 # 지원 조합: (상의 사이즈코드, 하의 사이즈코드) → (상의 idx맵, 하의 idx맵, 매칭표, 핵심, 스몰, 빅)
 _INV_SET_SYS = {
@@ -2805,10 +2810,18 @@ def _inv_set_grade(mq, Y, top_stock=None, core=None, small=None, big=None):
     """SET 등급(AE) 판정 — 매칭된 세트 사이즈(mq={상의사이즈: 세트가능수량}) 기준.
 
     260806: 기존 A를 A-1 / A-2로 분리 (스킬 최신본 반영).
-      A-1 = 핵심 2개 성립 & 다른 사이즈 1개↑ 성립 & 핵심 2개의 '상의 재고'가 둘 다 Y 이상
+      A-1 = 핵심 전부 성립 & (핵심이 2개뿐인 체계는 다른 사이즈 1개↑도 성립) & 핵심의 '상의 재고'가 전부 Y 이상
       A-2 = 위와 같으나 핵심 상의 재고가 하나라도 Y 미만
     판정 기준이 '세트 가능 수량'이 아니라 '상의 재고'이므로 top_stock({상의사이즈: 재고})을 받는다.
     top_stock이 없으면(구 호출부) 안전하게 A-2로 떨어뜨린다.
+
+    260807 개정: 핵심 개수는 체계마다 다르다(A16=2개, A09=3개, 260807 개정으로 M·L→M·L·XL 확장).
+    단품 등급 판정(_inv_grade_one)과 동일하게 핵심 성립 개수(nc) 기준으로 일반화한다.
+      · nc ≥ 3 → 핵심만으로 이미 최상위 등급(다른 사이즈 무관), 상의 재고 Y 체크로 A-1/A-2
+      · nc == 2 → 다른 사이즈 1개↑ 성립해야 A-1/A-2, 없으면 B
+                  (핵심이 원래 2개뿐인 A16 체계에선 이 분기가 곧 '핵심 전부 성립' 분기라 기존 동작과 동일)
+      · nc == 1 → 다른 사이즈 있으면 C-1 / 없으면 세트가능수량 Y 기준 C-2·C-3
+      · nc == 0 → 스몰&빅 D / 빅만 E / 스몰만 F
     """
     if not mq:
         return "해당없음"
@@ -2819,12 +2832,15 @@ def _inv_set_grade(mq, Y, top_stock=None, core=None, small=None, big=None):
     others = [s for s in mq if s not in CORE]
     sm = [s for s in mq if s in SMALL]
     bg = [s for s in mq if s in BIG]
-    if len(core) == 2:
+    nc = len(core)
+    ts = top_stock or {}
+    if nc >= 3:
+        return "A-1" if all(ts.get(s, 0) >= Y for s in core) else "A-2"
+    if nc == 2:
         if not others:
             return "B"
-        ts = top_stock or {}
         return "A-1" if all(ts.get(s, 0) >= Y for s in core) else "A-2"
-    if len(core) == 1:
+    if nc == 1:
         if others:
             return "C-1"
         return "C-2" if mq[core[0]] >= Y else "C-3"
