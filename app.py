@@ -567,13 +567,17 @@ SEASON_ROW_DEFS = [
 ]
 
 
-def yoy_frame(cur, prev, dim, order_list=None, season_rows=False, cy=None):
+def yoy_frame(cur, prev, dim, order_list=None, season_rows=False, cy=None, extra_rows=None):
     """올해(cur)·전년(prev)을 dim으로 묶어 전년비교 numeric DataFrame(멀티헤더) 반환. G.TOTAL 상단.
 
     cy=기준연도(예: 2025)를 넘기면 컬럼 라벨이 그 연도 기준으로 동적 표기된다
     (예: cy=2025 → "24년"/"25년"). 안 넘기면 과거 하드코딩 기본값("25년"/"26년") 유지.
     (2026-08-07 버그수정: 예전엔 실제 선택연도와 무관하게 "25년"/"26년"이 고정으로
     찍혀서, 기준연도를 2025로 조회해도 표 헤더는 항상 26년으로 보이는 문제가 있었음.)
+
+    extra_rows=[(라벨, mask_fn), ...] (2026-08-07 추가)이면 G.TOTAL 바로 아래(시즌 7행보다도 위)에
+    임의 그룹 소계 행을 끼워 넣는다. mask_fn(f)는 cur/prev 각각에 적용되는 불리언 마스크 —
+    예: 유통채널별 표의 '담당자별 TOTAL' 행(mask_fn=담당자 일치 여부).
     """
     cur_lbl = f"{cy % 100:02d}년" if cy is not None else "26년"
     prev_lbl = f"{(cy - 1) % 100:02d}년" if cy is not None else "25년"
@@ -622,6 +626,21 @@ def yoy_frame(cur, prev, dim, order_list=None, season_rows=False, cy=None):
             r25, o25, q25 = _ssum(prev, sns)
             rows.append(metrics(r26, r25, o26, o25, q26, q25, tot_c, tot_p))
             index.append(lbl)
+    # 담당자별 TOTAL 등 임의 그룹 소계 (2026-08-07 추가) — G.TOTAL·시즌행 다음, 개별 매장행 앞
+    if extra_rows:
+        def _esum(f, mask_fn):
+            if f is None or f.empty:
+                return 0.0, 0.0, 0.0
+            sub = f[mask_fn(f)]
+            if sub.empty:
+                return 0.0, 0.0, 0.0
+            return (float(sub["_매출액"].sum()), float(sub["_최초가매출"].sum()),
+                    float(sub["_수량"].sum()))
+        for lbl, mask_fn in extra_rows:
+            r26, o26, q26 = _esum(cur, mask_fn)
+            r25, o25, q25 = _esum(prev, mask_fn)
+            rows.append(metrics(r26, r25, o26, o25, q26, q25, tot_c, tot_p))
+            index.append(lbl)
     for k in keys:
         rows.append(metrics(float(c["rev"].get(k, 0)), float(p["rev"].get(k, 0)),
                             float(c["orig"].get(k, 0)), float(p["orig"].get(k, 0)),
@@ -634,7 +653,7 @@ def yoy_frame(cur, prev, dim, order_list=None, season_rows=False, cy=None):
 
 
 def yoy_frame2(cur_m, prev_m, cur_y, prev_y, dim, order_list=None, season_rows=False,
-               blk_labels=("당월누계", "연간누계"), cy=None):
+               blk_labels=("당월누계", "연간누계"), cy=None, extra_rows=None):
     """플래그십 2블록 프레임 (2026-07-31 목업 v2 컨펌): 당월누계 + 연간누계.
 
     현재 헤더 12개 컬럼(실판매금액·판가율·비중·평균단가 × 전년/올해/증감)을 기간별로 복제해
@@ -642,9 +661,10 @@ def yoy_frame2(cur_m, prev_m, cur_y, prev_y, dim, order_list=None, season_rows=F
     행 순서는 연간누계 기준(당월에만 있는 행은 뒤에 추가, 없는 칸은 '–').
     cy=기준연도를 넘기면 하위 표의 연도 컬럼 라벨("25년"/"26년" 등)이 그 연도 기준으로
     동적 계산된다(2026-08-07 버그수정).
+    extra_rows는 두 블록에 동일하게 적용된다(2026-08-07 추가 — 담당자별 TOTAL 등).
     """
-    Dm = yoy_frame(cur_m, prev_m, dim, order_list, season_rows=season_rows, cy=cy)
-    Dy = yoy_frame(cur_y, prev_y, dim, order_list, season_rows=season_rows, cy=cy)
+    Dm = yoy_frame(cur_m, prev_m, dim, order_list, season_rows=season_rows, cy=cy, extra_rows=extra_rows)
+    Dy = yoy_frame(cur_y, prev_y, dim, order_list, season_rows=season_rows, cy=cy, extra_rows=extra_rows)
     idx = list(Dy.index) + [k for k in Dm.index if k not in Dy.index]
     Dm = Dm.reindex(idx)
     Dy = Dy.reindex(idx)
@@ -918,7 +938,7 @@ div[data-testid="stHorizontalBlock"]:has(.perf-title){align-items:flex-end;}
 MENU_DASH = "📊 종합 대시보드"
 MENU_WEEK = "📋 주간회의 보고자료"
 MENU_FLAG = "📅 연차·아이템 세부분석"
-MENU_CHAN = "📈 유통채널·브랜드 주간현황"
+MENU_CHAN = "📈 유통별 세부 분석"
 MENU_INV  = "🏷️ 재고 가공"
 MENU_TRND = "📉 추세분석"
 MENU_RTN  = "🔄 반품률 분석"
@@ -949,13 +969,17 @@ def render_styled_table(sty, extra_class="", extra_css=""):
 
 def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False,
                month=None, blk_labels=("당월누계", "연간누계"), preview=False, big_title=False,
-               cy=None):
+               cy=None, extra_rows=None):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
 
     extra=(컬럼명, {행라벨: 값})이면 표 맨 앞(행이름 바로 옆)에 텍스트 컬럼을 삽입
-    — 예: 유통채널별 표의 '담당자'. 엑셀 다운로드에도 그대로 포함된다. (month와 병용 불가)
+    — 예: 유통채널별 표의 '담당자'. 엑셀 다운로드에도 그대로 포함된다.
+    (2026-08-07: month와의 병용 제한 해제 — 컬럼 레벨 수에 맞춰 자동으로 삽입 키를 맞춘다.)
     season_rows=True면 G.TOTAL 아래 시즌 7행(S/S·F/W TOTAL + Z·A·B·C·D) 삽입.
     month=(cur_m, prev_m)이면 당월누계+연간누계 2블록 표(플래그십 탭 전용, 2026-07-31).
+    extra_rows=[(라벨, mask_fn), ...] (2026-08-07 추가)면 G.TOTAL 바로 아래에 임의 그룹 소계
+    행을 끼워 넣는다 — 예: 유통채널별 표의 '담당자별 TOTAL'. month와 함께 쓰면 두 블록에
+    동일하게 적용된다(yoy_frame2 참고).
     preview=True(2026-08-06 추가)면 '🔍 조회 누르기 전' 안내용 — cur/prev가 빈 DataFrame이라
     yoy_frame이 전부 0/"–"로 채운 스켈레톤을 반환하는 걸 이용해, 실제 계산 없이 이 화면에서
     나올 표의 헤더·행 구조만 미리 보여준다(엑셀 다운로드 버튼은 숨김 — 아직 실데이터가 아니므로).
@@ -970,14 +994,21 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     if month is not None:
         cur_m, prev_m = month
         D = yoy_frame2(cur_m, prev_m, cur, prev, dim, order_list,
-                       season_rows=season_rows, blk_labels=blk_labels, cy=cy)
+                       season_rows=season_rows, blk_labels=blk_labels, cy=cy, extra_rows=extra_rows)
     else:
-        D = yoy_frame(cur, prev, dim, order_list, season_rows=season_rows, cy=cy)
+        D = yoy_frame(cur, prev, dim, order_list, season_rows=season_rows, cy=cy, extra_rows=extra_rows)
     if extra:
         _name, _map = extra
-        D.insert(0, (_name, ""),
+        # 2026-08-07: D.columns가 2단(단일블록)/3단(month 2블록) 어느 쪽이든 삽입 키의
+        # 레벨 수를 자동으로 맞춰준다 — 예전엔 2단 튜플로 고정돼 있어 month와 병용 시 에러났음.
+        _extra_key = (_name,) + ("",) * (D.columns.nlevels - 1)
+        D.insert(0, _extra_key,
                  ["" if k == "G.TOTAL" else str(_map.get(str(k), "") or "") for k in D.index])
     nblk = sum(1 for c in D.columns if c[0] == blk_labels[0]) if month is not None else None
+    if nblk and extra:
+        # 2026-08-07: extra 컬럼('담당자' 등)이 맨 앞에 삽입돼 있으면 실제 경계선 위치(컬럼
+        # 순번)가 1 밀린다 — 안 더해주면 block_border가 블록1 마지막 칸에 선을 그어버린다.
+        nblk += 1
     h1, h2 = st.columns([4, 1])
     # 2026-08-06 (중태님 컨펌): 제목↔자기표 간격은 좁히고, 이전표↔제목 간격은 넓혀서
     # "이 제목이 바로 아래 표 것"임을 분명하게 함. big_title=True면 글자도 1.5배.
@@ -1865,7 +1896,7 @@ def render_dashboard(df):
 
 def render_channel_brand(df):
     """매주 대표님 보고 B: 유통채널별 · 브랜드별 매출현황 (전년 동기간 비교)."""
-    st.subheader("📈 유통채널 · 브랜드별 매출현황 (전년 동기간 비교)")
+    st.subheader("📈 유통별 세부 분석 (전년 동기간 비교)")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
         st.info("데이터를 먼저 적재하세요.")
         return
@@ -1893,6 +1924,10 @@ def render_channel_brand(df):
         seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
         _mans = sorted({str(m).strip() for m in d["_담당자"].dropna().astype(str)
                         if str(m).strip() and str(m).strip().lower() not in ("nan", "none")})
+        # 260807 추가: 유통채널별 표 미리보기용 '담당자별 TOTAL' 행 스켈레톤(실계산 없음)
+        _preview_mgr_rows = [
+            (f"{m} TOTAL", (lambda name: (lambda x: x["_담당자"].astype(str).str.strip() == name))(m))
+            for m in _mans]
         selb = cb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cb_brand")
         sela = cb2.multiselect("연차별", ages, default=[], placeholder="전체", key="cb_age")
         sels = cb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cb_season")
@@ -1904,7 +1939,8 @@ def render_channel_brand(df):
         # 2026-08-06: 조회 전에도 표 헤더(구조)만 미리 보여줌 — 실제 계산 없음(perf_table 참고).
         _empty = pd.DataFrame()
         perf_table(_empty, _empty, "_채널", None, "유통채널별 매출현황", "cb_ch_preview",
-                   extra=("담당자", {}), preview=True)
+                   extra=("담당자", {}), month=(_empty, _empty),
+                   blk_labels=("조회기간", "연간누계"), extra_rows=_preview_mgr_rows, preview=True)
         perf_table(_empty, _empty, "브랜드명", None, "브랜드별 매출현황", "cb_br_preview",
                    preview=True)
         return
@@ -1925,6 +1961,10 @@ def render_channel_brand(df):
         base = base[base["_담당자"].astype(str).str.strip().isin(selm)]
     cur = base[(base["_판매일"] >= s) & (base["_판매일"] <= e)]
     prev = base[(base["_판매일"] >= s - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
+    # 260807 추가(중태님 지시): 유통채널별 표에 '연간누계' 블록을 조회기간 오른쪽에 병기
+    y_start = e.replace(month=1, day=1)
+    cur_y = base[(base["_판매일"] >= y_start) & (base["_판매일"] <= e)]
+    prev_y = base[(base["_판매일"] >= y_start - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
 
     tot_c, tot_p = cur["_매출액"].sum(), prev["_매출액"].sum()
     k1, k2, k3 = st.columns(3)
@@ -1942,8 +1982,24 @@ def render_channel_brand(df):
     #         매장 기준정보 미업로드 시 담당자가 전부 결측이므로 str()로 한 번 더 감싼다.
     chan_mgr = {c: ("" if str(m).strip().lower() in ("nan", "none", "") else str(m).strip())
                 for c, m in zip(_cm["_채널"], _cm["_담당자"])}
-    perf_table(cur, prev, "_채널", None, "유통채널별 매출현황", "cb_ch", extra=("담당자", chan_mgr), cy=cy_cb)
-    st.caption("※ 채널을 자사몰/외부몰 등 그룹으로 묶으려면 '채널 기준정보(매핑)'가 필요해요 — 준비되면 그룹 집계도 추가해드릴게요.")
+    # 260807 추가(중태님 지시): G.TOTAL 아래 '담당자별 TOTAL' 행 삽입 — 현재 조회조건(base)에
+    # 매출이 있는 매장의 담당자 전원, 연간누계(cur_y) 매출 큰 순으로 정렬(표 전체 정렬 기준과 통일).
+    _ch_mans = sorted({str(m).strip() for m in base["_담당자"].dropna().astype(str)
+                       if str(m).strip() and str(m).strip().lower() not in ("nan", "none")})
+    if "_담당자" in cur_y.columns and not cur_y.empty:
+        _mgr_rev = cur_y.groupby(cur_y["_담당자"].astype(str).str.strip())["_매출액"].sum()
+    else:
+        _mgr_rev = pd.Series(dtype="float64")
+    _ch_mans.sort(key=lambda m: -float(_mgr_rev.get(m, 0.0)))
+    mgr_extra_rows = [
+        (f"{m} TOTAL", (lambda name: (lambda x: x["_담당자"].astype(str).str.strip() == name))(m))
+        for m in _ch_mans]
+    perf_table(cur_y, prev_y, "_채널", None, "유통채널별 매출현황", "cb_ch",
+               extra=("담당자", chan_mgr), month=(cur, prev), blk_labels=("조회기간", "연간누계"),
+               extra_rows=mgr_extra_rows, cy=cy_cb)
+    st.caption("※ 채널을 자사몰/외부몰 등 그룹으로 묶으려면 '채널 기준정보(매핑)'가 필요해요 — 준비되면 그룹 집계도 추가해드릴게요. "
+               "G.TOTAL 아래 담당자별 TOTAL(연간누계 매출 큰 순) → 개별 매장 순으로 표시돼요. "
+               "담당자 미지정 매장은 담당자별 TOTAL 어디에도 안 잡히지만 G.TOTAL엔 포함돼요.")
 
     st.markdown("### B. 브랜드별")
     perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br", cy=cy_cb)
