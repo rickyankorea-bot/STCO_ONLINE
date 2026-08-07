@@ -424,17 +424,23 @@ LOAD_COLS = ["판매일자", "브랜드명", "시즌명", "시즌그룹", "아�
              "연도", "판매연도", "년월", "최초판매금액", "실판매금액", "현판매금액",
              "판매수량", "매장명", "매장코드", "품번",
              "순번", "주문번호", "판매번호", "판매연번",
-             "반품판매일자", "반품판매번호", "반품판매연번"]
-# 2026-08-07: 원가(VAT+)·최초가 추가 시도(품번별 드릴다운용) → 배포 직후 앱이 응답없이 죽는
-# 사고 발생(healthz 커넥션 리셋, 파이썬 트레이스백 없음 — 메모리 관련 추정). 일단 롤백.
-# 재작업 시 claude/원가드릴다운_롤백_260807.md 참고 — 컬럼 1개씩 늘려가며 재현 여부 확인 필요.
+             "반품판매일자", "반품판매번호", "반품판매연번",
+             "원가(VAT+)"]
+# 원가(VAT+)(2026-08-07 재작업): 품번별 상세 드릴다운용. 지난번엔 이 컬럼과 "최초가"를 동시에
+# 추가했다가 배포 직후 크래시가 나서 전량 롤백했음(claude/배포대기_현황.md 8-2 참고, 원인 미확정
+# — OOM 추정이나 재현 확인은 못함). 이번엔 신규 컬럼을 원가(VAT+) 1개로 줄임 — "최초가"는 별도
+# 컬럼 로드 없이 기존에 이미 로드 중인 _최초가매출÷_수량(가중평균)으로 대체 계산해서 메모리
+# 증가폭을 최소화함(_pn_detail 참고). 원가(VAT+)는 실판매금액처럼 거래줄 단위 금액이라 기간
+# 합산(SUM)이 맞음 — append_to_db가 원본 파일 컬럼을 그대로 저장해왔으므로(스키마 자동확장)
+# 과거 업로드분도 DB에 이미 값이 있을 가능성이 높아 재업로드(백필) 없이 우선 확인해볼 것.
 # 품명(2026-08-04 추가): 매출 로우데이터에 품번 바로 옆에 있는 실제 상품명 컬럼(중태님 확인) —
 # DB(sales 테이블)에 이 컬럼이 없는 경우(과거 업로드분 등)에도 load_db()가 존재하는 컬럼만
 # 골라 쓰므로(위 use = [c for c in LOAD_COLS if c in have]) 에러 없이 안전하게 빠짐.
 # 순번·주문번호·반품판매일자/번호/연번(2026-08-04 추가): "SET/단품 판매 분석" 탭 전용 — 세트
 # 그룹핑(주문번호+디자인키)과 반품↔원판매 매칭에 필요. 과거 업로드분에 이 컬럼이 없어도(구버전
 # 원본 파일) load_db()가 존재하는 컬럼만 골라 쓰므로 에러 없이 안전하게 빠짐(그 경우 이 탭만 데이터 부족).
-LOAD_NUM = ["최초판매금액", "실판매금액", "현판매금액", "판매수량", "판매연도", "연도"]
+LOAD_NUM = ["최초판매금액", "실판매금액", "현판매금액", "판매수량", "판매연도", "연도",
+            "원가(VAT+)"]
 LOAD_CAT = ["브랜드명", "시즌명", "시즌그룹", "아이템", "아이템명", "년월", "매장명", "매장코드"]
 
 
@@ -1019,6 +1025,115 @@ def _need_search(flag_key, submitted):
     return False
 
 
+# ── 품번별 드릴다운 (2026-08-07 재작업) ───────────────────────────────────────
+# 표의 합계 숫자(예: 44.1백만원) 아래에 [아이템그룹/연차 선택 + 기간 + 연도 + 🔍 상세보기]
+# 컨트롤을 두고, 누르면 그 조건의 품번별 상세(품번/품명/기간판매수량/기간총실판가/
+# 원가(VAT+)/최초가/평균판매가/판가율)를 팝업(st.dialog)으로 보여준다.
+# 1차 배포 때 이 기능 추가 직후 앱이 통째로 크래시 나서(트레이스백 없음, OOM 추정) 전량
+# 롤백했었음(claude/배포대기_현황.md 8-2). 이번 재작업은 신규 로드 컬럼을 "원가(VAT+)" 1개로
+# 줄이고(LOAD_COLS/LOAD_NUM 참고), "최초가"는 별도 컬럼을 새로 로드하지 않고 기존에 이미
+# 메모리에 있는 _최초가매출÷_수량 가중평균으로 계산해서 메모리 증가폭을 최소화했다.
+# st.dialog에 width= 같은 부가 kwarg는 일부러 안 씀 — 지난번 크래시 원인 후보였다가 아니었던
+# 것으로 확인된 지점이라, 표면적을 최대한 줄이는 쪽으로 설계.
+
+def _dialog_or_expander(title):
+    """st.dialog가 없는 구버전 streamlit 대비 안전판 — 있으면 진짜 팝업, 없으면 expander."""
+    if hasattr(st, "dialog"):
+        return st.dialog(title)
+
+    def _fallback(fn):
+        def _inner(*a, **kw):
+            with st.expander(title, expanded=True):
+                return fn(*a, **kw)
+        return _inner
+    return _fallback
+
+
+def _pn_detail(sub):
+    """조건에 맞는 원본 거래행(sub)을 받아 품번별 상세 DataFrame을 만든다."""
+    if sub is None or sub.empty or "품번" not in sub.columns:
+        return pd.DataFrame()
+    g = sub.groupby("품번", observed=True)
+    qty = g["_수량"].sum() if "_수량" in sub.columns else pd.Series(dtype="float64")
+    if qty.empty:
+        return pd.DataFrame()
+    rev = g["_매출액"].sum() if "_매출액" in sub.columns else pd.Series(0.0, index=qty.index)
+    orig = g["_최초가매출"].sum() if "_최초가매출" in sub.columns else pd.Series(0.0, index=qty.index)
+    name = g["품명"].first() if "품명" in sub.columns else pd.Series("", index=qty.index)
+    cost_amt = (g["원가(VAT+)"].sum() if "원가(VAT+)" in sub.columns
+                else pd.Series(np.nan, index=qty.index))
+
+    out = pd.DataFrame({"기간판매수량": qty, "기간총실판가": rev, "_orig": orig,
+                         "품명": name, "_cost_amt": cost_amt})
+    out.index.name = "품번"
+    out = out.reset_index()
+    out["기간판매수량"] = pd.to_numeric(out["기간판매수량"], errors="coerce").astype("float64")
+    out["기간총실판가"] = pd.to_numeric(out["기간총실판가"], errors="coerce").astype("float64")
+    out["_orig"] = pd.to_numeric(out["_orig"], errors="coerce").astype("float64")
+    q = out["기간판매수량"].replace(0, np.nan)
+    orig_safe = out["_orig"].replace(0, np.nan)
+    out["최초가"] = out["_orig"] / q
+    out["평균판매가"] = out["기간총실판가"] / q
+    if out["_cost_amt"].notna().any():
+        out["원가(VAT+)"] = pd.to_numeric(out["_cost_amt"], errors="coerce") / q
+    else:
+        out["원가(VAT+)"] = np.nan
+    out["판가율"] = out["기간총실판가"] / orig_safe
+    out = out.sort_values("기간총실판가", ascending=False)
+    return out[["품번", "품명", "기간판매수량", "기간총실판가", "원가(VAT+)", "최초가", "평균판매가", "판가율"]]
+
+
+def _show_pn_dialog(title, sub_title, detail):
+    """품번별 상세 DataFrame을 팝업(또는 expander)으로 렌더링."""
+    @_dialog_or_expander(title)
+    def _popup():
+        st.caption(sub_title)
+        if detail.empty:
+            st.info("해당 조건에 판매 데이터가 없어요.")
+            return
+        disp = detail.copy()
+        disp["기간총실판가"] = disp["기간총실판가"].apply(lambda v: f"{_mm(v):,.1f}백만")
+        for c in ("원가(VAT+)", "최초가", "평균판매가"):
+            disp[c] = disp[c].apply(lambda v: f"{v:,.0f}" if pd.notna(v) else "–")
+        disp["판가율"] = disp["판가율"].apply(lambda v: f"{v*100:.0f}%" if pd.notna(v) else "–")
+        st.dataframe(disp, hide_index=True, use_container_width=True)
+        if detail["원가(VAT+)"].isna().all():
+            st.caption("⚠️ 원가(VAT+)가 과거 업로드분에는 없어 전부 '–'로 나올 수 있어요 — "
+                       "이후 로우데이터부터 채워집니다.")
+    _popup()
+
+
+def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_prefix, cy):
+    """표 아래 [아이템그룹/연차 선택 + 기간 + 연도 + 🔍 상세보기] 컨트롤 + 팝업 연결.
+
+    dim: "아이템그룹" 또는 "연차" — 이 표가 어떤 기준으로 나뉘는지.
+    dim_values: 셀렉트박스 옵션(표에 실제로 나오는 값들).
+    cur/prev: 연간누계 기준으로 이미 필터된 데이터, cur_m/prev_m: 당월누계 기준.
+    """
+    if not dim_values:
+        return
+    c1, c2, c3, c4 = st.columns([1.4, 1.3, 0.9, 1])
+    sel_v = c1.selectbox(dim, dim_values, key=f"{key_prefix}_dv")
+    period = c2.selectbox("기간", ["당월누계", "연간누계"], key=f"{key_prefix}_pd")
+    yr = c3.selectbox("연도", [cy, cy - 1], key=f"{key_prefix}_yr")
+    c4.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+    go = c4.button("🔍 상세보기", key=f"{key_prefix}_go", use_container_width=True)
+    if not go:
+        return
+    base_cur, base_prev = (cur_m, prev_m) if period == "당월누계" else (cur, prev)
+    src = base_cur if yr == cy else base_prev
+    if src is None or src.empty or dim not in src.columns:
+        _show_pn_dialog(f"{title_prefix} · {sel_v} · {period} · {yr}년 품번별 상세",
+                         "데이터 없음", pd.DataFrame())
+        return
+    sub = src[src[dim].astype(str) == str(sel_v)]
+    detail = _pn_detail(sub)
+    total_rev = detail["기간총실판가"].sum() if not detail.empty else 0
+    _show_pn_dialog(f"{title_prefix} · {sel_v} · {period} · {yr}년 품번별 상세",
+                     f"실판매금액 큰 순 정렬 · 합계 {_mm(total_rev):,.1f}백만원",
+                     detail)
+
+
 def render_flagship(df):
     st.subheader("📅 연차 · 아이템별 전년 대비 분석")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
@@ -1108,10 +1223,15 @@ def render_flagship(df):
     st.markdown("### 시즌별/연차별 한눈에 보기")
     perf_table(cur, prev, "연차", age_order, "시즌별/연차별 한눈에 보기", "age",
                season_rows=True, month=(cur_m, prev_m), blk_labels=blk, cy=cy)
+    pn_drilldown(cur, prev, cur_m, prev_m, "연차", age_order,
+                 "시즌별/연차별 한눈에 보기", "pn_age", cy)
 
     st.markdown("### 아이템그룹별 성과표 (전연차 토탈 + 연차별)")
+    grp_present = [g for g in ITEMGROUP_ORDER if g in cur["아이템그룹"].unique()] if "아이템그룹" in cur.columns else ITEMGROUP_ORDER
     perf_table(cur, prev, "아이템그룹", ITEMGROUP_ORDER, "아이템그룹별 성과표 (전연차)", "grp_all",
                month=(cur_m, prev_m), blk_labels=blk, cy=cy)
+    pn_drilldown(cur, prev, cur_m, prev_m, "아이템그룹", grp_present,
+                 "아이템그룹별 성과표 (전연차)", "pn_grp_all", cy)
     # 연차별 버킷
     buckets = []
     sinsang = [a for a in ["신상", "내년신상"] if a in age_order]
@@ -1128,6 +1248,10 @@ def render_flagship(df):
         perf_table(curb, prevb, "아이템그룹", ITEMGROUP_ORDER,
                    f"아이템그룹별 성과표 ({name})", f"grp_{name}",
                    month=(curb_m, prevb_m), blk_labels=blk, big_title=True, cy=cy)
+        grp_present_b = ([g for g in ITEMGROUP_ORDER if g in curb["아이템그룹"].unique()]
+                          if "아이템그룹" in curb.columns else ITEMGROUP_ORDER)
+        pn_drilldown(curb, prevb, curb_m, prevb_m, "아이템그룹", grp_present_b,
+                     f"아이템그룹별 성과표 ({name})", f"pn_grp_{name}", cy)
 
 
 # ── 대시보드 채널 통합 (2026-07-31): 수수료 조건 때문에 2개로 나눠 등록한 매장을 실제 채널로 합산 ──
