@@ -3078,14 +3078,18 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             if _ratio <= _INV_BOT_LEFT_RATIO:
                 bl = set()
         if matched:
-            stt = "세트만" if not tl and not bl else \
-                ("세트&상하단품" if tl and bl else ("세트&상의단품" if tl else "세트&하의단품"))
+            # 260807: 표기 문구 축약 (판정 로직은 그대로) — 세트만→SET만 / 세트&상하단품→SET+상하 /
+            #         세트&상의단품→SET+상 / 세트&하의단품→SET+하
+            stt = "SET만" if not tl and not bl else \
+                ("SET+상하" if tl and bl else ("SET+상" if tl else "SET+하"))
             sg = _inv_set_grade(matched, Y,
                                 {s: ti["size14"][T_IDX[s]] for s in matched},
                                 S_CORE, S_SMALL, S_BIG)
         else:
-            stt = "단품만-상하모두" if tl and bl else \
-                ("단품만-상의만" if tl else ("단품만-하의만" if bl else "품절근처"))
+            # 260807: 표기 문구 축약 — 단품만-상하모두→상·하단품 / 단품만-상의만→상의단품 /
+            #         단품만-하의만→하의단품 ('품절근처'·'해당없음'은 기존 그대로)
+            stt = "상·하단품" if tl and bl else \
+                ("상의단품" if tl else ("하의단품" if bl else "품절근처"))
             sg = "해당없음"
         for r in g:
             r["AD"] = stt; r["AE"] = sg
