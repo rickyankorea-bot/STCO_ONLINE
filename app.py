@@ -2703,6 +2703,25 @@ for _cat, _codes in {
     for _c in _codes:
         _INV_CAT_FALLBACK[_c] = _cat
 
+# ══════════════════════════════════════════════════════════════════════════
+# ▼▼▼ size-grade-classifier 스킬 이식 블록 시작 (SYNC BLOCK) ▼▼▼
+# 아래 ~ "▲▲▲ 이식 블록 끝" 까지는 스킬 size-grade-classifier의
+# scripts/classify.py + scripts/set_classify.py 로직을 손으로 그대로 옮겨
+# 심은 것이다. Streamlit Cloud 배포 환경에는 스킬 파일이 없어 런타임에
+# 직접 import하지 못하므로, 스킬이 바뀌어도 이 블록엔 "자동으로" 안 따라온다.
+#
+# ⚠️ 재고가공 메뉴(사이즈 등급·SET 상태 구분·SET 등급) 로직에 변경이 필요할 때:
+#   1) (원본 검증) '쇼핑몰재고 모니터링 1차' 프로젝트에서 실데이터로 규칙을
+#      설계·검증하고 size-grade-classifier 스킬 저장까지 마친다.
+#   2) (이 프로젝트에서) "스킬 최신본이랑 app.py랑 어긋나는 부분 있는지 확인
+#      하고 반영해줘"라고 한 번만 요청한다. 스킬은 계정 전체에 동기화되므로
+#      이 세션에서 스킬 폴더를 바로 열어 app.py와 비교할 수 있다 — 별도
+#      "전달 자료" 작성은 불필요.
+#
+# 최근 동기화: 260807 — A09 핵심 사이즈 M·L(2개) → M·L·XL(3개) 확장 반영
+#   (_INV_SYSTEMS["A09"] · _INV_SET_CORE_A09 등 상수 + _inv_set_grade() 의
+#    nc 기준 일반화. 상수만 바꾸고 함수 로직을 안 고치면 조용히 틀리니 주의.)
+# ══════════════════════════════════════════════════════════════════════════
 # ── 사이즈 체계 (size-grade-classifier 스킬 정의 내장) ──
 _INV_SYSTEMS = {
     "A16": {"core": [5, 7], "small": [3], "big": [9, 10, 11, 13], "all": [3, 5, 7, 9, 10, 11, 13]},
@@ -2851,6 +2870,8 @@ def _inv_set_grade(mq, Y, top_stock=None, core=None, small=None, big=None):
     if sm:
         return "F"
     return "해당없음"
+# ▲▲▲ size-grade-classifier 스킬 이식 블록 끝 (SYNC BLOCK) ▲▲▲
+# ══════════════════════════════════════════════════════════════════════════
 
 
 def _inv_num(v):
