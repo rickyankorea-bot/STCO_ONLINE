@@ -1064,12 +1064,15 @@ def _dialog_or_expander(title, on_dismiss=None):
     return _fallback
 
 
-def _agg_detail(sub, group_col):
+def _agg_detail(sub, group_col, label_col="품명"):
     """조건에 맞는 원본 거래행(sub)을 group_col(품번 또는 매장코드) 기준으로 묶어 상세 DataFrame을 만든다.
 
     2026-08-07 2단계 드릴다운 추가: 원래 품번 전용이던 _pn_detail을 group_col로 일반화해서
     같은 로직을 매장코드 단위 집계에도 재사용(품번별 상세 팝업에서 행을 클릭하면 그 품번의
     매장별 상세를 같은 컬럼 구성으로 다시 보여주는 용도).
+
+    label_col(2026-08-07 추가): group_col 옆에 보여줄 설명 컬럼 — 품번별 표는 "품명"(상품명),
+    매장코드별 표는 "매장명"(중태님 요청: 상품명이 다 똑같이 반복되는 대신 매장 이름이 보여야 함).
     """
     if sub is None or sub.empty or group_col not in sub.columns:
         return pd.DataFrame()
@@ -1079,12 +1082,12 @@ def _agg_detail(sub, group_col):
         return pd.DataFrame()
     rev = g["_매출액"].sum() if "_매출액" in sub.columns else pd.Series(0.0, index=qty.index)
     orig = g["_최초가매출"].sum() if "_최초가매출" in sub.columns else pd.Series(0.0, index=qty.index)
-    name = g["품명"].first() if "품명" in sub.columns else pd.Series("", index=qty.index)
+    label = g[label_col].first() if label_col in sub.columns else pd.Series("", index=qty.index)
     cost_amt = (g["원가(VAT+)"].sum() if "원가(VAT+)" in sub.columns
                 else pd.Series(np.nan, index=qty.index))
 
     out = pd.DataFrame({"기간판매수량": qty, "기간총실판가": rev, "_orig": orig,
-                         "품명": name, "_cost_amt": cost_amt})
+                         label_col: label, "_cost_amt": cost_amt})
     out.index.name = group_col
     out = out.reset_index()
     out["기간판매수량"] = pd.to_numeric(out["기간판매수량"], errors="coerce").astype("float64")
@@ -1100,12 +1103,12 @@ def _agg_detail(sub, group_col):
         out["원가(VAT+)"] = np.nan
     out["판가율"] = out["기간총실판가"] / orig_safe
     out = out.sort_values("기간총실판가", ascending=False)
-    return out[[group_col, "품명", "기간판매수량", "기간총실판가", "원가(VAT+)", "최초가", "평균판매가", "판가율"]]
+    return out[[group_col, label_col, "기간판매수량", "기간총실판가", "원가(VAT+)", "최초가", "평균판매가", "판가율"]]
 
 
 def _pn_detail(sub):
     """조건에 맞는 원본 거래행(sub)을 받아 품번별 상세 DataFrame을 만든다."""
-    return _agg_detail(sub, "품번")
+    return _agg_detail(sub, "품번", label_col="품명")
 
 
 def _show_pn_dialog(title, sub_title, detail, group_col="품번", key_prefix="pn",
@@ -1191,9 +1194,14 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
             store_sub = sub[sub["품번"].astype(str) == str(pn_sel)]
         else:
             store_sub = pd.DataFrame()
-        store_detail = _agg_detail(store_sub, "매장코드")
+        # 매장별 표는 두번째 컬럼에 품명(어차피 다 같은 값) 대신 매장명을 보여줌(중태님 요청).
+        store_detail = _agg_detail(store_sub, "매장코드", label_col="매장명")
         total_rev = store_detail["기간총실판가"].sum() if not store_detail.empty else 0
-        _show_pn_dialog(f"{pn_sel} · {sel_v} · {period} · {yr}년 매장별 상세",
+        pn_name = (store_sub["품명"].iloc[0]
+                   if (not store_sub.empty and "품명" in store_sub.columns) else "")
+        pn_label = f"{pn_sel}({pn_name})" if pn_name else str(pn_sel)
+        # 타이틀 순서(중태님 확정): 연도 · 매장별상세 · 기간 · 아이템그룹/연차 · 품번(상품명)
+        _show_pn_dialog(f"{yr}년 매장별상세 · {period} · {sel_v} · {pn_label}",
                          f"실판매금액 큰 순 정렬 · 합계 {_mm(total_rev):,.1f}백만원",
                          store_detail, group_col="매장코드", key_prefix=f"{key_prefix}_st",
                          on_dismiss=_close_all)
