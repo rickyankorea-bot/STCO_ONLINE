@@ -558,8 +558,17 @@ SEASON_ROW_DEFS = [
 ]
 
 
-def yoy_frame(cur, prev, dim, order_list=None, season_rows=False):
-    """올해(cur)·전년(prev)을 dim으로 묶어 전년비교 numeric DataFrame(멀티헤더) 반환. G.TOTAL 상단."""
+def yoy_frame(cur, prev, dim, order_list=None, season_rows=False, cy=None):
+    """올해(cur)·전년(prev)을 dim으로 묶어 전년비교 numeric DataFrame(멀티헤더) 반환. G.TOTAL 상단.
+
+    cy=기준연도(예: 2025)를 넘기면 컬럼 라벨이 그 연도 기준으로 동적 표기된다
+    (예: cy=2025 → "24년"/"25년"). 안 넘기면 과거 하드코딩 기본값("25년"/"26년") 유지.
+    (2026-08-07 버그수정: 예전엔 실제 선택연도와 무관하게 "25년"/"26년"이 고정으로
+    찍혀서, 기준연도를 2025로 조회해도 표 헤더는 항상 26년으로 보이는 문제가 있었음.)
+    """
+    cur_lbl = f"{cy % 100:02d}년" if cy is not None else "26년"
+    prev_lbl = f"{(cy - 1) % 100:02d}년" if cy is not None else "25년"
+
     def agg(f):
         if f is None or f.empty:
             return pd.DataFrame(columns=[dim, "rev", "orig", "qty"]).set_index(dim)
@@ -575,14 +584,14 @@ def yoy_frame(cur, prev, dim, order_list=None, season_rows=False):
 
     def metrics(r26, r25, o26, o25, q26, q25, share_den_c, share_den_p):
         return {
-            ("실판매금액(백만)", "25년"): r25 / 1e6, ("실판매금액(백만)", "26년"): r26 / 1e6,
+            ("실판매금액(백만)", prev_lbl): r25 / 1e6, ("실판매금액(백만)", cur_lbl): r26 / 1e6,
             ("실판매금액(백만)", "증감율"): ((r26 - r25) / r25) if r25 else None,
-            ("판가율", "25년"): (r25 / o25) if o25 else 0, ("판가율", "26년"): (r26 / o26) if o26 else 0,
+            ("판가율", prev_lbl): (r25 / o25) if o25 else 0, ("판가율", cur_lbl): (r26 / o26) if o26 else 0,
             ("판가율", "증감"): ((r26 / o26 if o26 else 0) - (r25 / o25 if o25 else 0)),
-            ("비중", "25년"): (r25 / share_den_p) if share_den_p else 0,
-            ("비중", "26년"): (r26 / share_den_c) if share_den_c else 0,
+            ("비중", prev_lbl): (r25 / share_den_p) if share_den_p else 0,
+            ("비중", cur_lbl): (r26 / share_den_c) if share_den_c else 0,
             ("비중", "증감"): ((r26 / share_den_c if share_den_c else 0) - (r25 / share_den_p if share_den_p else 0)),
-            ("평균단가(원)", "25년"): (r25 / q25) if q25 else 0, ("평균단가(원)", "26년"): (r26 / q26) if q26 else 0,
+            ("평균단가(원)", prev_lbl): (r25 / q25) if q25 else 0, ("평균단가(원)", cur_lbl): (r26 / q26) if q26 else 0,
             ("평균단가(원)", "증감"): ((r26 / q26 if q26 else 0) - (r25 / q25 if q25 else 0)),
         }
 
@@ -616,15 +625,17 @@ def yoy_frame(cur, prev, dim, order_list=None, season_rows=False):
 
 
 def yoy_frame2(cur_m, prev_m, cur_y, prev_y, dim, order_list=None, season_rows=False,
-               blk_labels=("당월누계", "연간누계")):
+               blk_labels=("당월누계", "연간누계"), cy=None):
     """플래그십 2블록 프레임 (2026-07-31 목업 v2 컨펌): 당월누계 + 연간누계.
 
-    현재 헤더 12개 컬럼(실판매금액·판가율·비중·평균단가 × 25/26/증감)을 기간별로 복제해
+    현재 헤더 12개 컬럼(실판매금액·판가율·비중·평균단가 × 전년/올해/증감)을 기간별로 복제해
     최상단에 기간 블록(당월누계·연간누계)을 얹는다. 비중은 각 블록 안에서 행÷전체.
     행 순서는 연간누계 기준(당월에만 있는 행은 뒤에 추가, 없는 칸은 '–').
+    cy=기준연도를 넘기면 하위 표의 연도 컬럼 라벨("25년"/"26년" 등)이 그 연도 기준으로
+    동적 계산된다(2026-08-07 버그수정).
     """
-    Dm = yoy_frame(cur_m, prev_m, dim, order_list, season_rows=season_rows)
-    Dy = yoy_frame(cur_y, prev_y, dim, order_list, season_rows=season_rows)
+    Dm = yoy_frame(cur_m, prev_m, dim, order_list, season_rows=season_rows, cy=cy)
+    Dy = yoy_frame(cur_y, prev_y, dim, order_list, season_rows=season_rows, cy=cy)
     idx = list(Dy.index) + [k for k in Dm.index if k not in Dy.index]
     Dm = Dm.reindex(idx)
     Dy = Dy.reindex(idx)
@@ -928,7 +939,8 @@ def render_styled_table(sty, extra_class="", extra_css=""):
 
 
 def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False,
-               month=None, blk_labels=("당월누계", "연간누계"), preview=False, big_title=False):
+               month=None, blk_labels=("당월누계", "연간누계"), preview=False, big_title=False,
+               cy=None):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
 
     extra=(컬럼명, {행라벨: 값})이면 표 맨 앞(행이름 바로 옆)에 텍스트 컬럼을 삽입
@@ -943,13 +955,15 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     나오는 나머지 표들(신상+내년신상·1년차·2년차·3년차 등)에 True를 준다(중태님 컨펌 완료,
     2026-08-06). 제목-자기표 간격은 좁히고 이전표-제목 간격은 넓혀서 "이 제목이 어느 표
     것인지" 헷갈리지 않게 한다(가운데 컨펌 캡처 기준).
+    cy=기준연도를 넘기면 표 안의 연도 컬럼 라벨("25년"/"26년" 등)이 그 연도 기준으로
+    동적 계산된다 — 안 넘기면 과거 하드코딩 기본값 유지(2026-08-07 버그수정).
     """
     if month is not None:
         cur_m, prev_m = month
         D = yoy_frame2(cur_m, prev_m, cur, prev, dim, order_list,
-                       season_rows=season_rows, blk_labels=blk_labels)
+                       season_rows=season_rows, blk_labels=blk_labels, cy=cy)
     else:
-        D = yoy_frame(cur, prev, dim, order_list, season_rows=season_rows)
+        D = yoy_frame(cur, prev, dim, order_list, season_rows=season_rows, cy=cy)
     if extra:
         _name, _map = extra
         D.insert(0, (_name, ""),
@@ -1041,7 +1055,7 @@ def render_flagship(df):
         # 채운 스켈레톤을 만들어서, 실제 51만 건 계산 없이 표 구조만 공짜로 보인다.
         _empty = pd.DataFrame()
         perf_table(_empty, _empty, "연차", None, "시즌별/연차별 한눈에 보기", "fs_preview",
-                   season_rows=True, month=(_empty, _empty), preview=True)
+                   season_rows=True, month=(_empty, _empty), preview=True, cy=cy)
         return
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
@@ -1090,11 +1104,11 @@ def render_flagship(df):
     # 시즌 7행 포함 (목업 v3 컨펌): S/S TOTAL · F/W TOTAL + Z·A·B·C·D
     st.markdown("### 시즌별/연차별 한눈에 보기")
     perf_table(cur, prev, "연차", age_order, "시즌별/연차별 한눈에 보기", "age",
-               season_rows=True, month=(cur_m, prev_m), blk_labels=blk)
+               season_rows=True, month=(cur_m, prev_m), blk_labels=blk, cy=cy)
 
     st.markdown("### 아이템그룹별 성과표 (전연차 토탈 + 연차별)")
     perf_table(cur, prev, "아이템그룹", ITEMGROUP_ORDER, "아이템그룹별 성과표 (전연차)", "grp_all",
-               month=(cur_m, prev_m), blk_labels=blk)
+               month=(cur_m, prev_m), blk_labels=blk, cy=cy)
     # 연차별 버킷
     buckets = []
     sinsang = [a for a in ["신상", "내년신상"] if a in age_order]
@@ -1110,7 +1124,7 @@ def render_flagship(df):
         prevb_m = prev_m[prev_m["연차"].isin(ages)]
         perf_table(curb, prevb, "아이템그룹", ITEMGROUP_ORDER,
                    f"아이템그룹별 성과표 ({name})", f"grp_{name}",
-                   month=(curb_m, prevb_m), blk_labels=blk, big_title=True)
+                   month=(curb_m, prevb_m), blk_labels=blk, big_title=True, cy=cy)
 
 
 # ── 대시보드 채널 통합 (2026-07-31): 수수료 조건 때문에 2개로 나눠 등록한 매장을 실제 채널로 합산 ──
@@ -1685,6 +1699,7 @@ def render_channel_brand(df):
         st.info("기간(시작~끝)을 선택하세요.")
         return
     s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    cy_cb = int(e.year)   # 2026-08-07 버그수정: 표 연도 라벨을 조회기간 종료일 기준으로 동적 계산
     base = d
     if selb and "브랜드명" in base.columns:
         base = base[base["브랜드명"].isin(selb)]
@@ -1713,11 +1728,11 @@ def render_channel_brand(df):
     #         매장 기준정보 미업로드 시 담당자가 전부 결측이므로 str()로 한 번 더 감싼다.
     chan_mgr = {c: ("" if str(m).strip().lower() in ("nan", "none", "") else str(m).strip())
                 for c, m in zip(_cm["_채널"], _cm["_담당자"])}
-    perf_table(cur, prev, "_채널", None, "유통채널별 매출현황", "cb_ch", extra=("담당자", chan_mgr))
+    perf_table(cur, prev, "_채널", None, "유통채널별 매출현황", "cb_ch", extra=("담당자", chan_mgr), cy=cy_cb)
     st.caption("※ 채널을 자사몰/외부몰 등 그룹으로 묶으려면 '채널 기준정보(매핑)'가 필요해요 — 준비되면 그룹 집계도 추가해드릴게요.")
 
     st.markdown("### B. 브랜드별")
-    perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br")
+    perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br", cy=cy_cb)
 
 
 # ==============================================================================
