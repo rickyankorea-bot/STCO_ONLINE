@@ -712,12 +712,14 @@ _XL_SEASON_SUB = {"Z (공통)", "A (봄)", "B (여름)", "C (가을)", "D (겨�
 _XL_DELTA_SUBS = ("증감율", "증감", "편차")
 
 
-def styled_excel_bytes(disp, sheet="표", first_block_cols=None):
+def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_labels=None):
     """표시용(포맷 문자열) DataFrame을 화면 서식 그대로 엑셀로 변환 (룰13).
 
     화면과 동일: 헤더 회색+볼드, 구분(인덱스) 연회색, 첫 행 노란 강조(G.TOTAL),
     시즌 TOTAL 블루그레이 / 개별 시즌 연블루, 증감·편차 +초록/-빨강, 숫자 우측정렬,
     전셀 얇은 테두리. first_block_cols=첫 기간블록 컬럼 수 → 경계 두꺼운 세로선(룰12).
+    extra_row_labels(2026-08-07 추가)=[라벨, ...]이면 그 행들을 하늘색으로 채움
+    (예: 유통채널별 표의 '담당자별 TOTAL' 행 — 화면(perf_table)과 동일 색).
     """
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -735,6 +737,8 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None):
         gt_fill = PatternFill("solid", fgColor="FFF2B8")
         sg_fill = PatternFill("solid", fgColor="E3ECF7")
         ss_fill = PatternFill("solid", fgColor="F4F8FC")
+        xr_fill = PatternFill("solid", fgColor="D6F0FA")   # 담당자별 TOTAL 등 extra_rows 하늘색
+        _extra_set = set(extra_row_labels or [])
         bcol = (n_idx + first_block_cols + 1) if first_block_cols else None
         subs = [c[-1] if isinstance(c, tuple) else str(c) for c in disp.columns]
 
@@ -745,7 +749,7 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None):
                 cell.fill = head_fill
                 cell.font = Font(bold=True, color="111111")
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-        # 2) 데이터 영역 — 행 성격(첫행 노랑·시즌 블루)과 증감 색
+        # 2) 데이터 영역 — 행 성격(첫행 노랑·시즌 블루·extra 하늘색)과 증감 색
         for ri in range(n_rows):
             r = data_start + ri
             ilab = disp.index[ri]
@@ -756,6 +760,8 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None):
                 fill, bold = sg_fill, True
             elif any(x in _XL_SEASON_SUB for x in labs):
                 fill, bold = ss_fill, False
+            elif any(x in _extra_set for x in labs):
+                fill, bold = xr_fill, False
             else:
                 fill, bold = None, False
             for k in range(1, n_idx + 1):              # 구분(인덱스) 셀
@@ -784,11 +790,11 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None):
     return buf.getvalue()
 
 
-def yoy_excel_bytes(D, sheet="분석", first_block_cols=None):
+def yoy_excel_bytes(D, sheet="분석", first_block_cols=None, extra_row_labels=None):
     disp = D.copy()
     for col in disp.columns:
         disp[col] = [_fmt_cell(col, v) for v in disp[col]]
-    return styled_excel_bytes(disp, sheet, first_block_cols)   # 룰13: 화면 서식 그대로
+    return styled_excel_bytes(disp, sheet, first_block_cols, extra_row_labels)   # 룰13: 화면 서식 그대로
 
 
 # ── 공통(룰11 · 2026-07-31): 모든 조회 표 엑셀 다운로드 기본 제공 ──────────────
@@ -1009,6 +1015,9 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
         # 2026-08-07: extra 컬럼('담당자' 등)이 맨 앞에 삽입돼 있으면 실제 경계선 위치(컬럼
         # 순번)가 1 밀린다 — 안 더해주면 block_border가 블록1 마지막 칸에 선을 그어버린다.
         nblk += 1
+    # 2026-08-07 추가: extra_rows(담당자별 TOTAL 등)로 끼워 넣은 행은 화면·엑셀 모두 하늘색으로
+    # 구분 표시 — 바로 아래 개별 매장행과 헷갈리지 않게. 실제로 D에 남아있는 라벨만 사용.
+    _extra_lbls = [lbl for lbl, _ in extra_rows if lbl in D.index] if extra_rows else []
     h1, h2 = st.columns([4, 1])
     # 2026-08-06 (중태님 컨펌): 제목↔자기표 간격은 좁히고, 이전표↔제목 간격은 넓혀서
     # "이 제목이 바로 아래 표 것"임을 분명하게 함. big_title=True면 글자도 1.5배.
@@ -1026,13 +1035,17 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     else:
         h1.markdown(f"<div class='perf-title' style='{_tstyle}'>{title}{_NOTE_FLOAT}</div>",
                    unsafe_allow_html=True)
-        h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28], first_block_cols=nblk),
+        h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28], first_block_cols=nblk,
+                                                      extra_row_labels=_extra_lbls),
                            file_name=f"{_safe_name(title)[:24]}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key=f"dl_{key}", use_container_width=True)
     sty = style_yoy(D)
     if nblk:
         sty = block_border(sty, nblk)   # 룰12: 당월/연간 경계 두꺼운 선
+    if _extra_lbls:
+        # 담당자별 TOTAL 등 extra_rows 행 — 하늘색으로 개별 매장행과 구분(중태님 요청, 2026-08-07)
+        sty = sty.set_properties(subset=pd.IndexSlice[_extra_lbls, :], **{"background-color": "#d6f0fa"})
     if season_rows:
         render_styled_table(sty, extra_class="erp-season", extra_css=_SEASON_ROW_CSS)
     else:
@@ -1925,9 +1938,12 @@ def render_channel_brand(df):
         _mans = sorted({str(m).strip() for m in d["_담당자"].dropna().astype(str)
                         if str(m).strip() and str(m).strip().lower() not in ("nan", "none")})
         # 260807 추가: 유통채널별 표 미리보기용 '담당자별 TOTAL' 행 스켈레톤(실계산 없음)
+        # ※ '26년 미운영'·'직원구매'는 담당 필터(_mans)엔 남기되, TOTAL 행 스켈레톤에서는 제외
+        #   (실제 조회 시의 _ch_mans 로직과 동일하게 맞춤).
+        _CH_MGR_TOTAL_EXCL = {"26년 미운영", "직원구매"}
         _preview_mgr_rows = [
             (f"{m} TOTAL", (lambda name: (lambda x: x["_담당자"].astype(str).str.strip() == name))(m))
-            for m in _mans]
+            for m in _mans if m not in _CH_MGR_TOTAL_EXCL]
         selb = cb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cb_brand")
         sela = cb2.multiselect("연차별", ages, default=[], placeholder="전체", key="cb_age")
         sels = cb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cb_season")
@@ -1984,8 +2000,12 @@ def render_channel_brand(df):
                 for c, m in zip(_cm["_채널"], _cm["_담당자"])}
     # 260807 추가(중태님 지시): G.TOTAL 아래 '담당자별 TOTAL' 행 삽입 — 현재 조회조건(base)에
     # 매출이 있는 매장의 담당자 전원, 연간누계(cur_y) 매출 큰 순으로 정렬(표 전체 정렬 기준과 통일).
+    # 260807 추가 수정: '26년 미운영'·'직원구매'는 실제 담당자가 아니라 TOTAL 행 자체를 안 보여줌
+    # (해당 매장은 여전히 G.TOTAL·개별 매장행엔 그대로 포함, 담당자별 TOTAL만 제외).
+    _CH_MGR_TOTAL_EXCL = {"26년 미운영", "직원구매"}
     _ch_mans = sorted({str(m).strip() for m in base["_담당자"].dropna().astype(str)
-                       if str(m).strip() and str(m).strip().lower() not in ("nan", "none")})
+                       if str(m).strip() and str(m).strip().lower() not in ("nan", "none")
+                       and str(m).strip() not in _CH_MGR_TOTAL_EXCL})
     if "_담당자" in cur_y.columns and not cur_y.empty:
         _mgr_rev = cur_y.groupby(cur_y["_담당자"].astype(str).str.strip())["_매출액"].sum()
     else:
