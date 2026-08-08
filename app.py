@@ -945,11 +945,12 @@ MENU_DASH = "📊 종합 대시보드"
 MENU_WEEK = "📋 주간회의 보고자료"
 MENU_FLAG = "📅 연차·아이템 세부분석"
 MENU_CHAN = "📈 유통별 세부 분석"
+MENU_CATMIX = "🧵 복종별 판매비중 분석"
 MENU_INV  = "🏷️ 재고 가공"
 MENU_TRND = "📉 추세분석"
 MENU_RTN  = "🔄 반품률 분석"
 MENU_SET  = "🧩 SET/단품 판매 분석"
-MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN,
+MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX,
          MENU_INV, MENU_TRND, MENU_RTN, MENU_SET]
 
 
@@ -2023,6 +2024,255 @@ def render_channel_brand(df):
 
     st.markdown("### B. 브랜드별")
     perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br", cy=cy_cb)
+
+
+# ==============================================================================
+# 복종별 판매비중 분석 (2026-08-08 신규) — 매장별 아이템(복종) 판매 구성비 현황표.
+#   과거 "매장별 아이템 비중 분석"(반자동 Python 스크립트 + 엑셀 3시트 산출물) 프로젝트의 시트1
+#   (원본+집계 데이터 표)만 이식한 것 — 시트2(베스트/워스트 정리)·시트3(매장별 제안 문구)은 이번
+#   범위 밖(중태님 확정, 2026-08-08 "일단 첫번째 시트의 기본 복종별 판매 비중 현황표만").
+#   카테고리 매핑은 그 스크립트의 자체 9분류(CATEGORY_MAP) 대신, 이 ERP의 상품마스터 기반
+#   중카테고리/소카테고리(item_master, get_itemgroup_map 계열)를 그대로 재사용해서 재고 가공·
+#   판매분석 화면과 기준을 통일했다(claude/쇼핑몰재고모니터링_전달사항_260803 원칙과 동일).
+#   색상 규칙(중태님 확정, 2026-08-08):
+#     ① SD065(온라인통합몰) 행 = 주황색 — 다른 매장이 참조하는 비교 기준선이라 항상 눈에 띄게.
+#     ② 복종별 '금액' 열에서 매출 top5 매장(SD065 제외) = 분홍색.
+#     ③ 복종별 '%' 열에서 상위5(SD065 제외) = 빨간색 / 하위5(SD065 제외) = 파란색.
+#        (SD065는 '비교 기준선'이지 순위 경쟁 대상이 아니므로 ②·③ 모두에서 제외한다.)
+#     ④ 기간 합계매출 100만원 미만 매장은 G.TOTAL 합계엔 포함하되 목록에는 표시하지 않음.
+# ==============================================================================
+_CATMIX_SD065 = "SD065"
+_CATMIX_FLOOR = 1_000_000    # 원 단위 — 기간 합계매출 이 미만인 매장은 목록에서 제외(총계엔 포함)
+_CATMIX_PINK = "background-color:#ffd6e8;font-weight:600"    # ② 아이템별 매출 top5(SD065 제외)
+_CATMIX_RED = "background-color:#ffcdd2;font-weight:600"     # ③ 복종 비중 상위5(SD065 제외)
+_CATMIX_BLUE = "background-color:#bbdefb;font-weight:600"    # ③ 복종 비중 하위5(SD065 제외)
+
+
+def _catmix_style(disp, num, sd_label, amt_cols, pct_cols):
+    """복종별 판매비중 표 전용 Styler — 아이템별 top5(분홍)·복종비중 상하위5(빨강/파랑)·SD065(주황).
+
+    disp=화면 표시용(포맷 문자열) DataFrame, num=랭킹 계산용 원본 숫자 DataFrame(동일 index·columns).
+    G.TOTAL·SD065 행은 순위 경쟁(top5/bottom5/분홍)에서 제외한다.
+    """
+    excl = [lbl for lbl in ("G.TOTAL", sd_label) if lbl and lbl in num.index]
+
+    def _pink(col):
+        pool = num[col].drop(index=excl, errors="ignore")
+        top = set(pool[pool > 0].nlargest(5).index)
+        return [_CATMIX_PINK if idx in top else "" for idx in num.index]
+
+    def _redblue(col):
+        pool = num[col].drop(index=excl, errors="ignore")
+        top = set(pool.nlargest(5).index)
+        bot = set(pool.nsmallest(5).index)
+        out = []
+        for idx in num.index:
+            if idx in top:
+                out.append(_CATMIX_RED)
+            elif idx in bot:
+                out.append(_CATMIX_BLUE)
+            else:
+                out.append("")
+        return out
+
+    sty = disp.style
+    for col in amt_cols:
+        sty = sty.apply(lambda s, c=col: _pink(c), subset=pd.IndexSlice[:, [col]])
+    for col in pct_cols:
+        sty = sty.apply(lambda s, c=col: _redblue(c), subset=pd.IndexSlice[:, [col]])
+    if sd_label and sd_label in disp.index:
+        sty = sty.set_properties(subset=pd.IndexSlice[[sd_label], :],
+                                  **{"background-color": "#ffe0b2", "font-weight": "700"})
+    sty = sty.set_properties(**{"text-align": "right"})
+    return sty
+
+
+def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종별판매비중"):
+    """룰13: 화면 서식(G.TOTAL 노랑·SD065 주황·아이템top5 분홍·복종비중 상하위5 빨강파랑) 그대로 엑셀 반영."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        disp.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "표")
+        ws = w.book.worksheets[0]
+        n_idx = disp.index.nlevels
+        n_rows = len(disp)
+        data_start = ws.max_row - n_rows + 1
+        thin = Side(style="thin", color="D9D9D9")
+        head_fill = PatternFill("solid", fgColor="F4F4F6")
+        idx_fill = PatternFill("solid", fgColor="FAFAFA")
+        gt_fill = PatternFill("solid", fgColor="FFF2B8")     # G.TOTAL 노랑
+        sd_fill = PatternFill("solid", fgColor="FFE0B2")     # ① SD065 주황
+        pink_fill = PatternFill("solid", fgColor="FFD6E8")   # ② 아이템별 매출 top5
+        red_fill = PatternFill("solid", fgColor="FFCDD2")    # ③ 복종비중 상위5
+        blue_fill = PatternFill("solid", fgColor="BBDEFB")   # ③ 복종비중 하위5
+
+        excl = [lbl for lbl in ("G.TOTAL", sd_label) if lbl and lbl in num.index]
+        top5_amt = {c: set(num[c].drop(index=excl, errors="ignore").pipe(lambda s: s[s > 0]).nlargest(5).index)
+                    for c in amt_cols}
+        top5_pct = {c: set(num[c].drop(index=excl, errors="ignore").nlargest(5).index) for c in pct_cols}
+        bot5_pct = {c: set(num[c].drop(index=excl, errors="ignore").nsmallest(5).index) for c in pct_cols}
+
+        for r in range(1, data_start):
+            for k in range(1, ws.max_column + 1):
+                cell = ws.cell(r, k)
+                cell.fill = head_fill
+                cell.font = Font(bold=True, color="111111")
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for ri in range(n_rows):
+            r = data_start + ri
+            lbl = disp.index[ri]
+            row_fill, row_bold = None, False
+            if ri == 0:
+                row_fill, row_bold = gt_fill, True
+            elif lbl == sd_label:
+                row_fill, row_bold = sd_fill, True
+            for k in range(1, n_idx + 1):
+                c = ws.cell(r, k)
+                c.fill = row_fill or idx_fill
+                c.font = Font(bold=True, color="111111")
+                c.alignment = Alignment(horizontal="left", vertical="center")
+            for cj, col in enumerate(disp.columns):
+                c = ws.cell(r, n_idx + 1 + cj)
+                c.alignment = Alignment(horizontal="right", vertical="center")
+                cell_fill = row_fill
+                if col in amt_cols and lbl in top5_amt.get(col, ()):
+                    cell_fill = pink_fill
+                elif col in pct_cols and lbl in top5_pct.get(col, ()):
+                    cell_fill = red_fill
+                elif col in pct_cols and lbl in bot5_pct.get(col, ()):
+                    cell_fill = blue_fill
+                if cell_fill:
+                    c.fill = cell_fill
+                if row_bold:
+                    c.font = Font(bold=True, color="111111")
+        for r in range(1, ws.max_row + 1):
+            for k in range(1, ws.max_column + 1):
+                ws.cell(r, k).border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        for k in range(1, ws.max_column + 1):
+            ws.column_dimensions[get_column_letter(k)].width = 14 if k <= n_idx else 11
+    return buf.getvalue()
+
+
+def render_category_mix(df):
+    """🧵 복종별 판매비중 분석 — 매장별 복종(중/소카테고리)별 판매 금액·비중 현황표.
+
+    과거 "매장별 아이템 비중 분석" 프로젝트(엑셀 3시트 산출물)의 시트1(원본+집계 데이터)만 이식한
+    것 — 시트2(베스트/워스트)·시트3(매장별 제안)은 이번 범위 밖(중태님 확정, 2026-08-08).
+    """
+    st.subheader("🧵 복종별 판매비중 분석")
+    if df is None or df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
+        st.info("데이터를 먼저 적재하세요.")
+        return
+    need_cols = {"아이템", "매장코드", "매장명", "_매출액", "_판매일"}
+    if not need_cols.issubset(df.columns):
+        st.info("이 리포트에 필요한 컬럼(아이템·매장코드·매장명 등)이 없어요.")
+        return
+    d = df[df["_판매일"].notna()].copy()
+
+    st.caption("매장별로 어떤 복종(아이템군)의 판매 비중이 높고 낮은지 보여줘요. "
+               "🟧 온라인통합몰(SD065)은 다른 매장이 참조하는 비교 기준선이라 항상 주황색으로 표시돼요. "
+               "🩷 복종별 '금액' 열의 매출 상위 5개 매장(SD065 제외)은 분홍색, "
+               "🔴🔵 '%' 열의 상위 5개는 빨간색·하위 5개는 파란색(둘 다 SD065 제외)으로 표시돼요. "
+               "기간 합계매출 100만원 미만 매장은 총계엔 포함되지만 목록엔 표시하지 않아요.")
+
+    dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
+    default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
+    with st.form("cm_form"):
+        rng = st.date_input("조회기간 (시작일~종료일 직접 지정)", value=(default_start, dmax),
+                            min_value=dmin, max_value=dmax, key="cm_rng")
+        cm0, cm1, cm2, cm3 = st.columns([1.2, 1, 1, 1])
+        level = cm0.radio("카테고리 기준", CATMIX_CAT_LEVELS, horizontal=True, key="cm_level")
+        # 공통룰10 — 브랜드별/연차별/시즌별, 빈칸=전체
+        brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
+        ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
+        seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
+        selb = cm1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cm_brand")
+        sela = cm2.multiselect("연차별", ages, default=[], placeholder="전체", key="cm_age")
+        sels = cm3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cm_season")
+        run = st.form_submit_button("🔍 조회", type="primary")
+    if _need_search("cm_go", run):
+        return
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
+        return
+    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    if e < s:
+        st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
+        return
+
+    base = d[(d["_판매일"] >= s) & (d["_판매일"] <= e)]
+    if selb and "브랜드명" in base.columns:
+        base = base[base["브랜드명"].isin(selb)]
+    if sela and "연차" in base.columns:
+        base = base[base["연차"].isin(sela)]
+    if sels and "시즌명" in base.columns:
+        base = base[base["시즌명"].isin(sels)]
+    if base.empty:
+        st.info("선택한 조건에 매출 데이터가 없어요.")
+        return
+
+    cat_map = get_itemgroup_map() if level == "중카테고리" else get_itemgroup_map_small()
+    base = base.assign(_복종=base["아이템"].astype(str).str.strip().str.upper().map(cat_map).fillna("기타"))
+
+    store_tot = base.groupby(["매장코드", "매장명"])["_매출액"].sum().rename("합계").reset_index()
+    shown = store_tot[store_tot["합계"] >= _CATMIX_FLOOR].copy()
+    hidden_n = len(store_tot) - len(shown)
+    if shown.empty:
+        st.info("기간 합계매출 100만원 이상인 매장이 없어요.")
+        return
+    shown = shown.sort_values("합계", ascending=False).reset_index(drop=True)
+    shown["순위"] = shown.index + 1
+
+    piv = base.pivot_table(index="매장코드", columns="_복종", values="_매출액", aggfunc="sum", fill_value=0.0)
+    cats = piv.sum(axis=0).sort_values(ascending=False).index.tolist()
+    piv = piv.reindex(columns=cats, fill_value=0.0)
+    amt_cols = [f"{c} 금액(백만)" for c in cats]
+    pct_cols = [f"{c} %" for c in cats]
+
+    def _row(cat_amt, total, code_disp, rank_val):
+        out = {"매장코드": code_disp, "합계(백만)": total / 1e6, "순위": rank_val}
+        for c in cats:
+            a = float(cat_amt.get(c, 0.0))
+            out[f"{c} 금액(백만)"] = a / 1e6
+            out[f"{c} %"] = (a / total * 100) if total else 0.0
+        return out
+
+    rows, index = [], []
+    total_amt_all = float(store_tot["합계"].sum())
+    rows.append(_row(piv.sum(axis=0), total_amt_all, "", None))
+    index.append("G.TOTAL")
+    for _, r in shown.iterrows():
+        code = r["매장코드"]
+        cat_amt = piv.loc[code] if code in piv.index else pd.Series(0.0, index=cats)
+        rows.append(_row(cat_amt, float(r["합계"]), code, int(r["순위"])))
+        index.append(r["매장명"])
+    num = pd.DataFrame(rows, index=index)
+    num.index.name = "매장명"
+
+    sd_row = shown[shown["매장코드"].astype(str).str.strip().str.upper() == _CATMIX_SD065]
+    sd_label = sd_row.iloc[0]["매장명"] if not sd_row.empty else None
+
+    disp = num.copy()
+    disp["합계(백만)"] = num["합계(백만)"].map(lambda v: f"{v:,.1f}")
+    disp["순위"] = num["순위"].map(lambda v: "–" if pd.isna(v) else f"{int(v)}")
+    for c in amt_cols:
+        disp[c] = num[c].map(lambda v: f"{v:,.1f}")
+    for c in pct_cols:
+        disp[c] = num[c].map(lambda v: f"{v:.1f}%")
+
+    h1, h2 = st.columns([4, 1])
+    h1.markdown(f"### 매장별 복종({level}) 판매비중{_NOTE_FLOAT}", unsafe_allow_html=True)
+    h2.download_button("⬇ 엑셀", _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num,
+                                                       sheet=f"복종별판매비중_{level}"),
+                       file_name=f"복종별판매비중_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
+                       key="cm_dl", use_container_width=True)
+    sty = _catmix_style(disp, num, sd_label, amt_cols, pct_cols)
+    render_styled_table(sty)
+    st.caption(f"※ 매장 {len(shown)}개 표시(기간 합계매출 100만원 미만 {hidden_n}개 매장은 총계엔 "
+               "포함되지만 목록에서는 제외) · 순위=표시된 매장 안에서 매출 큰 순 · "
+               "복종 열은 총매출 큰 순으로 정렬돼요.")
 
 
 # ==============================================================================
@@ -3151,6 +3401,27 @@ def get_itemgroup_map():
         elif rec["mid"]:
             out[code] = rec["mid"]
     return out
+
+
+# 복종별 판매비중 분석(2026-08-08) 전용 소카테고리 맵 — get_itemgroup_map()(중카테고리)과 짝을 이룬다.
+# 아이템 마스터의 small 필드 우선, 없으면 중카테고리 값을 그대로 대신 사용(재고모니터링의
+# _inv_cat_small_lookup과 동일한 폴백 원칙 — 소카테고리가 따로 없는 코드는 최선 근사치로 보여줌).
+@st.cache_data(ttl=21600)
+def get_itemgroup_map_small():
+    m = load_item_master()
+    out = dict(get_itemgroup_map())  # 폴백: 마스터에 없거나 small이 비어있으면 중카테고리 값 사용
+    for code, rec in m.items():
+        if code in _ITEMGROUP_OVERRIDE_SPLIT:
+            out[code] = _ITEMGROUP_OVERRIDE_SPLIT[code]
+        elif rec["small"]:
+            out[code] = rec["small"]
+        elif rec["mid"]:
+            out[code] = rec["mid"]
+    return out
+
+
+# 복종별 판매비중 분석 카테고리 기준 — 중카테고리(기본)/소카테고리 중 선택.
+CATMIX_CAT_LEVELS = ["중카테고리", "소카테고리"]
 
 
 def _inv_peek_seasons(raw_file):
@@ -5867,7 +6138,7 @@ def main():
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
             load_db.clear(); load_master.clear(); load_plan.clear()
             load_size_master.clear(); load_item_master.clear(); load_weather.clear()
-            get_itemgroup_map.clear(); _trend_cat_maps.clear()
+            get_itemgroup_map.clear(); get_itemgroup_map_small.clear(); _trend_cat_maps.clear()
             st.rerun()
 
         # ── 조회 메뉴 (탭 대체) ──────────────────────────────────────
@@ -6009,6 +6280,8 @@ def main():
         render_flagship(df)
     elif menu == MENU_CHAN:
         render_channel_brand(df)
+    elif menu == MENU_CATMIX:
+        render_category_mix(df)
     elif menu == MENU_INV:
         render_inventory()
     elif menu == MENU_TRND:
