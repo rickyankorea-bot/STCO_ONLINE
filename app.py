@@ -2027,7 +2027,7 @@ def render_channel_brand(df):
 
 
 # ==============================================================================
-# 복종별 판매비중 분석 (2026-08-08 신규) — 매장별 아이템(복종) 판매 구성비 현황표.
+# 복종별 판매비중 분석 (2026-08-08 신규, 같은 날 수정1~3) — 매장별 아이템(복종) 판매 구성비 현황표.
 #   과거 "매장별 아이템 비중 분석"(반자동 Python 스크립트 + 엑셀 3시트 산출물) 프로젝트의 시트1
 #   (원본+집계 데이터 표)만 이식한 것 — 시트2(베스트/워스트 정리)·시트3(매장별 제안 문구)은 이번
 #   범위 밖(중태님 확정, 2026-08-08 "일단 첫번째 시트의 기본 복종별 판매 비중 현황표만").
@@ -2036,30 +2036,42 @@ def render_channel_brand(df):
 #   판매분석 화면과 기준을 통일했다(claude/쇼핑몰재고모니터링_전달사항_260803 원칙과 동일).
 #   색상 규칙(중태님 확정, 2026-08-08):
 #     ① SD065(온라인통합몰) 행 = 주황색 — 다른 매장이 참조하는 비교 기준선이라 항상 눈에 띄게.
-#     ② 복종별 '금액' 열에서 매출 top5 매장(SD065 제외) = 분홍색.
-#     ③ 복종별 '%' 열에서 상위5(SD065 제외) = 빨간색 / 하위5(SD065 제외) = 파란색.
-#        (SD065는 '비교 기준선'이지 순위 경쟁 대상이 아니므로 ②·③ 모두에서 제외한다.)
+#     ② 복종별 '금액' 열에서 매출 top5 매장(SD065·매장담당별평균 제외) = 녹색.
+#     ③ 복종별 '%' 열에서 상위5(SD065·매장담당별평균 제외) = 빨간색 / 하위5(동일 제외) = 파란색.
+#        (SD065·매장담당별평균은 '비교 기준선'이지 순위 경쟁 대상이 아니므로 ②·③ 모두에서 제외.)
 #     ④ 기간 합계매출 100만원 미만 매장은 G.TOTAL 합계엔 포함하되 목록에는 표시하지 않음.
+#   같은 날 후속 수정 3건(중태님):
+#     [수정1] 복종 '금액' 열 헤더를 "슈트류 금액(백만)" → "슈트류"로 간결화(단위는 표 제목 옆
+#             [금액: 백만원 / VAT+] 표기로 이미 안내됨).
+#     [수정2] G.TOTAL과 개별 매장행 사이에 '{담당자} 평균' 행을 담당자마다 하나씩 삽입 — 그
+#             담당자가 맡은 매장(표시 대상 중) 평균값. 하늘색(#d6f0fa, 유통별 세부분석의
+#             담당자별 TOTAL 행과 동일 색)으로 구분, 순위 경쟁(①·②·③)에서는 제외.
+#     [수정3] 복종(금액·% 2열 묶음) 사이 경계에 진한 회색 세로선을 넣어 복종별 구분을 명확히
+#             (기존 block_border 재사용 — 룰12와 동일 메커니즘, 복종 수만큼 반복 호출).
 # ==============================================================================
 _CATMIX_SD065 = "SD065"
 _CATMIX_FLOOR = 1_000_000    # 원 단위 — 기간 합계매출 이 미만인 매장은 목록에서 제외(총계엔 포함)
-_CATMIX_PINK = "background-color:#ffd6e8;font-weight:600"    # ② 아이템별 매출 top5(SD065 제외)
-_CATMIX_RED = "background-color:#ffcdd2;font-weight:600"     # ③ 복종 비중 상위5(SD065 제외)
-_CATMIX_BLUE = "background-color:#bbdefb;font-weight:600"    # ③ 복종 비중 하위5(SD065 제외)
+_CATMIX_GREEN = "background-color:#c8e6c9;font-weight:600"   # ② 아이템별 매출 top5
+_CATMIX_RED = "background-color:#ffcdd2;font-weight:600"     # ③ 복종 비중 상위5
+_CATMIX_BLUE = "background-color:#bbdefb;font-weight:600"    # ③ 복종 비중 하위5
+_CATMIX_MGR_BG = "#d6f0fa"    # 수정2: 매장담당별 평균 행 — 유통별 세부분석의 담당자별 TOTAL과 동일 색
 
 
-def _catmix_style(disp, num, sd_label, amt_cols, pct_cols):
-    """복종별 판매비중 표 전용 Styler — 아이템별 top5(분홍)·복종비중 상하위5(빨강/파랑)·SD065(주황).
+def _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=None, n_meta=3):
+    """복종별 판매비중 표 전용 Styler — 아이템별 top5(녹색)·복종비중 상하위5(빨강/파랑)·SD065(주황)·
+    매장담당별 평균(하늘색, 수정2) · 복종 사이 진한 회색 구분선(수정3).
 
     disp=화면 표시용(포맷 문자열) DataFrame, num=랭킹 계산용 원본 숫자 DataFrame(동일 index·columns).
-    G.TOTAL·SD065 행은 순위 경쟁(top5/bottom5/분홍)에서 제외한다.
+    G.TOTAL·SD065·매장담당별 평균 행은 순위 경쟁(top5/bottom5/녹색)에서 제외한다.
+    n_meta=매장코드·합계·순위 등 복종 앞에 오는 메타 컬럼 수(복종 구분선 위치 계산용).
     """
-    excl = [lbl for lbl in ("G.TOTAL", sd_label) if lbl and lbl in num.index]
+    mgr_labels = mgr_labels or []
+    excl = [lbl for lbl in (["G.TOTAL", sd_label] + list(mgr_labels)) if lbl and lbl in num.index]
 
-    def _pink(col):
+    def _green(col):
         pool = num[col].drop(index=excl, errors="ignore")
         top = set(pool[pool > 0].nlargest(5).index)
-        return [_CATMIX_PINK if idx in top else "" for idx in num.index]
+        return [_CATMIX_GREEN if idx in top else "" for idx in num.index]
 
     def _redblue(col):
         pool = num[col].drop(index=excl, errors="ignore")
@@ -2077,20 +2089,30 @@ def _catmix_style(disp, num, sd_label, amt_cols, pct_cols):
 
     sty = disp.style
     for col in amt_cols:
-        sty = sty.apply(lambda s, c=col: _pink(c), subset=pd.IndexSlice[:, [col]])
+        sty = sty.apply(lambda s, c=col: _green(c), subset=pd.IndexSlice[:, [col]])
     for col in pct_cols:
         sty = sty.apply(lambda s, c=col: _redblue(c), subset=pd.IndexSlice[:, [col]])
+    _mgr_in = [lbl for lbl in mgr_labels if lbl in disp.index]
+    if _mgr_in:
+        # 수정2: 매장담당별 평균 행 — 유통별 세부분석의 담당자별 TOTAL과 동일하게 하늘색만(볼드 없음)
+        sty = sty.set_properties(subset=pd.IndexSlice[_mgr_in, :], **{"background-color": _CATMIX_MGR_BG})
     if sd_label and sd_label in disp.index:
         sty = sty.set_properties(subset=pd.IndexSlice[[sd_label], :],
                                   **{"background-color": "#ffe0b2", "font-weight": "700"})
     sty = sty.set_properties(**{"text-align": "right"})
+    # 수정3: 복종(금액·% 2열 묶음) 사이 경계에 진한 회색 세로선 — 메타 컬럼 뒤부터 복종마다 반복
+    for i in range(len(amt_cols)):
+        sty = block_border(sty, n_meta + 2 * i)
     return sty
 
 
-def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종별판매비중"):
-    """룰13: 화면 서식(G.TOTAL 노랑·SD065 주황·아이템top5 분홍·복종비중 상하위5 빨강파랑) 그대로 엑셀 반영."""
+def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종별판매비중",
+                         mgr_labels=None, n_meta=3):
+    """룰13: 화면 서식(G.TOTAL 노랑·SD065 주황·담당별평균 하늘색·아이템top5 녹색·복종비중 상하위5
+    빨강파랑·복종 구분 진한 회색 세로선) 그대로 엑셀 반영."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
+    mgr_labels = mgr_labels or []
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         disp.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "표")
@@ -2099,19 +2121,23 @@ def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종�
         n_rows = len(disp)
         data_start = ws.max_row - n_rows + 1
         thin = Side(style="thin", color="D9D9D9")
+        thick = Side(style="medium", color="555555")   # 수정3: 복종 구분 진한 회색 세로선
         head_fill = PatternFill("solid", fgColor="F4F4F6")
         idx_fill = PatternFill("solid", fgColor="FAFAFA")
         gt_fill = PatternFill("solid", fgColor="FFF2B8")     # G.TOTAL 노랑
         sd_fill = PatternFill("solid", fgColor="FFE0B2")     # ① SD065 주황
-        pink_fill = PatternFill("solid", fgColor="FFD6E8")   # ② 아이템별 매출 top5
+        mgr_fill = PatternFill("solid", fgColor="D6F0FA")    # 수정2: 매장담당별 평균 하늘색
+        green_fill = PatternFill("solid", fgColor="C8E6C9")  # ② 아이템별 매출 top5
         red_fill = PatternFill("solid", fgColor="FFCDD2")    # ③ 복종비중 상위5
         blue_fill = PatternFill("solid", fgColor="BBDEFB")   # ③ 복종비중 하위5
 
-        excl = [lbl for lbl in ("G.TOTAL", sd_label) if lbl and lbl in num.index]
+        _mgr_set = set(mgr_labels)
+        excl = [lbl for lbl in (["G.TOTAL", sd_label] + list(mgr_labels)) if lbl and lbl in num.index]
         top5_amt = {c: set(num[c].drop(index=excl, errors="ignore").pipe(lambda s: s[s > 0]).nlargest(5).index)
                     for c in amt_cols}
         top5_pct = {c: set(num[c].drop(index=excl, errors="ignore").nlargest(5).index) for c in pct_cols}
         bot5_pct = {c: set(num[c].drop(index=excl, errors="ignore").nsmallest(5).index) for c in pct_cols}
+        bcols = {n_idx + (n_meta + 2 * i) + 1 for i in range(len(amt_cols))}   # 수정3: 진한 세로선 절대열번호
 
         for r in range(1, data_start):
             for k in range(1, ws.max_column + 1):
@@ -2126,6 +2152,8 @@ def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종�
             row_fill, row_bold = None, False
             if ri == 0:
                 row_fill, row_bold = gt_fill, True
+            elif lbl in _mgr_set:
+                row_fill, row_bold = mgr_fill, False
             elif lbl == sd_label:
                 row_fill, row_bold = sd_fill, True
             for k in range(1, n_idx + 1):
@@ -2138,7 +2166,7 @@ def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종�
                 c.alignment = Alignment(horizontal="right", vertical="center")
                 cell_fill = row_fill
                 if col in amt_cols and lbl in top5_amt.get(col, ()):
-                    cell_fill = pink_fill
+                    cell_fill = green_fill
                 elif col in pct_cols and lbl in top5_pct.get(col, ()):
                     cell_fill = red_fill
                 elif col in pct_cols and lbl in bot5_pct.get(col, ()):
@@ -2149,7 +2177,8 @@ def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종�
                     c.font = Font(bold=True, color="111111")
         for r in range(1, ws.max_row + 1):
             for k in range(1, ws.max_column + 1):
-                ws.cell(r, k).border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                ws.cell(r, k).border = Border(left=(thick if k in bcols else thin),
+                                               right=thin, top=thin, bottom=thin)
         for k in range(1, ws.max_column + 1):
             ws.column_dimensions[get_column_letter(k)].width = 14 if k <= n_idx else 11
     return buf.getvalue()
@@ -2173,9 +2202,10 @@ def render_category_mix(df):
 
     st.caption("매장별로 어떤 복종(아이템군)의 판매 비중이 높고 낮은지 보여줘요. "
                "🟧 온라인통합몰(SD065)은 다른 매장이 참조하는 비교 기준선이라 항상 주황색으로 표시돼요. "
-               "🩷 복종별 '금액' 열의 매출 상위 5개 매장(SD065 제외)은 분홍색, "
-               "🔴🔵 '%' 열의 상위 5개는 빨간색·하위 5개는 파란색(둘 다 SD065 제외)으로 표시돼요. "
-               "기간 합계매출 100만원 미만 매장은 총계엔 포함되지만 목록엔 표시하지 않아요.")
+               "🟦 G.TOTAL 바로 아래엔 매장담당별 평균(하늘색)이 담당자마다 한 행씩 나와요. "
+               "🟢 복종별 '금액' 열의 매출 상위 5개 매장(SD065·담당별평균 제외)은 녹색, "
+               "🔴🔵 '%' 열의 상위 5개는 빨간색·하위 5개는 파란색(둘 다 SD065·담당별평균 제외)으로 "
+               "표시돼요. 기간 합계매출 100만원 미만 매장은 총계엔 포함되지만 목록엔 표시하지 않아요.")
 
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
@@ -2225,17 +2255,30 @@ def render_category_mix(df):
     shown = shown.sort_values("합계", ascending=False).reset_index(drop=True)
     shown["순위"] = shown.index + 1
 
+    # 수정2: 매장담당별 평균 — 매장 기준정보(담당자)와 매칭, 표시 대상(shown) 매장만 대상으로 그룹평균
+    master = load_master()
+    if not master.empty and "담당자" in master.columns:
+        _mgr_map = dict(zip(master["매장코드"].astype(str).str.strip(),
+                            master["담당자"].astype(str).str.strip()))
+        shown["_담당자"] = shown["매장코드"].astype(str).str.strip().map(_mgr_map)
+        shown["_담당자"] = shown["_담당자"].where(
+            shown["_담당자"].notna() & shown["_담당자"].str.strip().ne("")
+            & ~shown["_담당자"].str.lower().isin(["nan", "none"]), None)
+    else:
+        shown["_담당자"] = None
+
     piv = base.pivot_table(index="매장코드", columns="_복종", values="_매출액", aggfunc="sum", fill_value=0.0)
     cats = piv.sum(axis=0).sort_values(ascending=False).index.tolist()
     piv = piv.reindex(columns=cats, fill_value=0.0)
-    amt_cols = [f"{c} 금액(백만)" for c in cats]
+    amt_cols = list(cats)              # 수정1: "{복종} 금액(백만)" → "{복종}"으로 간결화
     pct_cols = [f"{c} %" for c in cats]
+    n_meta = 3    # 매장코드·합계(백만)·순위 — 복종 구분선(수정3) 위치 계산용
 
     def _row(cat_amt, total, code_disp, rank_val):
         out = {"매장코드": code_disp, "합계(백만)": total / 1e6, "순위": rank_val}
         for c in cats:
             a = float(cat_amt.get(c, 0.0))
-            out[f"{c} 금액(백만)"] = a / 1e6
+            out[c] = a / 1e6
             out[f"{c} %"] = (a / total * 100) if total else 0.0
         return out
 
@@ -2243,6 +2286,19 @@ def render_category_mix(df):
     total_amt_all = float(store_tot["합계"].sum())
     rows.append(_row(piv.sum(axis=0), total_amt_all, "", None))
     index.append("G.TOTAL")
+
+    # 수정2: 매장담당별 평균 행 — G.TOTAL 바로 아래, 개별 매장행 위. 평균 합계 큰 순 정렬.
+    mgr_labels = []
+    if shown["_담당자"].notna().any():
+        mgr_avg_tot = shown.groupby("_담당자")["합계"].mean().sort_values(ascending=False)
+        for mgr, avg_tot in mgr_avg_tot.items():
+            codes = shown.loc[shown["_담당자"] == mgr, "매장코드"]
+            cat_amt_avg = piv.reindex(codes).fillna(0.0)[cats].mean(axis=0)
+            lbl = f"{mgr} 평균"
+            rows.append(_row(cat_amt_avg, float(avg_tot), "", None))
+            index.append(lbl)
+            mgr_labels.append(lbl)
+
     for _, r in shown.iterrows():
         code = r["매장코드"]
         cat_amt = piv.loc[code] if code in piv.index else pd.Series(0.0, index=cats)
@@ -2265,14 +2321,17 @@ def render_category_mix(df):
     h1, h2 = st.columns([4, 1])
     h1.markdown(f"### 매장별 복종({level}) 판매비중{_NOTE_FLOAT}", unsafe_allow_html=True)
     h2.download_button("⬇ 엑셀", _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num,
-                                                       sheet=f"복종별판매비중_{level}"),
+                                                       sheet=f"복종별판매비중_{level}",
+                                                       mgr_labels=mgr_labels, n_meta=n_meta),
                        file_name=f"복종별판매비중_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
                        key="cm_dl", use_container_width=True)
-    sty = _catmix_style(disp, num, sd_label, amt_cols, pct_cols)
+    sty = _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=mgr_labels, n_meta=n_meta)
     render_styled_table(sty)
+    _mgr_note = (f" · 매장담당별 평균 {len(mgr_labels)}명(하늘색, 표시된 매장 기준)" if mgr_labels
+                 else " · 매장 기준정보(담당자)가 없어 매장담당별 평균은 표시되지 않았어요")
     st.caption(f"※ 매장 {len(shown)}개 표시(기간 합계매출 100만원 미만 {hidden_n}개 매장은 총계엔 "
                "포함되지만 목록에서는 제외) · 순위=표시된 매장 안에서 매출 큰 순 · "
-               "복종 열은 총매출 큰 순으로 정렬돼요.")
+               "복종 열은 총매출 큰 순으로 정렬돼요" + _mgr_note + ".")
 
 
 # ==============================================================================
