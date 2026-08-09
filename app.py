@@ -2048,6 +2048,17 @@ def render_channel_brand(df):
 #             담당자별 TOTAL 행과 동일 색)으로 구분, 순위 경쟁(①·②·③)에서는 제외.
 #     [수정3] 복종(금액·% 2열 묶음) 사이 경계에 진한 회색 세로선을 넣어 복종별 구분을 명확히
 #             (기존 block_border 재사용 — 룰12와 동일 메커니즘, 복종 수만큼 반복 호출).
+#     [수정4] 위 ②(아이템별 매출 top5) 강조색을 분홍 → 녹색으로 변경(2026-08-09).
+#   2026-08-09 추가 수정 2건:
+#     [수정5] '%' 열 헤더를 "슈트류 %"처럼 복종명을 붙이지 않고 그냥 "%"로 간결화 — 표1·표2(아래
+#             신규 YoY 표) 둘 다 적용. 내부 컬럼명(랭킹·구분선 계산에 쓰는 실제 키)은 그대로 두고
+#             Styler.format_index()/엑셀 헤더 셀 값만 표시용으로 바꿔치기(로직에 영향 없음).
+#     [수정6] "담당별 전년대비 복종 비중 변화" 표 신규 — 표1과 동일한 행 구성(G.TOTAL·매장담당별
+#             평균·SD065·개별 매장)을 "{전년} 라벨"/"{올해} 라벨"/"ㄴ증감" 3행씩 쌓아 전년 동기간
+#             대비 변화를 보여줌. 전년 동기간=조회기간을 그대로 1년 시프트(이 앱의 기존 YoY 관행과
+#             동일). ㄴ증감 행: 합계·복종 금액 열=증감액(백만) (증감율%) 둘 다 표기, %열=%p 차이,
+#             양수 초록/음수 빨강(이 앱의 기존 증감 색 관행과 동일). 순위는 연도별로 그 해 자체
+#             매출 100만원 이상 매장 모집단 안에서 따로 계산(전년에 데이터 없으면 "–").
 # ==============================================================================
 _CATMIX_SD065 = "SD065"
 _CATMIX_FLOOR = 1_000_000    # 원 단위 — 기간 합계매출 이 미만인 매장은 목록에서 제외(총계엔 포함)
@@ -2103,6 +2114,9 @@ def _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=None, n_me
     # 수정3: 복종(금액·% 2열 묶음) 사이 경계에 진한 회색 세로선 — 메타 컬럼 뒤부터 복종마다 반복
     for i in range(len(amt_cols)):
         sty = block_border(sty, n_meta + 2 * i)
+    # 수정5: '%' 열 헤더를 "슈트류 %" → "%"로 간결화(내부 컬럼명은 그대로 유지 — 랭킹·구분선 계산에 영향 없음)
+    _pct_set = set(pct_cols)
+    sty = sty.format_index(lambda c: "%" if c in _pct_set else c, axis=1)
     return sty
 
 
@@ -2145,6 +2159,11 @@ def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종�
                 cell.fill = head_fill
                 cell.font = Font(bold=True, color="111111")
                 cell.alignment = Alignment(horizontal="center", vertical="center")
+        # 수정5: '%' 열 헤더 셀 텍스트를 "슈트류 %" → "%"로 간결화(화면과 동일)
+        _pct_set = set(pct_cols)
+        for cj, col in enumerate(disp.columns):
+            if col in _pct_set:
+                ws.cell(data_start - 1, n_idx + 1 + cj).value = "%"
 
         for ri in range(n_rows):
             r = data_start + ri
@@ -2181,6 +2200,139 @@ def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종�
                                                right=thin, top=thin, bottom=thin)
         for k in range(1, ws.max_column + 1):
             ws.column_dimensions[get_column_letter(k)].width = 14 if k <= n_idx else 11
+    return buf.getvalue()
+
+
+# ── 담당별 전년대비 복종 비중 변화 (2026-08-09 신규, [수정5][수정6]) ──────────────
+# 표1(복종별 판매비중)과 같은 행 구성(G.TOTAL·매장담당별 평균·SD065·개별 매장)이되, 각 행을
+# "{전년} {라벨}" / "{올해} {라벨}" / "ㄴ증감" 3개 행으로 쌓아 전년 동기간 대비 변화를 보여준다.
+# 전년 동기간 = 기존 앱 전역 관행과 동일(예: render_channel_brand)하게 s−1년~e−1년으로 계산.
+# ⚠ pandas Styler.apply/.map은 "인덱스(행 라벨)가 유일하지 않으면" 에러를 낸다(KeyError) — 그런데
+#   'ㄴ증감' 라벨은 매장/담당자 수만큼 반복돼 그 자체로는 유일하지 않다. 그래서 내부적으로는
+#   f"{_CATMIX_DIFF_PREFIX}{매장명}"처럼 매장명을 붙여 유일한 키로 쓰고, 화면 표시만
+#   format_index()로 "ㄴ증감"으로 통일해 보여준다(엑셀도 동일 방식으로 헤더 텍스트만 치환).
+_CATMIX_DIFF_LABEL = "ㄴ증감"
+_CATMIX_DIFF_PREFIX = "ㄴ증감__"
+
+
+def _catmix_yoy_style(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_cols, pct_cols, n_meta=3):
+    """담당별 전년대비 복종 비중 변화 표 전용 Styler.
+
+    disp2=표시용(포맷 문자열), sign2=증감 부호 판정용 원본 숫자(ㄴ증감 행만 값 있음, 나머진 NaN).
+    disp2.index의 ㄴ증감 행은 내부적으로 f"ㄴ증감__{매장명}"(유일 키) — 화면엔 format_index로
+    "ㄴ증감"만 보임. G.TOTAL/SD065/매장담당별 평균 행은 연도 쌍(전년·올해) 모두 표1과 동일 배경색,
+    ㄴ증감 행은 양수=초록/음수=빨강(이 앱의 기존 증감 색 관행과 동일) + 행 라벨 자체는 옅은 빨강
+    이탤릭으로 구분.
+    """
+    sty = disp2.style
+
+    def _delta_color(col):
+        vals = sign2[col]
+        out = []
+        for v in vals:
+            if pd.isna(v) or v == 0:
+                out.append("")
+            elif v > 0:
+                out.append("color:#1f8a4c;font-weight:700")
+            else:
+                out.append("color:#c62828;font-weight:700")
+        return out
+
+    for col in ["합계(백만)"] + amt_cols + pct_cols:
+        sty = sty.apply(lambda s, c=col: _delta_color(c), subset=pd.IndexSlice[:, [col]])
+    if gt_labels:
+        sty = sty.set_properties(subset=pd.IndexSlice[gt_labels, :],
+                                  **{"background-color": "#fff2b8", "font-weight": "700"})
+    if sd_labels:
+        sty = sty.set_properties(subset=pd.IndexSlice[sd_labels, :],
+                                  **{"background-color": "#ffe0b2", "font-weight": "700"})
+    if mgr_labels:
+        sty = sty.set_properties(subset=pd.IndexSlice[mgr_labels, :],
+                                  **{"background-color": _CATMIX_MGR_BG})
+    sty = sty.set_properties(**{"text-align": "right"})
+    for i in range(len(amt_cols)):
+        sty = block_border(sty, n_meta + 2 * i)
+    _pct_set = set(pct_cols)
+    sty = sty.format_index(lambda c: "%" if c in _pct_set else c, axis=1)      # 수정5
+    # 행 라벨(인덱스) 셀만 스타일/치환 — map_index·format_index는 데이터 셀(td)엔 영향 없어
+    # 위 증감 색과 안 섞인다. 유일 키(ㄴ증감__매장명)를 화면엔 "ㄴ증감"으로만 보이게 함.
+    sty = sty.map_index(lambda v: ("color:#c0392b;font-style:italic;font-weight:600"
+                                    if str(v).startswith(_CATMIX_DIFF_PREFIX) else ""), axis=0)
+    sty = sty.format_index(lambda v: (_CATMIX_DIFF_LABEL if str(v).startswith(_CATMIX_DIFF_PREFIX) else v),
+                            axis=0)
+    return sty
+
+
+def _catmix_yoy_excel_bytes(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_cols, pct_cols,
+                             sheet="복종비중YoY", n_meta=3):
+    """룰13: 화면 서식(G.TOTAL·SD065·담당별평균 배경 + ㄴ증감 행 +초록/-빨강 + 복종 구분 세로선 +
+    % 헤더 간결화) 그대로 엑셀 반영."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        disp2.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "표")
+        ws = w.book.worksheets[0]
+        n_idx = disp2.index.nlevels
+        n_rows = len(disp2)
+        data_start = ws.max_row - n_rows + 1
+        thin = Side(style="thin", color="D9D9D9")
+        thick = Side(style="medium", color="555555")
+        head_fill = PatternFill("solid", fgColor="F4F4F6")
+        idx_fill = PatternFill("solid", fgColor="FAFAFA")
+        gt_fill = PatternFill("solid", fgColor="FFF2B8")
+        sd_fill = PatternFill("solid", fgColor="FFE0B2")
+        mgr_fill = PatternFill("solid", fgColor="D6F0FA")
+        gt_set, sd_set, mgr_set = set(gt_labels or []), set(sd_labels or []), set(mgr_labels or [])
+        delta_cols = set(["합계(백만)"] + amt_cols + pct_cols)
+        pct_set = set(pct_cols)
+        bcols = {n_idx + (n_meta + 2 * i) + 1 for i in range(len(amt_cols))}
+
+        hdr_r = data_start - 1
+        for k in range(1, ws.max_column + 1):
+            cell = ws.cell(hdr_r, k)
+            cell.fill = head_fill
+            cell.font = Font(bold=True, color="111111")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for cj, col in enumerate(disp2.columns):     # 수정5: % 헤더 간결화
+            if col in pct_set:
+                ws.cell(hdr_r, n_idx + 1 + cj).value = "%"
+
+        for ri in range(n_rows):
+            r = data_start + ri
+            lbl = disp2.index[ri]
+            is_diff = str(lbl).startswith(_CATMIX_DIFF_PREFIX)
+            row_fill, row_bold = None, False
+            if lbl in gt_set:
+                row_fill, row_bold = gt_fill, True
+            elif lbl in sd_set:
+                row_fill, row_bold = sd_fill, True
+            elif lbl in mgr_set:
+                row_fill, row_bold = mgr_fill, False
+            for k in range(1, n_idx + 1):
+                c = ws.cell(r, k)
+                c.fill = row_fill or idx_fill
+                c.font = Font(bold=True, color=("C0392B" if is_diff else "111111"), italic=is_diff)
+                c.alignment = Alignment(horizontal="left", vertical="center")
+                if is_diff:      # 유일 키(ㄴ증감__매장명) 대신 화면과 동일하게 "ㄴ증감"만 표시
+                    c.value = _CATMIX_DIFF_LABEL
+            for cj, col in enumerate(disp2.columns):
+                c = ws.cell(r, n_idx + 1 + cj)
+                c.alignment = Alignment(horizontal="right", vertical="center")
+                if row_fill:
+                    c.fill = row_fill
+                if is_diff and col in delta_cols:
+                    sv = sign2.iloc[ri][col] if col in sign2.columns else None
+                    if pd.notna(sv) and sv != 0:
+                        c.font = Font(bold=True, color=("1F8A4C" if sv > 0 else "C62828"))
+                elif row_bold:
+                    c.font = Font(bold=True, color="111111")
+        for r in range(1, ws.max_row + 1):
+            for k in range(1, ws.max_column + 1):
+                ws.cell(r, k).border = Border(left=(thick if k in bcols else thin),
+                                               right=thin, top=thin, bottom=thin)
+        for k in range(1, ws.max_column + 1):
+            ws.column_dimensions[get_column_letter(k)].width = 14 if k <= n_idx else 12
     return buf.getvalue()
 
 
@@ -2288,16 +2440,18 @@ def render_category_mix(df):
     index.append("G.TOTAL")
 
     # 수정2: 매장담당별 평균 행 — G.TOTAL 바로 아래, 개별 매장행 위. 평균 합계 큰 순 정렬.
+    # mgr_avg_tot는 아래 "담당별 전년대비 복종 비중 변화" 표(2026-08-09 신규, 수정6)에서도 재사용
+    # 하므로 if 안이 아니라 항상(빈 Series라도) 계산해둔다 — 동작은 기존과 동일(빈 Series면 루프 무실행).
     mgr_labels = []
-    if shown["_담당자"].notna().any():
-        mgr_avg_tot = shown.groupby("_담당자")["합계"].mean().sort_values(ascending=False)
-        for mgr, avg_tot in mgr_avg_tot.items():
-            codes = shown.loc[shown["_담당자"] == mgr, "매장코드"]
-            cat_amt_avg = piv.reindex(codes).fillna(0.0)[cats].mean(axis=0)
-            lbl = f"{mgr} 평균"
-            rows.append(_row(cat_amt_avg, float(avg_tot), "", None))
-            index.append(lbl)
-            mgr_labels.append(lbl)
+    mgr_avg_tot = (shown.groupby("_담당자")["합계"].mean().sort_values(ascending=False)
+                   if shown["_담당자"].notna().any() else pd.Series(dtype="float64"))
+    for mgr, avg_tot in mgr_avg_tot.items():
+        codes = shown.loc[shown["_담당자"] == mgr, "매장코드"]
+        cat_amt_avg = piv.reindex(codes).fillna(0.0)[cats].mean(axis=0)
+        lbl = f"{mgr} 평균"
+        rows.append(_row(cat_amt_avg, float(avg_tot), "", None))
+        index.append(lbl)
+        mgr_labels.append(lbl)
 
     for _, r in shown.iterrows():
         code = r["매장코드"]
@@ -2332,6 +2486,119 @@ def render_category_mix(df):
     st.caption(f"※ 매장 {len(shown)}개 표시(기간 합계매출 100만원 미만 {hidden_n}개 매장은 총계엔 "
                "포함되지만 목록에서는 제외) · 순위=표시된 매장 안에서 매출 큰 순 · "
                "복종 열은 총매출 큰 순으로 정렬돼요" + _mgr_note + ".")
+
+    # ── [수정6] 담당별 전년대비 복종 비중 변화 (2026-08-09 신규) ──────────────
+    # 표1과 동일한 행 구성(G.TOTAL·매장담당별 평균·SD065·개별 매장)을 "{전년} 라벨"/"{올해} 라벨"/
+    # "ㄴ증감" 3행씩으로 쌓아 전년 동기간 대비 변화를 보여줌. 전년 동기간 계산은 이 앱의 기존 관행
+    # (render_channel_brand 등)과 동일하게 조회기간을 그대로 1년 전으로 시프트.
+    ps, pe = s - pd.DateOffset(years=1), e - pd.DateOffset(years=1)
+    prev_base = d[(d["_판매일"] >= ps) & (d["_판매일"] <= pe)]
+    if selb and "브랜드명" in prev_base.columns:
+        prev_base = prev_base[prev_base["브랜드명"].isin(selb)]
+    if sela and "연차" in prev_base.columns:
+        prev_base = prev_base[prev_base["연차"].isin(sela)]
+    if sels and "시즌명" in prev_base.columns:
+        prev_base = prev_base[prev_base["시즌명"].isin(sels)]
+
+    cy = int(e.year)
+    py2, cy2 = (cy - 1) % 100, cy % 100
+
+    h3, h4 = st.columns([4, 1])
+    h3.markdown(f"### 담당별 전년대비 복종 비중 변화 (전년 동기간 비교){_NOTE_FLOAT}", unsafe_allow_html=True)
+    if prev_base.empty:
+        st.info(f"전년 동기간({ps.date()}~{pe.date()}) 매출 데이터가 없어서 전년대비 비교표를 만들 수 없어요.")
+        return
+
+    prev_base = prev_base.assign(
+        _복종=prev_base["아이템"].astype(str).str.strip().str.upper().map(cat_map).fillna("기타"))
+    store_tot_prev = prev_base.groupby(["매장코드", "매장명"])["_매출액"].sum().rename("합계").reset_index()
+    prev_total_map = dict(zip(store_tot_prev["매장코드"], store_tot_prev["합계"]))
+    shown_prev = store_tot_prev[store_tot_prev["합계"] >= _CATMIX_FLOOR].copy()
+    shown_prev = shown_prev.sort_values("합계", ascending=False).reset_index(drop=True)
+    shown_prev["순위"] = shown_prev.index + 1
+    prev_rank_map = dict(zip(shown_prev["매장코드"], shown_prev["순위"]))
+    piv_prev = prev_base.pivot_table(index="매장코드", columns="_복종", values="_매출액",
+                                      aggfunc="sum", fill_value=0.0).reindex(columns=cats, fill_value=0.0)
+
+    # 전년 데이터도 표1과 동일한 _row() 헬퍼로 조립 — 컬럼 순서·계산 방식(총액 0이면 %도 0) 일치 보장
+    prev_rows = [_row(piv_prev.sum(axis=0), float(store_tot_prev["합계"].sum()), "", None)]
+    for mgr, avg_tot in mgr_avg_tot.items():
+        codes = shown.loc[shown["_담당자"] == mgr, "매장코드"]
+        cat_amt_avg_prev = piv_prev.reindex(codes).fillna(0.0)[cats].mean(axis=0)
+        avg_tot_prev = float(pd.Series([prev_total_map.get(c, 0.0) for c in codes]).mean()) if len(codes) else 0.0
+        prev_rows.append(_row(cat_amt_avg_prev, avg_tot_prev, "", None))
+    for _, r in shown.iterrows():
+        code = r["매장코드"]
+        cat_amt_prev = piv_prev.loc[code] if code in piv_prev.index else pd.Series(0.0, index=cats)
+        # 순위(전년)는 전년도 자체 매출 100만원 이상 매장 모집단 안에서 재계산(연도별로 다를 수 있음,
+        # 중태님 확인 완료) — 해당 매장이 전년엔 100만원 미만·데이터 없음이면 "–"로 표시.
+        prev_rows.append(_row(cat_amt_prev, float(prev_total_map.get(code, 0.0)), code,
+                               prev_rank_map.get(code)))
+    prev_num = pd.DataFrame(prev_rows, index=num.index)
+    prev_num.index.name = "매장명"
+
+    def _fmt_row2(r):
+        out = {"매장코드": r["매장코드"], "합계(백만)": f"{r['합계(백만)']:,.1f}",
+               "순위": "–" if pd.isna(r["순위"]) else f"{int(r['순위'])}"}
+        for c in cats:
+            out[c] = f"{r[c]:,.1f}"
+            out[f"{c} %"] = f"{r[f'{c} %']:.1f}%"
+        return out
+
+    def _yoy_amt(cv, pv):
+        # 중태님 확인(2026-08-09): 증감액(절대값, 백만원)과 증감율(%) 둘 다 함께 표기.
+        diff = cv - pv
+        if pv == 0:
+            return (f"{diff:+,.1f} (신규)" if diff else "–"), diff
+        return f"{diff:+,.1f} ({diff / pv * 100:+.1f}%)", diff
+
+    def _yoy_pct(cv, pv):
+        diff = cv - pv
+        return f"{diff:+.1f}%p", diff
+
+    def _diff_row2(cur_r, prev_r):
+        out, sig = {"매장코드": "", "합계(백만)": None, "순위": "–"}, {}
+        out["합계(백만)"], sig["합계(백만)"] = _yoy_amt(cur_r["합계(백만)"], prev_r["합계(백만)"])
+        for c in cats:
+            out[c], sig[c] = _yoy_amt(cur_r[c], prev_r[c])
+            pc = f"{c} %"
+            out[pc], sig[pc] = _yoy_pct(cur_r[pc], prev_r[pc])
+        return out, sig
+
+    rows2, index2, sign_rows2 = [], [], []
+    gt_labels2, sd_labels2, mgr_labels2 = [], [], []
+    for lbl in num.index:
+        cur_r, prev_r = num.loc[lbl], prev_num.loc[lbl]
+        py_lbl, cy_lbl = f"{py2} {lbl}", f"{cy2} {lbl}"
+        rows2.append(_fmt_row2(prev_r)); index2.append(py_lbl); sign_rows2.append({})
+        rows2.append(_fmt_row2(cur_r)); index2.append(cy_lbl); sign_rows2.append({})
+        dtxt, dsig = _diff_row2(cur_r, prev_r)
+        # 유일 키(라벨별 매장명 접미사) — 표시는 format_index()로 전부 "ㄴ증감"으로 통일(위 함수 참고)
+        rows2.append(dtxt); index2.append(f"{_CATMIX_DIFF_PREFIX}{lbl}"); sign_rows2.append(dsig)
+        if lbl == "G.TOTAL":
+            gt_labels2 += [py_lbl, cy_lbl]
+        elif sd_label and lbl == sd_label:
+            sd_labels2 += [py_lbl, cy_lbl]
+        elif lbl in mgr_labels:
+            mgr_labels2 += [py_lbl, cy_lbl]
+
+    disp2 = pd.DataFrame(rows2, index=index2)
+    disp2.index.name = "매장명"
+    sign2 = pd.DataFrame(sign_rows2, index=index2).reindex(columns=disp2.columns)
+
+    h4.download_button(
+        "⬇ 엑셀",
+        _catmix_yoy_excel_bytes(disp2, sign2, gt_labels2, sd_labels2, mgr_labels2, amt_cols, pct_cols,
+                                 sheet=f"복종비중YoY_{level}", n_meta=n_meta),
+        file_name=f"담당별_전년대비_복종비중변화_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
+        key="cm_yoy_dl", use_container_width=True)
+    sty2 = _catmix_yoy_style(disp2, sign2, gt_labels2, sd_labels2, mgr_labels2, amt_cols, pct_cols,
+                              n_meta=n_meta)
+    render_styled_table(sty2)
+    st.caption(f"※ {py2}년={ps.date()}~{pe.date()}(전년 동기간) · {cy2}년={s.date()}~{e.date()}(조회기간, "
+               "위 표와 동일 대상) · ㄴ증감 행 — 합계·복종 금액 열: 증감액(백만) (증감율%), "
+               "% 열: %p 차이 · 초록=증가 빨강=감소 · 순위는 각 연도 자체 매출 100만원 이상 매장 "
+               "모집단 안에서 따로 계산(연도별로 달라질 수 있어요, 전년에 없던 매장은 \"–\").")
 
 
 # ==============================================================================
