@@ -2341,6 +2341,211 @@ def _catmix_yoy_excel_bytes(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_
     return buf.getvalue()
 
 
+# ── [수정8] 매장별 가이드 (2026-08-09 신규, 시트3 "매장별 제안" v2 이관) ──────────────
+# 설계 근거: claude/시트3_매장별제안_v2_요약.md (2026-08-08 업로드 v2 이관문서 요약).
+# 중태님 확정(2026-08-09): (1) 복종 분류는 원본 9분류 대신 이 ERP 자체 중/소카테고리 재사용
+# (표1·표2와 동일 기준 — 시트3_요약.md의 "이식 시 유의점 6" 결정) (2) 화면 표(세로 병합 필요)가
+# 아니라 표1 옆 "⬇ 매장별 가이드" 엑셀 다운로드로 구현 — 세로 병합은 openpyxl로 간단하지만 이 앱의
+# 기존 pandas Styler/HTML 표 방식으로는 신규 패턴이 필요했던 문제를 우회.
+# 모집단: 강점/약점 판정·비교매장 2곳 = shown(현재 조회조건의 100만원 이상 매장, 표1과 동일 모집단).
+#         전사 평균(G열)만 예외 = store_tot(같은 조회조건, 100만원 미만 포함 전체 매장) — 원본 스펙의
+#         "필터 적용 전 전체 매장"을 이 ERP 맥락으로 매핑(원본엔 브랜드/연차/시즌/담당 필터가 없었으므로
+#         "필터"=100만원 매출 플로어만을 의미했던 것으로 해석, claude/시트3_매장별제안_v2_요약.md 참고).
+# "기타" 복종은 강점/약점 후보에서 제외(전사평균 G열 계산엔 자연히 포함 — 매장 합계에 이미 반영됨).
+# ⚠️ 문서에 명시 안 된 세부 결정(구현 시 임의 보완, 추후 확인 필요):
+#   - 약점 복종이 3개 이상일 때 "최대 2개"로 자르는 기준 = cat_rank가 가장 나쁜(큰) 순으로 2개 채택.
+#   - 카테고리 내 동순위(rank) 타이브레이크 = pandas rank(method="min") 표준 처리.
+_CATMIX_GUIDE_WEAK_FILL = "FDF6F4"   # 약점 행 배경(연한 살구색, 원본 스펙과 동일)
+
+
+def _rankgap_verdict(rank_total, cat_rank):
+    """시트3_요약.md '강점/약점 판정 로직(6장)' — rank_total=매장 전체순위, cat_rank=그 복종 절대금액
+    순위(모집단 내). 1~3위 매장은 별도 규칙(중태님 2026-07-01 확정, 임의 단순화 금지)."""
+    if rank_total == 1:
+        return "강점" if cat_rank == 1 else ("중립" if cat_rank == 2 else "약점")
+    if rank_total in (2, 3):
+        return "강점" if cat_rank <= 3 else "약점"
+    gap = rank_total - cat_rank
+    return "강점" if gap > 0 else ("약점" if gap < 0 else "중립")
+
+
+def _catmix_guide_coach(my_pct):
+    """시트3_요약.md K열 코칭 멘트 3단계 분기(규칙 기반, LLM 호출 불필요). 어휘 규칙(2026-08-08
+    담당자 피드백): 온라인 쇼핑몰 매장이므로 '진열'·'매대' 금지, '노출'·'상품 등록'·'세트 구성'만 사용."""
+    if my_pct <= 1.0:
+        return ("판매가 사실상 없는 상태 — '안 팔리는 아이템'이 아니라 '거의 팔고 있지 않은 아이템'입니다. "
+                "입점 여부와 카테고리·검색 노출 구성부터 점검해주세요.")
+    if my_pct <= 3.0:
+        return "보조 아이템으로 최소한만 취급되는 상태로 보여요. 상품 등록·메인/카테고리 노출 여부부터 확인해주세요."
+    return "매장 규모 대비 노출이 약한 편이에요. 연관 상품 노출과 세트 구성 제안을 점검해보세요."
+
+
+def _catmix_guide_rows(shown, piv, store_tot, cats):
+    """매장별 가이드 원본 행 데이터 조립(엑셀 작성과 분리 — 단위 테스트 용이하게). 반환: list[dict],
+    각 dict는 A~K열 값 + 병합용 메타(_block_first/_block_size)를 담음."""
+    cats_rank = [c for c in cats if c != "기타" and c in piv.columns]
+    total_all = float(store_tot["합계"].sum())
+    cat_total_all = {c: float(piv[c].sum()) for c in cats_rank}
+    overall_avg_pct = {c: (cat_total_all[c] / total_all * 100.0 if total_all else 0.0) for c in cats_rank}
+
+    codes = shown["매장코드"].astype(str).tolist()
+    piv_codes = piv.reindex(codes).fillna(0.0)
+    cat_rank_map = {c: piv_codes[c].rank(ascending=False, method="min") for c in cats_rank}
+    # rank()의 인덱스는 piv_codes.index(=codes 순서 그대로) — code→rank 조회용 dict로 변환
+    cat_rank_map = {c: dict(zip(codes, ranks.tolist())) for c, ranks in cat_rank_map.items()}
+
+    total_map = dict(zip(shown["매장코드"], shown["합계"]))
+    name_map = dict(zip(shown["매장코드"], shown["매장명"]))
+
+    rows = []
+    for _, srow in shown.sort_values("순위").iterrows():
+        code, name = srow["매장코드"], srow["매장명"]
+        rank_total = int(srow["순위"]); my_total = float(srow["합계"])
+        cat_amt = piv.loc[code] if code in piv.index else pd.Series(0.0, index=cats)
+
+        strengths, weaknesses = [], []
+        for c in cats_rank:
+            cr = cat_rank_map[c].get(code)
+            if cr is None:
+                continue
+            cr = int(cr)
+            my_pct = (float(cat_amt.get(c, 0.0)) / my_total * 100.0) if my_total else 0.0
+            verdict = _rankgap_verdict(rank_total, cr)
+            if verdict == "강점":
+                strengths.append((c, cr, my_pct))
+            elif verdict == "약점":
+                weaknesses.append((c, cr, my_pct))
+
+        strengths.sort(key=lambda t: t[1])                       # cat_rank 좋은(작은) 순 — 최대 2개
+        top_strengths = strengths[:2]
+        strength_txt = ("\n".join(f"{c}({cr}위, {pct:.1f}%)" for c, cr, pct in top_strengths)
+                         if top_strengths else "뚜렷한 강점 복종 없음")
+
+        weaknesses.sort(key=lambda t: t[1], reverse=True)        # cat_rank 나쁜(큰) 순 — 최대 2개
+        top_weak = weaknesses[:2]
+
+        if not top_weak:
+            rows.append({
+                "매장코드": code, "매장명": name, "합계순위": rank_total, "강점요약": strength_txt,
+                "약점카테고리": "뚜렷한 약점 복종 없음(전 복종 고르게 강세)",
+                "내비중": None, "전사평균": None, "격차": None, "비교매장": "",
+                "기회금액": None, "코칭멘트": "강점 유지·확대에 집중하세요.",
+                "_block_first": True, "_block_size": 1,
+            })
+            continue
+
+        for wi, (c, cr, my_pct) in enumerate(top_weak):
+            avg_pct = overall_avg_pct.get(c, 0.0)
+            gap = avg_pct - my_pct
+            amt_series = piv_codes[c] if c in piv_codes.columns else pd.Series(0.0, index=codes)
+            peers = amt_series.drop(index=[code], errors="ignore").sort_values(ascending=False)
+            peer_codes = peers.head(2).index.tolist()
+            peer_pcts, peer_strs = [], []
+            for pc in peer_codes:
+                p_total = total_map.get(pc, 0.0)
+                p_amt = float(piv.loc[pc, c]) if (pc in piv.index and c in piv.columns) else 0.0
+                p_pct = (p_amt / p_total * 100.0) if p_total else 0.0
+                peer_pcts.append(p_pct)
+                peer_strs.append(f"{name_map.get(pc, pc)} {p_pct:.1f}%")
+            peer_txt = "\n".join(peer_strs)
+
+            opp_amt, coach_prefix = None, ""
+            if gap > 0:
+                opp_amt = (gap / 100.0) * my_total
+            else:
+                # 예외 케이스(시트3_요약.md): rank-gap상 약점인데 전사평균 이상 비중 →
+                # 비교 매장 중 비중이 더 높은 쪽과의 격차로 대체 계산. 그마저 낮으면 J열 문자 그대로 "-".
+                alt_gap = (max(peer_pcts) - my_pct) if peer_pcts else -1.0
+                opp_amt = (alt_gap / 100.0) * my_total if alt_gap > 0 else "-"
+                coach_prefix = ("전사 평균 대비는 낮지 않지만, 매출 규모가 비슷한 매장들과 비교하면 "
+                                 "상대적으로 약한 편이에요. ")
+
+            rows.append({
+                "매장코드": code, "매장명": name, "합계순위": rank_total, "강점요약": strength_txt,
+                "약점카테고리": f"{c} ({cr}위)", "내비중": my_pct, "전사평균": avg_pct, "격차": gap,
+                "비교매장": peer_txt, "기회금액": opp_amt, "코칭멘트": coach_prefix + _catmix_guide_coach(my_pct),
+                "_block_first": (wi == 0), "_block_size": len(top_weak),
+            })
+    return rows
+
+
+def _catmix_guide_excel_bytes(shown, piv, store_tot, cats, sheet="매장별가이드"):
+    """시트3(매장별 제안) v2 구조 — 매장별 강점/약점 복종을 rank-gap 판정으로 뽑아 전사 평균·비교
+    매장·기회금액·코칭 멘트까지 묶어 보여주는 담당자용 가이드 엑셀(11열 A~K, A~D 세로 병합)."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    import openpyxl
+
+    rows = _catmix_guide_rows(shown, piv, store_tot, cats)
+    headers = ["매장코드", "매장명", "합계순위", "강점 요약", "약점 카테고리", "내 비중(%)",
+               "전사 평균(%)", "격차(%p)", "비교 매장(비중)", "평균 대비 놓친 매출(원)", "담당자 코칭 멘트"]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = _safe_name(sheet)[:28] or "매장별가이드"
+
+    head_fill = PatternFill("solid", fgColor="F2F2F2")
+    weak_fill = PatternFill("solid", fgColor=_CATMIX_GUIDE_WEAK_FILL)
+    thin = Side(style="thin", color="D9D9D9")
+
+    for cj, h in enumerate(headers, start=1):
+        c = ws.cell(1, cj, h)
+        c.fill = head_fill
+        c.font = Font(name="맑은 고딕", size=9, bold=True, color="404040")
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    if not rows:
+        ws.freeze_panes = "A2"
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+    r = 2
+    for row in rows:
+        is_weak = row["약점카테고리"] != "뚜렷한 약점 복종 없음(전 복종 고르게 강세)"
+        vals = [row["매장코드"], row["매장명"], row["합계순위"], row["강점요약"], row["약점카테고리"],
+                row["내비중"], row["전사평균"], row["격차"], row["비교매장"], row["기회금액"], row["코칭멘트"]]
+        for cj, v in enumerate(vals, start=1):
+            c = ws.cell(r, cj, v)
+            c.alignment = Alignment(horizontal=("left" if cj in (2, 4, 5, 9, 11) else "center"),
+                                     vertical="center", wrap_text=(cj in (4, 5, 9, 11)))
+            if cj == 6 and v is not None:      # F 내비중
+                c.number_format = '0.0"%"'
+            elif cj == 7 and v is not None:    # G 전사평균
+                c.number_format = '0.0"%"'
+            elif cj == 8 and v is not None:    # H 격차
+                c.number_format = '0.0"%p"'
+                if v > 0:
+                    c.font = Font(bold=True, color="C0392B")
+            elif cj == 10 and isinstance(v, (int, float)):   # J 기회금액(양수 값이 있을 때만 강조)
+                c.number_format = '#,##0"원"'
+                c.font = Font(bold=True, color="8A5300")
+            if is_weak and cj >= 5:            # E~K 약점 행 배경(원본 스펙)
+                c.fill = weak_fill
+        r += 1
+
+    # A~D 세로 병합(매장 블록 단위)
+    r = 2
+    for row in rows:
+        if row["_block_first"]:
+            n = row["_block_size"]
+            if n > 1:
+                for col in (1, 2, 3, 4):
+                    ws.merge_cells(start_row=r, start_column=col, end_row=r + n - 1, end_column=col)
+                    ws.cell(r, col).alignment = Alignment(horizontal=("left" if col in (2, 4) else "center"),
+                                                           vertical="center", wrap_text=(col == 4))
+        r += 1
+
+    for rr in range(1, ws.max_row + 1):
+        for cc in range(1, len(headers) + 1):
+            ws.cell(rr, cc).border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    widths = {1: 10, 2: 14, 3: 9, 4: 22, 5: 16, 6: 9, 7: 10, 8: 9, 9: 24, 10: 16, 11: 42}
+    for cj, w in widths.items():
+        ws.column_dimensions[get_column_letter(cj)].width = w
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
+
 def render_category_mix(df):
     """🧵 복종별 판매비중 분석 — 매장별 복종(중/소카테고리)별 판매 금액·비중 현황표.
 
@@ -2495,13 +2700,19 @@ def render_category_mix(df):
     for c in pct_cols:
         disp[c] = num[c].map(lambda v: f"{v:.1f}%")
 
-    h1, h2 = st.columns([4, 1])
+    h1, h2, h2g = st.columns([3.4, 1, 1])
     h1.markdown(f"### 매장별 복종({level}) 판매비중{_NOTE_FLOAT}", unsafe_allow_html=True)
     h2.download_button("⬇ 엑셀", _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num,
                                                        sheet=f"복종별판매비중_{level}",
                                                        mgr_labels=mgr_labels, n_meta=n_meta),
                        file_name=f"복종별판매비중_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
                        key="cm_dl", use_container_width=True)
+    # [수정8, 2026-08-09] 매장별 가이드(시트3 v2 이관) — 표1과 같은 조회조건(shown/piv/store_tot)을
+    # 그대로 재사용해 강점/약점·전사평균·비교매장·기회금액·코칭멘트를 엑셀로 내려받음(화면 표는 없음).
+    h2g.download_button("⬇ 매장별 가이드", _catmix_guide_excel_bytes(shown, piv, store_tot, cats,
+                                                                     sheet=f"매장별가이드_{level}"),
+                       file_name=f"매장별가이드_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
+                       key="cm_guide_dl", use_container_width=True)
     sty = _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=mgr_labels, n_meta=n_meta)
     render_styled_table(sty)
     _mgr_note = (f" · 매장담당별 평균 {len(mgr_labels)}명(하늘색, 표시된 매장 기준)" if mgr_labels
