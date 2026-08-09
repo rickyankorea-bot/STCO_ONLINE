@@ -2059,6 +2059,11 @@ def render_channel_brand(df):
 #             동일). ㄴ증감 행: 합계·복종 금액 열=증감액(백만) (증감율%) 둘 다 표기, %열=%p 차이,
 #             양수 초록/음수 빨강(이 앱의 기존 증감 색 관행과 동일). 순위는 연도별로 그 해 자체
 #             매출 100만원 이상 매장 모집단 안에서 따로 계산(전년에 데이터 없으면 "–").
+#     [수정7] "담당별" 필터 추가(브랜드/연차/시즌과 동일한 형태, 총 4개) — 상단 필터에서 담당자를
+#             고르면 표1·표2 모두 그 담당자 소관 매장만으로 줄어드는 드릴다운(2026-08-09). 구현:
+#             row-level(base/prev_base)에 _담당자 컬럼을 매장코드→담당자 매핑으로 미리 붙여두고
+#             selm(멀티셀렉트)을 다른 필터와 동일하게 .isin()으로 적용 — 이후 G.TOTAL/shown/piv/
+#             매장담당별 평균이 전부 자동으로 좁혀지므로 표1·표2 자체 로직은 수정 불필요.
 # ==============================================================================
 _CATMIX_SD065 = "SD065"
 _CATMIX_FLOOR = 1_000_000    # 원 단위 — 기간 합계매출 이 미만인 매장은 목록에서 제외(총계엔 포함)
@@ -2352,27 +2357,48 @@ def render_category_mix(df):
         return
     d = df[df["_판매일"].notna()].copy()
 
+    # [수정7, 2026-08-09] 담당별 필터 추가 위해 매장 담당자를 행(거래) 단위로 먼저 매핑 — 이 앱의
+    # 기존 관행(render_channel_brand 등)과 동일한 패턴. shown["_담당자"] 산출에도 동일 맵 재사용.
+    master = load_master()
+    if not master.empty and "담당자" in master.columns:
+        _mgr_map = dict(zip(master["매장코드"].astype(str).str.strip(),
+                            master["담당자"].astype(str).str.strip()))
+        d["_담당자"] = d["매장코드"].astype(str).str.strip().map(_mgr_map)
+        d["_담당자"] = d["_담당자"].where(
+            d["_담당자"].notna() & d["_담당자"].str.strip().ne("")
+            & ~d["_담당자"].str.lower().isin(["nan", "none"]), None)
+    else:
+        _mgr_map = {}
+        d["_담당자"] = None
+    _mans = sorted({str(m).strip() for m in d["_담당자"].dropna().astype(str)
+                    if str(m).strip() and str(m).strip().lower() not in ("nan", "none")})
+
     st.caption("매장별로 어떤 복종(아이템군)의 판매 비중이 높고 낮은지 보여줘요. "
                "🟧 온라인통합몰(SD065)은 다른 매장이 참조하는 비교 기준선이라 항상 주황색으로 표시돼요. "
                "🟦 G.TOTAL 바로 아래엔 매장담당별 평균(하늘색)이 담당자마다 한 행씩 나와요. "
                "🟢 복종별 '금액' 열의 매출 상위 5개 매장(SD065·담당별평균 제외)은 녹색, "
                "🔴🔵 '%' 열의 상위 5개는 빨간색·하위 5개는 파란색(둘 다 SD065·담당별평균 제외)으로 "
-               "표시돼요. 기간 합계매출 100만원 미만 매장은 총계엔 포함되지만 목록엔 표시하지 않아요.")
+               "표시돼요. 기간 합계매출 100만원 미만 매장은 총계엔 포함되지만 목록엔 표시하지 않아요. "
+               "🔽 담당별 필터에서 담당자를 고르면 두 표(복종별 판매비중·전년대비 변화) 모두 그 "
+               "담당자의 매장만으로 줄어들어요(드릴다운, 2026-08-09).")
 
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
     with st.form("cm_form"):
         rng = st.date_input("조회기간 (시작일~종료일 직접 지정)", value=(default_start, dmax),
                             min_value=dmin, max_value=dmax, key="cm_rng")
-        cm0, cm1, cm2, cm3 = st.columns([1.2, 1, 1, 1])
+        cm0, cm1, cm2, cm3, cm4 = st.columns([1.1, 1, 1, 1, 1])
         level = cm0.radio("카테고리 기준", CATMIX_CAT_LEVELS, horizontal=True, key="cm_level")
-        # 공통룰10 — 브랜드별/연차별/시즌별, 빈칸=전체
+        # [수정7] 담당별 필터 추가 — 공통룰10(브랜드/연차/시즌) 4번째 필터, 빈칸=전체
         brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
         ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
         seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
         selb = cm1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cm_brand")
         sela = cm2.multiselect("연차별", ages, default=[], placeholder="전체", key="cm_age")
         sels = cm3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cm_season")
+        selm = cm4.multiselect("담당별", _mans, default=[], placeholder="전체", key="cm_mgr")
+        if not _mans:
+            st.caption("※ 매장 기준정보(담당자)가 없어 담당별 필터가 비어 있어요 — 사이드바에서 매장 기준정보를 업로드하면 채워져요.")
         run = st.form_submit_button("🔍 조회", type="primary")
     if _need_search("cm_go", run):
         return
@@ -2391,6 +2417,8 @@ def render_category_mix(df):
         base = base[base["연차"].isin(sela)]
     if sels and "시즌명" in base.columns:
         base = base[base["시즌명"].isin(sels)]
+    if selm and "_담당자" in base.columns:      # [수정7] 담당별 드릴다운 — 선택한 담당자의 매장만
+        base = base[base["_담당자"].astype(str).str.strip().isin(selm)]
     if base.empty:
         st.info("선택한 조건에 매출 데이터가 없어요.")
         return
@@ -2408,16 +2436,11 @@ def render_category_mix(df):
     shown["순위"] = shown.index + 1
 
     # 수정2: 매장담당별 평균 — 매장 기준정보(담당자)와 매칭, 표시 대상(shown) 매장만 대상으로 그룹평균
-    master = load_master()
-    if not master.empty and "담당자" in master.columns:
-        _mgr_map = dict(zip(master["매장코드"].astype(str).str.strip(),
-                            master["담당자"].astype(str).str.strip()))
-        shown["_담당자"] = shown["매장코드"].astype(str).str.strip().map(_mgr_map)
-        shown["_담당자"] = shown["_담당자"].where(
-            shown["_담당자"].notna() & shown["_담당자"].str.strip().ne("")
-            & ~shown["_담당자"].str.lower().isin(["nan", "none"]), None)
-    else:
-        shown["_담당자"] = None
+    # (담당자 맵은 위 [수정7]에서 이미 계산해둔 _mgr_map 재사용)
+    shown["_담당자"] = shown["매장코드"].astype(str).str.strip().map(_mgr_map)
+    shown["_담당자"] = shown["_담당자"].where(
+        shown["_담당자"].notna() & shown["_담당자"].astype(str).str.strip().ne("")
+        & ~shown["_담당자"].astype(str).str.lower().isin(["nan", "none"]), None)
 
     piv = base.pivot_table(index="매장코드", columns="_복종", values="_매출액", aggfunc="sum", fill_value=0.0)
     cats = piv.sum(axis=0).sort_values(ascending=False).index.tolist()
@@ -2499,6 +2522,8 @@ def render_category_mix(df):
         prev_base = prev_base[prev_base["연차"].isin(sela)]
     if sels and "시즌명" in prev_base.columns:
         prev_base = prev_base[prev_base["시즌명"].isin(sels)]
+    if selm and "_담당자" in prev_base.columns:  # [수정7] 담당별 드릴다운 — base와 동일하게 적용
+        prev_base = prev_base[prev_base["_담당자"].astype(str).str.strip().isin(selm)]
 
     cy = int(e.year)
     py2, cy2 = (cy - 1) % 100, cy % 100
