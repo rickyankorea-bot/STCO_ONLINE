@@ -3449,7 +3449,7 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
     그대로 넘겨 재사용 — 헤더(당월실적·연간누계)·엑셀 다운로드·비중 계산 방식이 메인 표·드릴다운1·2와
     완전히 동일하다(중복 로직 없음).
     """
-    st.markdown("##### 🔍 (드릴다운 3) 유통/브랜드 · 연차 · 아이템/매장별 상세 보기")
+    st.markdown("##### 🔍 유통/브랜드 · 연차 · 아이템/매장별 상세 보기")
     pool = pd.concat([cur_m, prev_m, cur_y, prev_y])
     if pool.empty:
         st.info("표시할 데이터가 없어요.")
@@ -3587,6 +3587,9 @@ def render_weekly_report(df):
     st.caption("※ 유통별 5개는 주요 채널만 (직영몰·특수채널·K2K이관 등은 G.TOTAL엔 포함, 유통 행엔 미표기). "
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
 
+    st.divider()
+    render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py)   # 2026-08-10, 메인 표 바로 아래로 배치(중태님 지시)
+
     # ── 매장 담당별 분석 (위 표와 동일 프레임, 행만 담당자) ──
     _MGR_BOTTOM = ["없음", "26년 미운영", "직원구매"]   # 비담당 라벨 → 맨 아래(이 순서)
     managers = []
@@ -3651,9 +3654,6 @@ def render_weekly_report(df):
             code = code_of[isel]
             imask = (lambda c: (lambda x: x["매장코드"].astype(str).str.strip() == c))(code)
             render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, isel, imask, cy, py)
-
-    st.divider()
-    render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py)
 
 
 # ==============================================================================
