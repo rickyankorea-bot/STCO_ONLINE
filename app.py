@@ -1157,15 +1157,20 @@ def _pn_detail(sub):
 
 
 def _show_pn_dialog(title, sub_title, detail, group_col="품번", key_prefix="pn",
-                     on_row_click=None, on_dismiss=None):
+                     on_row_click=None, on_dismiss=None, on_back=None):
     """품번별(또는 매장코드별) 상세 DataFrame을 팝업(또는 expander)으로 렌더링.
 
     on_row_click(선택값): 지정하면 표 행 선택을 켜서(단일행), 행을 클릭했을 때 그 행의
     group_col 값으로 콜백을 호출한다 — 품번별 표에서 행 클릭 → 매장별 2차 팝업 연결용.
     on_dismiss: 팝업을 X로 닫을 때 세션 상태를 정리하는 콜백(안 넘기면 st.dialog 기본 동작).
+    on_back(2026-08-10 추가): 지정하면 팝업 맨 위에 "← 뒤로가기" 버튼을 보여주고, 누르면
+    콜백을 호출한다 — 매장별(3단계) 팝업에서 품번별(2단계) 팝업으로 돌아가는 용도.
     """
     @_dialog_or_expander(title, on_dismiss=on_dismiss)
     def _popup():
+        if on_back is not None:
+            if st.button("← 뒤로가기", key=f"{key_prefix}_back"):
+                on_back()
         st.caption(sub_title)
         if detail.empty:
             st.info("해당 조건에 판매 데이터가 없어요.")
@@ -1214,10 +1219,11 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
     period = c3.selectbox("기간", ["당월누계", "연간누계"], key=f"{key_prefix}_pd")
     yr = c4.selectbox("연도", [cy, cy - 1], key=f"{key_prefix}_yr")
 
-    stage_key, pn_key = f"{key_prefix}_stage", f"{key_prefix}_pnsel"
+    stage_key, pn_key, pn_df_key = f"{key_prefix}_stage", f"{key_prefix}_pnsel", f"{key_prefix}_df"
     if go:
         st.session_state[stage_key] = "pn"
         st.session_state.pop(pn_key, None)
+        st.session_state.pop(pn_df_key, None)  # 이전 행 선택 상태 초기화(안 지우면 재조회 즉시 3단계로 다시 넘어감)
     stage = st.session_state.get(stage_key)
     if not stage:
         return
@@ -1232,6 +1238,16 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
     def _close_all():
         st.session_state.pop(stage_key, None)
         st.session_state.pop(pn_key, None)
+
+    def _back_to_pn():
+        # 2026-08-10 추가(중태님 요청): 매장별(3단계) 팝업 → 품번별(2단계) 팝업으로 복귀.
+        # pn_key(선택했던 품번)는 남겨두지 않음 — 다시 목록에서 고르도록.
+        # pn_df_key(품번별 표의 행 선택 상태)도 같이 지워야 함 — 안 지우면 이전에 클릭했던 행이
+        # 여전히 "선택됨" 상태로 남아 있어서 되돌아가자마자 곧바로 다시 3단계로 넘어가버림.
+        st.session_state[stage_key] = "pn"
+        st.session_state.pop(pn_key, None)
+        st.session_state.pop(pn_df_key, None)
+        st.rerun()
 
     if stage == "store":
         pn_sel = st.session_state.get(pn_key)
@@ -1249,7 +1265,7 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
         _show_pn_dialog(f"{yr}년 매장별상세 · {period} · {sel_v} · {pn_label}",
                          f"실판매금액 큰 순 정렬 · 합계 {_mm(total_rev):,.1f}백만원",
                          store_detail, group_col="매장코드", key_prefix=f"{key_prefix}_st",
-                         on_dismiss=_close_all)
+                         on_dismiss=_close_all, on_back=_back_to_pn)
         return
 
     detail = _pn_detail(sub)
@@ -3109,6 +3125,31 @@ _CHANNEL_MASKS = {
     "웍스바이이관": lambda x: x["_채널스토리"].astype(str).str.contains("웍스", na=False),
 }
 
+# 브랜드별 5개 분류 기준 (드릴다운3 "유통/브랜드 선택" 필터 전용 · _wk_rows 브랜드별 행과 동일 기준)
+_BRAND_MASKS = {
+    "S/D/L":       lambda x: x["브랜드명"].isin(SDL_BRANDS),
+    "CODI GALLERY": lambda x: x["브랜드명"] == "CODI GALLERY",
+    "ZERO LOUNGE": lambda x: x["브랜드명"] == "ZERO LOUNGE",
+    "GENTLEMENS":  lambda x: x["브랜드명"] == "GENTLEMENS PHILOSOPHY",
+    "NORATED":     lambda x: x["브랜드명"] == "NORATED",
+}
+
+# 드릴다운3 "연차" 필터 버킷 — None은 "위 4개 버킷에 없는 나머지 연차 전부(4년차 이상)"를 뜻하며
+# 실행 시점에 실제 데이터의 연차값을 훑어 동적으로 채운다(연차 표기가 "4년차"/"5년차"/"4년차↑" 등
+# 데이터마다 다를 수 있어 하드코딩하지 않음).
+_AGE_BUCKET_DEFS = [
+    ("신상+내년신상", ["신상", "내년신상"]),
+    ("1년차", ["1년차"]),
+    ("2년차", ["2년차"]),
+    ("3년차", ["3년차"]),
+    ("4년차↑", None),
+]
+
+# 드릴다운3 "아이템 or 매장" 선택지 — '아이템'은 중카테고리(아이템그룹) 기준 breakdown(드릴다운2와
+# 동일한 render_weekly_item_drilldown 재사용), '매장별'은 필터에 해당하는 매장 목록(드릴다운1과
+# 동일한 render_weekly_drilldown 재사용).
+WK_DIM_OPTS = ["아이템", "매장별"]
+
 
 def _wk_metrics(cur_sub, prev_sub, total_c):
     r26 = float(cur_sub["_매출액"].sum()); r25 = float(prev_sub["_매출액"].sum())
@@ -3398,6 +3439,77 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
     render_styled_table(sty)
 
 
+def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
+    """🔍 (드릴다운 3) 유통/브랜드 · 연차 · 아이템/매장별 상세 보기 — 2026-08-10 신규.
+
+    드릴다운1(유통 또는 담당자 '하나')·드릴다운2(매장 또는 담당자 '하나')와 달리, 유통·브랜드
+    (다중선택·OR)와 연차(다중선택·OR)로 데이터 자체를 자유롭게 좁힌 뒤, 그 결과를 "아이템"
+    (중카테고리 기준) 또는 "매장별"(그 필터에 해당하는 매장 목록)로 펼쳐 본다. 이미 검증된
+    render_weekly_item_drilldown/render_weekly_drilldown에 필터링 끝난 데이터 + '항상 참' 마스크를
+    그대로 넘겨 재사용 — 헤더(당월실적·연간누계)·엑셀 다운로드·비중 계산 방식이 메인 표·드릴다운1·2와
+    완전히 동일하다(중복 로직 없음).
+    """
+    st.markdown("##### 🔍 (드릴다운 3) 유통/브랜드 · 연차 · 아이템/매장별 상세 보기")
+    pool = pd.concat([cur_m, prev_m, cur_y, prev_y])
+    if pool.empty:
+        st.info("표시할 데이터가 없어요.")
+        return
+
+    group_opts = list(_CHANNEL_MASKS.keys()) + list(_BRAND_MASKS.keys())
+    age_opts = [lbl for lbl, _ in _AGE_BUCKET_DEFS]
+    with st.form("wk_cat_form"):
+        wc0, wc1, wc2 = st.columns([1.6, 1, 1])
+        selg = wc0.multiselect("유통/브랜드 선택", group_opts, default=[], placeholder="전체", key="wk_cat_grp")
+        sela = wc1.multiselect("연차", age_opts, default=[], placeholder="전체", key="wk_cat_age")
+        dim = wc2.radio("아이템 or 매장", WK_DIM_OPTS, horizontal=True, key="wk_cat_dim")
+        run = st.form_submit_button("🔍 상세보기", type="primary")
+    if _need_search("wk_cat_go", run):
+        return
+
+    def _grp_mask(frame, name):
+        fn = _CHANNEL_MASKS.get(name) or _BRAND_MASKS.get(name)
+        return fn(frame) if fn is not None else pd.Series(False, index=frame.index)
+
+    def _apply(frame):
+        if frame.empty:
+            return frame
+        out = frame
+        if selg:
+            comb = _grp_mask(out, selg[0])
+            for nm in selg[1:]:
+                comb = comb | _grp_mask(out, nm)
+            out = out[comb]
+        if sela and "연차" in out.columns:
+            known_ages = {"신상", "내년신상", "1년차", "2년차", "3년차"}
+            all_ages = set(str(a) for a in pool["연차"].dropna().unique()) if "연차" in pool.columns else set()
+            rest_ages = all_ages - known_ages
+            age_vals = set()
+            for lbl in sela:
+                bucket = dict(_AGE_BUCKET_DEFS)[lbl]
+                age_vals |= set(bucket) if bucket is not None else rest_ages
+            out = out[out["연차"].astype(str).isin(age_vals)]
+        return out
+
+    fcm, fpm, fcy, fpy = _apply(cur_m), _apply(prev_m), _apply(cur_y), _apply(prev_y)
+    if fcm.empty and fpm.empty and fcy.empty and fpy.empty:
+        st.info("선택한 조건에 해당하는 데이터가 없어요.")
+        return
+
+    _selg_txt = "·".join(selg) if selg else "전체"
+    _sela_txt = "·".join(sela) if sela else "전체"
+    label = f"유통/브랜드: {_selg_txt} · 연차: {_sela_txt}"
+    _all_true = lambda x: pd.Series(True, index=x.index)   # 이미 필터링된 데이터를 그대로 통과시킴
+
+    if dim == "아이템":
+        render_weekly_item_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py)
+    else:
+        render_weekly_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, show_plan=False)
+    st.caption("※ 유통/브랜드·연차는 다중선택(선택한 항목 중 하나라도 해당하면 포함, OR 조건) — "
+               "빈칸이면 전체. '아이템'은 중카테고리(아이템그룹) 기준 breakdown, '매장별'은 위 필터에 "
+               "해당하는 매장 목록을 보여줘요. 비중=선택 조건 내 비중, 필터가 걸린 상태라 사업계획·진도율은 "
+               "'–'로 표시돼요.")
+
+
 def render_weekly_report(df):
     st.subheader("📋 주간회의 보고자료 (당월 · 연간누계, 전년 동기간 비교)")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
@@ -3539,6 +3651,9 @@ def render_weekly_report(df):
             code = code_of[isel]
             imask = (lambda c: (lambda x: x["매장코드"].astype(str).str.strip() == c))(code)
             render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, isel, imask, cy, py)
+
+    st.divider()
+    render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py)
 
 
 # ==============================================================================
