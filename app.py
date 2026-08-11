@@ -3660,7 +3660,10 @@ def render_weekly_report(df):
 # 재고 모니터링 1차 가공  ─ 260731 확정 기준 · v3.3 113열 (2026-08-02 ERP 이식, 260811 사이즈구분 컬럼 + 가격시뮬 반영)
 # ==============================================================================
 # 원본: '쇼핑몰재고 모니터링 자료 1차 가공' 프로젝트 process_260731.py (판정 로직 1:1 이식)
-#  · 선판정: 이관구분='오프라인' → AA·AB·AF '오프라인' / 온라인창고<20 → AA·AF '재고20미만'(AB 미적용)
+#  · 선판정: 수정일='오프라인' → AA·AB·AF '오프라인' / 온라인창고<20 → AA·AF '재고20미만'(AB 미적용)
+#    (260811: 판정 소스를 '이관구분' 컬럼에서 '수정일' 컬럼으로 변경 — 로우데이터상 실제 오프라인/
+#     온라인/부분이관 값은 '수정일'이라는 이름의 컬럼(raw21)에 들어오고, '이관구분' 컬럼(raw22)은
+#     현재 로우데이터에서 공란으로 내려온다. 컬럼명과 실제 내용이 어긋난 회사 ERP 추출 특성.)
 #  · AA/AB 5등급: A 상위20% / B 21~50 / C 51~80 / D 81~100 / E 판매0(자동부여)
 #  · 등급 모집단 = (중카테고리 × 년도 × 시즌) — 중카테고리는 아이템 마스터(item_master) 기준,
 #    260803부터 니트류·티셔츠류가 "니트/티셔츠류" 한 중카테고리로 통일됨(마스터 미등록 시엔 구 분리판 폴백)
@@ -3833,9 +3836,10 @@ def _inv_set_side(rec):
 # 260811(가격시뮬 + 기준판매가 복제): 몰가격(22) 뒤에 기준판매가 복제 1컬럼 + 가격5컬럼이 끼어들면서
 # 구 27번째 이후 컬럼이 전부 +6 밀림 — 아래 세 상수는 밀린 뒤(113열 기준) 위치. C,K,L,M(그대로) +
 # 기준판매가 복제 컬럼(23, 초록색) + 신규 가격5컬럼(24~28, 전부 노란색) +
-# AA,AB,AF,AG,AH,AI(구 27,28,32,33,34,35 → +6 = 33,34,38,39,40,41).
+# AA,AB,AF,AG,AH,AI(구 27,28,32,33,34,35 → +6 = 33,34,38,39,40,41 → 260811 '수정일' 재배치로
+# AA~변경후할인율 블록이 한 칸씩 앞당겨져 최종 32,33,37,38,39,40).
 _INV_YELLOW_COLS = ({3, 11, 12, 13} | set(range(INV_PRICE_SIM_COL, INV_PRICE_SIM_COL + INV_PRICE_SIM_N))
-                    | {33, 34, 38, 39, 40, 41})
+                    | {32, 33, 37, 38, 39, 40})
 _INV_GREEN_COLS = {INV_GIJUN_COPY_COL, 59, 65, 66, 67}        # 기준판매가 복제(23) + BA,BG,BH,BI(구 53,59,60,61 → +6)
 _INV_HIDE_COLS = set(range(69, 98))                           # BK~CM (구 63~91 → +6)
 
@@ -4321,7 +4325,9 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                    year=year_raw, season=season_raw,
                    season_grp=(season_group_map or {}).get(season_raw, season_raw),  # 비교 대상군(묶음) 라벨
                    year_grp=(year_group_map or {}).get(year_raw, year_raw),          # 비교 대상군(묶음) 라벨
-                   off=str(r[22]).strip() == "오프라인",
+                   # 260811: 오프라인 판정 소스를 '이관구분'(raw22)에서 '수정일'(raw21)로 변경
+                   # — 실제 오프라인/온라인/부분이관 값이 담긴 컬럼은 '수정일'이라는 이름으로 내려온다.
+                   off=str(r[21]).strip() == "오프라인",
                    stock=_inv_num(r[39]) or 0, sales=_inv_num(r[45]) or 0, depl=_inv_num(r[47]),
                    size14={i + 1: int(_inv_num(r[79 + i]) or 0) for i in range(14)},
                    scode=scode, scode_master=master.get(pn))
@@ -4620,6 +4626,34 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # 사이즈구분과 동일 방식). 원본 기준판매가 컬럼(뒤쪽 패스스루 구간)은 헤더/값 모두 그대로 유지된다.
     tws.cell(NAMES_R, INV_GIJUN_COPY_COL).value = "기준판매가"
 
+    # 260811 추가 개정(3): '수정일'을 로우데이터 순서대로 '이관구분' 바로 왼쪽(41번째 칸)으로 옮기며
+    # AA~변경후할인율 블록이 한 칸씩 앞당겨졌다 — 템플릿에 박혀있던 32~42번째 칸 헤더명(NAMES_R)을
+    # 새 순서에 맞게 코드로 다시 써준다(안 그러면 헤더 텍스트와 실제 값이 어긋난다).
+    _INV_COL32_42_HEADERS = ["기간판매수량분석", "소진예상기간분석", "사이즈\n등급", "SET\n상태 구분",
+                             "SET\n등급", "AI제안방향", "휴먼의사결정", "변동가격", "변경후할인율",
+                             "수정일", "이관구분"]
+    for _k, _h in enumerate(_INV_COL32_42_HEADERS):
+        tws.cell(NAMES_R, 32 + _k).value = _h
+
+    # 260811 추가 개정(3): 위 재배치에 맞춰 GROUP_R(7행) 상위 그룹 병합 범위도 조정.
+    #   · '기본사항' 그룹 14~32 → 14~31 ('수정일'이 빠져나가 1칸 축소)
+    #   · '분석·의사결정' 그룹 33~41 → 32~40 (그만큼 1칸 앞으로 당겨짐)
+    #   · 41번째 칸('수정일'의 새 위치)은 사이즈구분·가격시뮬 컬럼과 동일하게 그룹헤더 없는
+    #     단일 컬럼으로 둔다.
+    def _inv_regroup(old_min, old_max, new_min, new_max, label):
+        for m in list(tws.merged_cells.ranges):
+            if m.min_row <= GROUP_R <= m.max_row and m.min_col == old_min and m.max_col == old_max:
+                tws.unmerge_cells(start_row=m.min_row, start_column=m.min_col,
+                                   end_row=m.max_row, end_column=m.max_col)
+                break
+        tws.cell(GROUP_R, old_min).value = None
+        tws.cell(GROUP_R, new_min).value = label
+        if new_max > new_min:
+            tws.merge_cells(start_row=GROUP_R, start_column=new_min, end_row=GROUP_R, end_column=new_max)
+    _inv_regroup(14, 32, 14, 31, "기본사항")
+    _inv_regroup(33, 41, 32, 40, "분석·의사결정")
+    tws.cell(GROUP_R, 41).value = None   # 수정일 — 그룹헤더 없음(단일 컬럼)
+
     # 260803 확정: 위 초록(GREEN) 컬럼들의 상위 그룹 헤더(GROUP_R, 병합 셀)도 같은 초록으로.
     # 병합 셀은 좌상단 셀에만 실제로 서식이 저장되므로, 열이 속한 병합범위의 좌상단 열을 찾아 그 칸에만 칠한다
     # (병합이 없으면 그 열 자체가 좌상단이므로 그대로 칠해짐).
@@ -4639,7 +4673,9 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # 260811(가격시뮬 + 기준판매가 복제): 구 range(19,24)·range(37,...) → 가격5컬럼(24~28) +
     # 기준판매가 복제(23) 포함해 +6 밀림.
     NUM_COLS = set(range(19, 30)) | set(range(43, INV_TOTAL_COLS + 1))
-    _INV_AH_COL_LETTER = get_column_letter(34 + INV_PRICE_SIM_N + 1)  # 구 AH(34)열 → +5(가격시뮬)+1(기준판매가 복제) 이동한 위치
+    # 구 AH(34)열 → +5(가격시뮬)+1(기준판매가 복제)-1(260811 수정일 재배치로 AA~변경후할인율 블록이
+    # 한 칸씩 앞으로 당겨짐) 이동한 위치
+    _INV_AH_COL_LETTER = get_column_letter(34 + INV_PRICE_SIM_N + 1 - 1)
 
     def to_num(v):
         if v is None or v == "":
@@ -4669,11 +4705,13 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         for _k, _v in enumerate(_inv_price_sim(_mol, _gijun)):
             vals[INV_PRICE_SIM_COL + _k] = _v
         vals[29], vals[30], vals[31] = raw[10], raw[11], raw[12]   # 할인율·최초입고일·최초출고일(구23~25)
-        vals[32] = raw[21]                                          # 수정일(구26)
-        vals[33], vals[34], vals[35] = rec["AA"], rec["AB"], rec["AC"]   # 구27,28,29
-        vals[36], vals[37], vals[38] = rec["AD"], rec["AE"], rec["AF"]   # 구30,31,32
-        vals[39] = vals[40] = None                                  # 구33,34
-        vals[41] = f"={_INV_AH_COL_LETTER}{rr}/T{rr}"                # 구35 (AH→새 위치로 셀참조 갱신)
+        # 260811: '수정일'을 이 자리(구26)에서 빼서 로우데이터 원래 순서대로 '이관구분' 바로 왼쪽
+        # (41번째 칸)으로 옮긴다 — 아래 AA~변경후할인율 블록이 그만큼 한 칸씩 앞으로 당겨진다.
+        vals[32], vals[33], vals[34] = rec["AA"], rec["AB"], rec["AC"]   # 구27,28,29
+        vals[35], vals[36], vals[37] = rec["AD"], rec["AE"], rec["AF"]   # 구30,31,32
+        vals[38] = vals[39] = None                                  # 구33,34
+        vals[40] = f"={_INV_AH_COL_LETTER}{rr}/T{rr}"                # 구35 (AH→새 위치로 셀참조 갱신)
+        vals[41] = raw[21]                                          # 수정일(구26, 이관구분 바로 왼쪽으로 이동)
         vals[42] = raw[22]                                          # 이관구분(구36)
         # 260811: 패스스루 구간이 raw24~93(70열) → raw24~94(71열)로 1열 확장. 신규 '사이즈구분'이
         # raw79 자리에 자연스럽게 끼어 있어 이 구간 안에서 함께 넘어간다(출력 98번째 칸에 그대로 안착).
