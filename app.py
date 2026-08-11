@@ -28,8 +28,18 @@ import gc
 import hmac
 import math
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from urllib.parse import quote_plus
+
+# 260811: 배포 서버(Streamlit Cloud)가 UTC로 도는 경우가 있어 datetime.now()를 화면 표시용으로 쓰면
+# 한국 시간보다 9시간 늦게 나오는 문제가 있었음(예: 실제 14:xx인데 05:xx로 표시). 서버 로컬 설정과
+# 무관하게 항상 정확한 한국 시간(KST, UTC+9 고정 — 서머타임 없음)을 돌려주는 헬퍼.
+KST = timezone(timedelta(hours=9))
+
+
+def now_kst():
+    """화면에 표시하거나 파일명·날짜 기본값으로 쓸 '지금'은 이 함수로 구한다(서버 시간대 무관하게 KST)."""
+    return datetime.now(timezone.utc).astimezone(KST)
 
 import numpy as np
 import pandas as pd
@@ -4834,7 +4844,9 @@ def render_inventory():
     # 260811: 같은 날 여러 번 다운로드해도 파일이 안 겹치도록 기본값에 시간(시:분)까지 포함.
     # 사용자가 직접 지우고 다시 입력할 수도 있는 텍스트칸이라 강제는 아님(수정하면 엑셀 안
     # "작업일" 표기·파일명 둘 다 그 값을 그대로 따라감).
-    workdate = o3.text_input("작업일", value=datetime.now().strftime("%y.%m.%d %H:%M"), key="inv_workdate")
+    # 260811(2차 수정): datetime.now()는 배포 서버(UTC로 도는 경우)의 시각을 그대로 쓰기 때문에
+    # 실제 한국 시간보다 9시간 늦게 표시되는 버그가 있었음 → now_kst()로 교체.
+    workdate = o3.text_input("작업일", value=now_kst().strftime("%y.%m.%d %H:%M"), key="inv_workdate")
     period = o4.text_input("기간판매 조회 기준", placeholder="예: 26.07.20~26.07.31", key="inv_period")
 
     # ── 카테고리 기준 설정 — AA·AB 등급 모집단·C열 표기에 쓸 카테고리 세분화 레벨을 고른다.
@@ -5969,8 +5981,9 @@ def render_weather_admin():
             _sk_default = ""
         key = st.text_input("인증키", value=_sk_default, type="password", key="wx_key")
         cA, cB = st.columns(2)
-        d_from = cA.date_input("시작일", value=(datetime.now() - pd.Timedelta(days=760)).date(), key="wx_from")
-        d_to = cB.date_input("종료일", value=datetime.now().date(), key="wx_to")
+        # 260811: 날짜 기본값도 서버 시간대(UTC) 영향을 받지 않도록 now_kst() 사용.
+        d_from = cA.date_input("시작일", value=(now_kst() - pd.Timedelta(days=760)).date(), key="wx_from")
+        d_to = cB.date_input("종료일", value=now_kst().date(), key="wx_to")
         stn = st.text_input("지점번호 (108=서울)", value=WEATHER_STN_DEFAULT, key="wx_stn")
         if st.button("🔗 기상청에서 받아오기", use_container_width=True, key="wx_fetch"):
             if not key.strip():
