@@ -4275,7 +4275,20 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         pass
     wb = openpyxl.load_workbook(raw_file, read_only=True)
     ws = wb.worksheets[0]
-    if ws.max_column != INV_RAW_COLS:
+    _tail_col_ignored = ws.max_column == INV_RAW_COLS + 1
+    if _tail_col_ignored:
+        # 260811 이후 회사 ERP 추출 파일 일부에서 95번째(맨 끝) 열이 통째로 빈 채 딸려오는 경우가
+        # 확인됨(엑셀 병합헤더 잔재로 추정 — row1 그룹헤더 '계'가 실제 재고계 칸보다 1칸 더 넓게
+        # 병합돼 있고, row2 컬럼명·데이터는 전부 공란). 그 칸에 실제 값이 있으면(향후 로우데이터
+        # 스펙이 진짜로 바뀐 걸 수 있으니) 중단하고 확인을 요청, 전부 공란이면 무시하고 94열로 처리
+        # (아래 로직은 어차피 인덱스 0~93만 사용하므로 95번째 열은 있어도 그냥 안 쓰인다).
+        _tail_vals = [r[INV_RAW_COLS] for r in ws.iter_rows(min_row=3, values_only=True)
+                     if r and r[0] not in (None, "")]
+        if any(v not in (None, "") for v in _tail_vals):
+            raise ValueError(f"로우데이터 열 수 {ws.max_column} ≠ {INV_RAW_COLS} — 마지막(95번째) 열에 "
+                             f"값이 들어있어요. 빈 꼬리 컬럼이면 자동으로 무시하는데, 이번엔 값이 있어서 "
+                             f"로우데이터 스펙이 바뀐 건 아닌지 확인이 필요해요(담당팀에 문의해주세요).")
+    elif ws.max_column != INV_RAW_COLS:
         raise ValueError(f"로우데이터 열 수 {ws.max_column} ≠ {INV_RAW_COLS} — 파일을 확인하세요 "
                          f"(93열이면 '사이즈구분' 컬럼이 없는 구형식이에요 · 48열이면 매출 파일이에요).")
     rows = [r for r in ws.iter_rows(min_row=3, values_only=True)]
@@ -4696,6 +4709,8 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         "scode_blank_had_master": scode_blank_had_master,
         "scode_mismatch": scode_mismatch,
         "has_size_master": bool(master),
+        # 260811: 로우데이터 맨 끝에 빈 95번째 열이 딸려와서 94열로 취급하고 무시했는지 여부.
+        "tail_col_ignored": _tail_col_ignored,
     }
     return buf.getvalue(), report
 
@@ -4847,6 +4862,9 @@ def render_inventory():
                    f"X={rep['X']} · Y={rep['Y']} · 세트그룹 {rep['pairs']}쌍 (짝없음 {rep['nopair']})")
         st.download_button("⬇ 가공 결과 엑셀 다운로드", res["bytes"], file_name=res["fname"],
                            mime=XLSX_MIME, type="primary", use_container_width=True, key="inv_dl")
+        if rep.get("tail_col_ignored"):
+            st.caption("ℹ️ 로우데이터 맨 끝에 빈 95번째 열이 딸려있어서 자동으로 무시하고 94열로 처리했어요"
+                      "(엑셀 병합헤더 잔재로 보여요 — 값이 있었다면 에러로 중단됐을 거예요).")
         if rep.get("season_group_summary") or rep.get("year_group_summary") or rep.get("cat_level"):
             st.caption(f"🧩 적용된 비교 대상군 — 카테고리 기준: **{rep.get('cat_level', '중카테고리')}** · "
                        f"시즌: **{rep.get('season_group_summary', '–')}** · "
