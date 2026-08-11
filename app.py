@@ -3657,7 +3657,7 @@ def render_weekly_report(df):
 
 
 # ==============================================================================
-# 재고 모니터링 1차 가공  ─ 260731 확정 기준 · v3 106열 (2026-08-02 ERP 이식)
+# 재고 모니터링 1차 가공  ─ 260731 확정 기준 · v3.3 112열 (2026-08-02 ERP 이식, 260811 사이즈구분 컬럼 + 가격시뮬 반영)
 # ==============================================================================
 # 원본: '쇼핑몰재고 모니터링 자료 1차 가공' 프로젝트 process_260731.py (판정 로직 1:1 이식)
 #  · 선판정: 이관구분='오프라인' → AA·AB·AF '오프라인' / 온라인창고<20 → AA·AF '재고20미만'(AB 미적용)
@@ -3676,15 +3676,52 @@ def render_weekly_report(df):
 #  · 260807 개정(size-grade-classifier 스킬 반영): A09 핵심 사이즈 M·L(2개) → M·L·XL(3개) 확장,
 #    빅은 XXL만 남음. 단품 등급(_INV_SYSTEMS["A09"])·SET 등급(_INV_SET_CORE_A09 등) 둘 다 반영.
 #    A16(핵심 2개 그대로)은 영향 없음.
-#  · 출력: 106열 v3 — 서식은 저장소 동봉 템플릿(inventory_template.xlsx = 최신 v3 결과물)에서 1:1 복제
+#  · ⚠️ 260811 개정 — 사이즈코드 판정 소스 전환('쇼핑몰재고 모니터링 1차' 프로젝트 260811 전달사항 + process_260811.py):
+#    로우데이터에 신규 컬럼 '사이즈구분'이 추가됨(사이즈정보 14칸 그룹 바로 앞, raw 79번째 열=0-index 78).
+#    이제 이 컬럼값을 사이즈코드(A16/A17/A09/A05/A06/A18)로 "직접" 사용한다 — 더 이상 사이즈 마스터
+#    (품번→사이즈코드)를 조회해서 채우지 않는다. 등급 산정 알고리즘(_inv_grade_one/_inv_set_grade 등)
+#    자체는 전혀 바뀌지 않았다 — 바뀐 건 "사이즈코드를 어디서 가져오는가" 뿐이다.
+#    · 공란(값 없음) → 사이즈 마스터로 되돌아가 보완하지 않고 바로 '해당없음'(미매칭) 처리.
+#    · 사이즈 마스터는 이제 필수가 아니라 옵션(참고용) — 있으면 새 컬럼값과의 불일치 건수만 참고 표시.
+#    · 로우데이터 열 수 기준 93 → 94열로 상향(신규 컬럼 1개 증가). 94열이 아니면 처리 거부.
+#    · 출력도 신규 '사이즈구분' 컬럼 1개가 늘어 106 → 107열(v3.2)로 변경, CN열(92번째)에 위치.
+#      구 106열 템플릿을 넣으면 자동으로 컬럼 1개를 삽입해 107열로 보정한다.
+#  · 출력: 112열 v3.3 — 서식은 저장소 동봉 템플릿(inventory_template.xlsx = 최신 v3.3 결과물)에서 1:1 복제
 #  · 260802 서식 확정: C·K·L·M·AA·AB·AF·AG·AH·AI 노란색 / BA·BG·BH·BI 초록색 / BK~CM 숨김
-# ※ 사이즈 마스터(품번→사이즈코드)는 DB(size_master)에 저장 — 사이드바(관리자)에서 업로드/교체.
+#    (사이즈구분 신규 컬럼은 로우파일에 이미 있는 값을 그대로 통과시키는 열이라 노란색 대상 아님 — 기본 서식 유지)
+#  · ⚠️ 260811 추가 개정 — 가격 시뮬레이션 5컬럼 신설(팀장 지시, 중태님과 채팅으로 계산식 검증 확정):
+#    로우데이터의 '몰가격'(raw J열=0-idx9) · '기준판매가'(raw AB열=0-idx27) 두 값으로 결과물의 몰가격
+#    컬럼(V열=22번째) 바로 뒤에 신규 가격 5컬럼을 삽입한다 — (네이버)상시가·(쿠폰진행)상시가·
+#    (쿠폰진행)행사가·(쿠폰X/무배)상시가·(쿠폰X/무배)행사가. 그 뒤에 있던 기준판매가·사이즈구분·
+#    사이즈14칸 등 전부 5칸씩 밀려 결과물이 107 → 112열(v3.3)로 확장된다. 계산식:
+#      · 상시가(네이버) = 몰가격×1.05 / 상시가(쿠폰진행) = 몰가격×1.15 / 행사가(쿠폰진행) = 몰가격×1.1
+#      · 상시가(쿠폰X/무배) = 몰가격<30,000이면 (몰가격×1.05)+3,000, 아니면 몰가격×1.05
+#      · 행사가(쿠폰X/무배) = 몰가격<30,000이면 몰가격+3,000, 아니면 몰가격
+#    공통 규칙: (1) 5개 전부 100원 단위로 반올림(10원 단위가 안 남게). (2) 기준판매가에 값이 있고
+#    계산값이 그 값을 넘으면 → 그 계산 하나만 기준판매가로 대체(중간 단계 없이 1회 비교·캡핑). 기준
+#    판매가가 공란이면 캡핑 없이 계산값 그대로. (3) 몰가격이 공란인 행은 5컬럼 전부 공란.
+#    서식: 5컬럼 전부 노란색, 헤더는 그룹행(GROUP_R) 비우고 실제 컬럼명만(사이즈구분과 동일 방식).
+#    구 107열 템플릿을 넣으면 자동으로 5컬럼을 삽입해 112열로 보정한다(구 106열 템플릿도 106→107→112
+#    2단계 자동 보정).
+# ※ 사이즈 마스터(품번→사이즈코드)는 DB(size_master)에 저장 — 260811부터 판정에는 미사용, 참고 보고 전용.
 # ※ 아이템 마스터(아이템코드→대/중/소카테고리)는 DB(item_master)에 저장 — 사이드바(관리자)에서 업로드/교체.
 #   재고모니터링 중카테고리·판매분석 아이템그룹이 모두 여기서 나온다(단일 소스). 미등록 코드만 구 하드코딩 폴백.
 # ※ 재고 로우데이터는 DB에 적재하지 않음(그때그때 가공→엑셀 다운로드만). 가공은 전 팀원 사용 가능.
 INV_TEMPLATE_FILE = "inventory_template.xlsx"   # GitHub 저장소에 weekly_template.xlsx처럼 동봉
 SIZE_MASTER_TABLE = "size_master"
 ITEM_MASTER_TABLE = "item_master"
+# 260811: 사이즈구분 컬럼 도입으로 입출력 스펙 변경 — 하드코딩 대신 상수로 관리.
+INV_RAW_COLS = 94          # 로우데이터 총 열 수 (구 93 → 94, '사이즈구분' 신규 1열)
+# 260811(가격시뮬): 몰가격 뒤에 신규 가격 5컬럼 삽입 — 결과물 107 → 112열(v3.3)로 확장.
+INV_PRICE_SIM_COL = 23     # 신규 가격 5컬럼 시작 위치(몰가격=22번째 바로 다음)
+INV_PRICE_SIM_N = 5
+INV_PRICE_SIM_HEADERS = ["(네이버) 상시가", "(쿠폰진행) 상시가", "(쿠폰진행) 행사가",
+                         "(쿠폰X/무배) 상시가", "(쿠폰X/무배) 행사가"]
+INV_RAW_MOLGA_COL = 9      # raw 0-index — 몰가격(J열)
+INV_RAW_GIJUN_COL = 27     # raw 0-index — 기준판매가(AB열)
+INV_TOTAL_COLS = 112       # 결과물 총 열 수 (구 106→107→112)
+INV_SIZECODE_COL = 97      # 결과물에서 '사이즈구분' 컬럼 위치 (구 92 + 가격시뮬 5칸)
+_INV_KNOWN_SIZE_CODES = {"A16", "A17", "A09", "A05", "A06", "A18"}
 
 # 260806: 아이템 마스터에도 폴백에도 없는 아이템 코드의 표기값. 예전엔 이런 코드를 만나면 가공을
 #         통째로 중단했는데(팀 요청으로 변경), 이제는 해당 상품 행만 이 값으로 표기하고 등급
@@ -3788,9 +3825,13 @@ def _inv_set_side(rec):
     return None
 
 # 260802 확정: 컬럼 전체(헤더+데이터) 채우기 색 강제 지정 + 상시 숨김 컬럼
-_INV_YELLOW_COLS = {3, 11, 12, 13, 27, 28, 32, 33, 34, 35}   # C,K,L,M,AA,AB,AF,AG,AH,AI
-_INV_GREEN_COLS = {53, 59, 60, 61}                            # BA,BG,BH,BI
-_INV_HIDE_COLS = set(range(63, 92))                           # BK~CM
+# 260811(가격시뮬): 몰가격(22) 뒤에 5컬럼이 끼어들면서 구 27번째 이후 컬럼이 전부 +5 밀림 —
+# 아래 세 상수는 밀린 뒤(112열 기준) 위치. C,K,L,M(그대로) + 신규 가격5컬럼(23~27, 전부 노란색) +
+# AA,AB,AF,AG,AH,AI(구 27,28,32,33,34,35 → +5 = 32,33,37,38,39,40).
+_INV_YELLOW_COLS = ({3, 11, 12, 13} | set(range(INV_PRICE_SIM_COL, INV_PRICE_SIM_COL + INV_PRICE_SIM_N))
+                    | {32, 33, 37, 38, 39, 40})
+_INV_GREEN_COLS = {58, 64, 65, 66}                            # BA,BG,BH,BI (구 53,59,60,61 → +5)
+_INV_HIDE_COLS = set(range(68, 97))                           # BK~CM (구 63~91 → +5)
 
 
 def _inv_grade_one(s14, sd, X, Y):
@@ -3888,6 +3929,45 @@ def _inv_num(v):
 
 def _inv_cutoff(p):
     return "A" if p <= 20 else "B" if p <= 50 else "C" if p <= 80 else "D"
+
+
+def _inv_price_sim(mol, gijun):
+    """260811(가격시뮬) 몰가격·기준판매가로 신규 가격 5컬럼 계산 — (네이버)상시가·(쿠폰진행)상시가·
+    (쿠폰진행)행사가·(쿠폰X/무배)상시가·(쿠폰X/무배)행사가 순.
+
+    mol=몰가격(숫자 또는 None), gijun=기준판매가(숫자 또는 None) — 둘 다 _inv_num() 등으로 이미
+    숫자/None 변환된 값이어야 한다.
+    - 몰가격이 없으면(공란) 5개 전부 None.
+    - 계산식: 상시가(네이버)=몰가격×1.05 / 상시가(쿠폰진행)=몰가격×1.15 / 행사가(쿠폰진행)=몰가격×1.1 /
+      상시가(쿠폰X/무배)=몰가격<30,000이면 (몰가격×1.05)+3,000 아니면 몰가격×1.05 /
+      행사가(쿠폰X/무배)=몰가격<30,000이면 몰가격+3,000 아니면 몰가격.
+    - 5개 전부 100원 단위 반올림(10원 단위가 안 남게).
+    - 기준판매가가 있고 계산값이 그 값을 넘으면 → 그 계산 하나만 기준판매가로 대체(1회 비교·캡핑,
+      중간 단계 없음). 기준판매가가 공란이면 캡핑 없이 계산값 그대로.
+    (2026-08-11 팀장 지시 · 채팅으로 8개 실데이터 예시 40칸 전수 검증 후 확정된 로직)
+    """
+    if mol is None:
+        return [None] * 5
+
+    def _r100(v):
+        return int(round(v / 100.0)) * 100
+
+    def _cap(v):
+        v = _r100(v)
+        if gijun is not None and v > _r100(gijun):
+            v = _r100(gijun)
+        return v
+
+    c1 = _cap(mol * 1.05)
+    c2 = _cap(mol * 1.15)
+    c3 = _cap(mol * 1.1)
+    if mol < 30000:
+        c4 = _cap(mol * 1.05 + 3000)
+        c5 = _cap(mol + 3000)
+    else:
+        c4 = _cap(mol * 1.05)
+        c5 = _cap(mol)
+    return [c1, c2, c3, c4, c5]
 
 
 def read_size_master_file(uploaded_file):
@@ -4164,9 +4244,11 @@ def _inv_peek_years(raw_file):
 
 def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                       season_group_map=None, year_group_map=None, cat_level="중카테고리"):
-    """재고 모니터링 로우데이터(93열) → 106열 v3 가공 엑셀 (process_260731 main() 1:1 이식).
+    """재고 모니터링 로우데이터(94열, '사이즈구분' 컬럼 포함) → 112열 v3.3 가공 엑셀
+    (process_260731 main() 1:1 이식 + 260811 사이즈코드 판정 소스 전환 + 가격 시뮬레이션 5컬럼 반영).
 
-    raw_file=업로드 파일 객체, master=dict{품번:사이즈코드}, template_path=v3 서식 템플릿 경로.
+    raw_file=업로드 파일 객체, master=dict{품번:사이즈코드}(260811부터 판정에는 미사용, 참고 보고 전용),
+    template_path=v3.3 서식 템플릿 경로.
     season_group_map={시즌코드: 비교대상군 라벨}, year_group_map={년도코드: 비교대상군 라벨}이면
     AA·AB 등급의 모집단(카테고리×년도×시즌)에서 시즌·년도 축을 각각 그 라벨 기준으로 묶어서 계산한다
     (예: season_group_map={"Z":"Z+A+C+D","A":"Z+A+C+D","C":"Z+A+C+D","D":"Z+A+C+D","B":"B"}
@@ -4193,8 +4275,9 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         pass
     wb = openpyxl.load_workbook(raw_file, read_only=True)
     ws = wb.worksheets[0]
-    if ws.max_column != 93:
-        raise ValueError(f"로우데이터 열 수 {ws.max_column} ≠ 93 — 파일을 확인하세요 (48열이면 매출 파일이에요).")
+    if ws.max_column != INV_RAW_COLS:
+        raise ValueError(f"로우데이터 열 수 {ws.max_column} ≠ {INV_RAW_COLS} — 파일을 확인하세요 "
+                         f"(93열이면 '사이즈구분' 컬럼이 없는 구형식이에요 · 48열이면 매출 파일이에요).")
     rows = [r for r in ws.iter_rows(min_row=3, values_only=True)]
     skipped = sum(1 for r in rows if r[0] in (None, ""))
     rows = [r for r in rows if r[0] not in (None, "")]
@@ -4207,6 +4290,12 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         pn = str(r[0]).strip(); item = str(r[14]).strip()
         season_raw = str(r[16]).strip()
         year_raw = str(r[15]).strip()
+        # 260811: 사이즈코드는 사이즈 마스터 조회 대신 로우데이터의 '사이즈구분' 컬럼(raw 79번째 열,
+        # 0-index 78)에서 직접 읽는다. 공란이면 마스터로 되돌아가 보완하지 않고 바로 '해당없음' 처리
+        # (scode=None). 사이즈 마스터(master)는 더 이상 판정에 쓰지 않고, 새 컬럼값과의 불일치를
+        # 참고 보고하는 용도로만 scode_master에 남겨둔다.
+        scode_cell = r[78]
+        scode = str(scode_cell).strip() if scode_cell not in (None, "") else None
         rec = dict(raw=r, pn=pn, item=item, cat=_inv_cat_lookup(item),
                    cat_level_val=_inv_cat_level_value(item, cat_level),  # C열·모집단에 실제로 쓰이는 값
                    year=year_raw, season=season_raw,
@@ -4214,9 +4303,21 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                    year_grp=(year_group_map or {}).get(year_raw, year_raw),          # 비교 대상군(묶음) 라벨
                    off=str(r[22]).strip() == "오프라인",
                    stock=_inv_num(r[39]) or 0, sales=_inv_num(r[45]) or 0, depl=_inv_num(r[47]),
-                   size14={i + 1: int(_inv_num(r[78 + i]) or 0) for i in range(14)},
-                   scode=master.get(pn))
+                   size14={i + 1: int(_inv_num(r[79 + i]) or 0) for i in range(14)},
+                   scode=scode, scode_master=master.get(pn))
         recs.append(rec)
+
+    # 260811: 사이즈구분에 정식 6종(A16/A17/A09/A05/A06/A18) 외의 값이 있으면 중단하지 않고 경고만
+    # 남긴다 — 오탈자이거나, 아직 등급 로직에 반영되지 않은 신규 사이즈체계일 수 있음. 해당 건은
+    # _INV_SYSTEMS에 없으므로 AC 판정에서 자동으로 '해당없음' 처리된다.
+    unk_size_codes = sorted({r["scode"] for r in recs
+                             if r["scode"] and r["scode"] not in _INV_KNOWN_SIZE_CODES})
+    # 260811: 사이즈구분 공란(미매칭) 건수 + 참고용 사이즈 마스터 대조(마스터가 있을 때만 의미 있음).
+    scode_blank = sum(1 for r in recs if r["scode"] is None)
+    scode_blank_had_master = sum(1 for r in recs if r["scode"] is None and r.get("scode_master"))
+    scode_mismatch = [(r["pn"], r["scode"], r["scode_master"]) for r in recs
+                      if master and r["scode"] and r.get("scode_master")
+                      and r["scode"] != r["scode_master"]]
 
     _item_master = load_item_master()
     fallback_items = sorted({r["item"] for r in recs if r["item"] not in _item_master})
@@ -4384,14 +4485,51 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         for r in g:
             r["AD"] = stt; r["AE"] = sg
 
-    # ── 출력: 템플릿(v3 106열) 복제 후 데이터 교체 (v3.1: 상단 메타 5행 + 데이터 9행~) ──
+    # ── 출력: 템플릿(v3.3 112열) 복제 후 데이터 교체 (상단 메타 6행 + 데이터 9행~) ──
     if not os.path.exists(template_path):
         raise ValueError("서식 템플릿(inventory_template.xlsx)이 저장소에 없어요 — "
-                         "최신 v3 결과물을 inventory_template.xlsx로 GitHub에 올려주세요.")
+                         "최신 v3.3 결과물을 inventory_template.xlsx로 GitHub에 올려주세요.")
     twb = openpyxl.load_workbook(template_path)
     tws = twb.active
-    if tws.max_column != 106:
-        raise ValueError(f"템플릿 열 수 {tws.max_column} ≠ 106 — v3 결과물 파일을 템플릿으로 지정하세요.")
+
+    def _upgrade_insert(col, amount, style_src_col):
+        """템플릿에 col 위치부터 amount개 컬럼을 삽입하고, 병합범위를 이동 재병합한 뒤
+        style_src_col의 서식(폰트·테두리·정렬·표시형식·채우기·열너비)을 새 컬럼들에 복제한다.
+        openpyxl의 insert_cols는 병합 셀 범위를 자동으로 밀어주지 않으므로(문서상 명시된 한계),
+        삽입 지점 이상에 걸린 병합을 먼저 해제한 뒤 삽입하고, 같은 범위를 +amount칸 이동해 재병합한다.
+        """
+        affected = [m for m in list(tws.merged_cells.ranges) if m.max_col >= col]
+        saved = [(m.min_row, m.max_row, m.min_col, m.max_col) for m in affected]
+        for m in affected:
+            tws.unmerge_cells(str(m))
+        tws.insert_cols(col, amount=amount)
+        for r1, r2, c1, c2 in saved:
+            nc1 = c1 + amount if c1 >= col else c1
+            nc2 = c2 + amount if c2 >= col else c2
+            tws.merge_cells(start_row=r1, start_column=nc1, end_row=r2, end_column=nc2)
+        for row in range(1, tws.max_row + 1):
+            src = tws.cell(row, style_src_col)
+            for k in range(amount):
+                dst = tws.cell(row, col + k)
+                dst.font = copy(src.font); dst.border = copy(src.border)
+                dst.alignment = copy(src.alignment); dst.number_format = src.number_format
+                dst.fill = copy(src.fill)
+        src_w = tws.column_dimensions[get_column_letter(style_src_col)].width
+        if src_w:
+            for k in range(amount):
+                tws.column_dimensions[get_column_letter(col + k)].width = src_w
+
+    if tws.max_column == 106:
+        # 260811: 구 106열 템플릿(사이즈구분 컬럼 도입 전) 자동 보정 — 신규 컬럼 1개 삽입(구 92번째,
+        # 오른쪽 이웃이던 구 사이즈95 칸 서식을 복제). 106→107이 된 뒤 아래 107 분기로 이어서 처리된다.
+        _upgrade_insert(92, 1, 93)
+    if tws.max_column == 107:
+        # 260811(가격시뮬): 몰가격(22) 바로 뒤에 신규 가격 5컬럼 삽입 — 107→112.
+        # 서식은 몰가격 칸(왼쪽 이웃, 이미 가격 형식이 잡혀있는 숫자 컬럼) 것을 그대로 복제.
+        _upgrade_insert(INV_PRICE_SIM_COL, INV_PRICE_SIM_N, INV_PRICE_SIM_COL - 1)
+    if tws.max_column != INV_TOTAL_COLS:
+        raise ValueError(f"템플릿 열 수 {tws.max_column} ≠ {INV_TOTAL_COLS}(또는 구버전 106·107) — "
+                         f"v3 계열 결과물을 템플릿으로 지정하세요.")
     names_row = next((r for r in range(1, 12) if tws.cell(r, 10).value == "품번"), None)
     if names_row is None:
         raise ValueError("템플릿에서 컬럼명 행(품번)을 찾지 못했어요.")
@@ -4426,7 +4564,8 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         f"변수 X= {X}장 (사이즈 OK 기준)",
         f"변수 Y= {Y}장 (동일등급내에서 추가로 등급 나눌때 기준 수량)",
         f"작업일: {workdate}",
-        f"가공기준: 260731 확정판 (5등급 A~E · 재고20미만 · 오프라인 제외 · 모집단 {cat_level}×년도×시즌)",
+        f"가공기준: 260731 확정판 + 260811 사이즈구분 로우컬럼 직접반영 + 가격 시뮬레이션 5컬럼 "
+        f"(5등급 A~E · 재고20미만 · 오프라인 제외 · 모집단 {cat_level}×년도×시즌)",
         f"비교 대상군(등급 모집단 묶음) — 시즌: {season_group_summary} / 년도: {year_group_summary}",
     ]
     mf = Font(name="맑은 고딕", size=11, bold=True)
@@ -4444,6 +4583,12 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         tws.cell(NAMES_R, c).fill = fill_green
     # 260803: C열 헤더는 cat_level 선택(중카테고리/소카테고리/아이템코드)에 맞춰 텍스트도 같이 바뀐다.
     tws.cell(NAMES_R, 3).value = cat_level
+    # 260811: 신규 '사이즈구분' 컬럼 헤더명 기입 (그룹행은 비워둠 — 사이즈정보 그룹과는 별개의
+    # 단일 컬럼, J·Z·AJ열과 같은 성격). 로우파일 값을 그대로 통과시키는 열이라 노란색 대상 아님.
+    tws.cell(NAMES_R, INV_SIZECODE_COL).value = "사이즈구분"
+    # 260811(가격시뮬): 신규 가격 5컬럼 헤더명 기입 (그룹행은 비워둠 — 사이즈구분과 동일 방식).
+    for _k, _h in enumerate(INV_PRICE_SIM_HEADERS):
+        tws.cell(NAMES_R, INV_PRICE_SIM_COL + _k).value = _h
 
     # 260803 확정: 위 초록(GREEN) 컬럼들의 상위 그룹 헤더(GROUP_R, 병합 셀)도 같은 초록으로.
     # 병합 셀은 좌상단 셀에만 실제로 서식이 저장되므로, 열이 속한 병합범위의 좌상단 열을 찾아 그 칸에만 칠한다
@@ -4457,11 +4602,13 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         tws.cell(GROUP_R, _group_header_fill_col(c)).fill = fill_green
     dstyle = {c: (copy(tws.cell(DATA_R, c).font), copy(tws.cell(DATA_R, c).border),
                   copy(tws.cell(DATA_R, c).alignment), tws.cell(DATA_R, c).number_format,
-                  copy(tws.cell(DATA_R, c).fill)) for c in range(1, 107)}
+                  copy(tws.cell(DATA_R, c).fill)) for c in range(1, INV_TOTAL_COLS + 1)}
     if tws.max_row >= DATA_R:
         tws.delete_rows(DATA_R, tws.max_row - DATA_R + 1)
 
-    NUM_COLS = set(range(19, 24)) | set(range(37, 107))
+    # 260811(가격시뮬): 구 range(19,24)·range(37,...) → 가격5컬럼(23~27) 포함해 +5 밀림.
+    NUM_COLS = set(range(19, 29)) | set(range(42, INV_TOTAL_COLS + 1))
+    _INV_AH_COL_LETTER = get_column_letter(34 + INV_PRICE_SIM_N)  # 구 AH(34)열 → +5 이동한 위치
 
     def to_num(v):
         if v is None or v == "":
@@ -4480,17 +4627,25 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             vals[4 + j] = raw[rc]
         vals[10], vals[11] = rec["pn"], rec["K"]
         vals[12] = rec["L"] or None; vals[13] = rec["M"] or None
-        for j in range(12):
-            vals[14 + j] = raw[1 + j]
-        vals[26] = raw[21]
-        vals[27], vals[28], vals[29] = rec["AA"], rec["AB"], rec["AC"]
-        vals[30], vals[31], vals[32] = rec["AD"], rec["AE"], rec["AF"]
-        vals[33] = vals[34] = None
-        vals[35] = f"=AH{rr}/T{rr}"
-        vals[36] = raw[22]
-        for j in range(70):
-            vals[37 + j] = raw[23 + j]
-        for c in range(1, 107):
+        for j in range(9):
+            vals[14 + j] = raw[1 + j]                          # 14~22 = raw1~9 (색상..몰가격)
+        # 260811(가격시뮬): 몰가격(22) 바로 뒤에 신규 가격 5컬럼(23~27) 삽입 — 이후 컬럼은 전부 +5.
+        _mol = _inv_num(raw[INV_RAW_MOLGA_COL])
+        _gijun = _inv_num(raw[INV_RAW_GIJUN_COL])
+        for _k, _v in enumerate(_inv_price_sim(_mol, _gijun)):
+            vals[INV_PRICE_SIM_COL + _k] = _v
+        vals[28], vals[29], vals[30] = raw[10], raw[11], raw[12]   # 할인율·최초입고일·최초출고일(구23~25)
+        vals[31] = raw[21]                                          # 수정일(구26)
+        vals[32], vals[33], vals[34] = rec["AA"], rec["AB"], rec["AC"]   # 구27,28,29
+        vals[35], vals[36], vals[37] = rec["AD"], rec["AE"], rec["AF"]   # 구30,31,32
+        vals[38] = vals[39] = None                                  # 구33,34
+        vals[40] = f"={_INV_AH_COL_LETTER}{rr}/T{rr}"                # 구35 (AH→새 위치로 셀참조 갱신)
+        vals[41] = raw[22]                                          # 이관구분(구36)
+        # 260811: 패스스루 구간이 raw24~93(70열) → raw24~94(71열)로 1열 확장. 신규 '사이즈구분'이
+        # raw79 자리에 자연스럽게 끼어 있어 이 구간 안에서 함께 넘어간다(출력 97번째 칸에 그대로 안착).
+        for j in range(71):
+            vals[42 + j] = raw[23 + j]                              # 구 37+j → +5
+        for c in range(1, INV_TOTAL_COLS + 1):
             v = vals.get(c)
             if v == "":
                 v = None
@@ -4507,7 +4662,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                 nc.fill = fl
         tws.row_dimensions[rr].height = 20.25
 
-    tws.auto_filter.ref = f"A{NAMES_R}:DB{NAMES_R + len(recs)}"
+    tws.auto_filter.ref = f"A{NAMES_R}:{get_column_letter(INV_TOTAL_COLS)}{NAMES_R + len(recs)}"
     tws.freeze_panes = f"K{DATA_R}"
     # 260802 확정: BK~CM 항상 숨김
     for c in _INV_HIDE_COLS:
@@ -4535,6 +4690,12 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         "unmapped_rows": unk_rows,
         "unmapped_pns": sorted({r["pn"] for r in recs if r["unmapped"]}),
         "cat_level": cat_level,
+        # 260811: 사이즈코드 소스가 '사이즈구분' 로우컬럼으로 바뀐 데 따른 참고 리포트.
+        "unknown_size_codes": unk_size_codes,
+        "scode_blank": scode_blank,
+        "scode_blank_had_master": scode_blank_had_master,
+        "scode_mismatch": scode_mismatch,
+        "has_size_master": bool(master),
     }
     return buf.getvalue(), report
 
@@ -4565,31 +4726,36 @@ def _inv_group_ui(codes, key_prefix):
 
 
 def render_inventory():
-    """🏷️ 재고 가공 메뉴 — 로우데이터 업로드 → 가공 → v3 엑셀 다운로드 (전 팀원 사용 가능)."""
-    st.subheader("🏷️ 쇼핑몰 재고 가공 · 1차 (260731 확정 기준 · v3 106열)")
-    st.caption("재고모니터링 로우데이터(93열)를 올리면 AA·AB 5등급, AF(AI제안방향), "
-               "사이즈 등급(AC), SET 판정(AD·AE)을 부여한 106열 v3 엑셀을 만들어 드려요. "
-               "재고 데이터는 DB에 저장하지 않아요(가공 → 다운로드만).")
+    """🏷️ 재고 가공 메뉴 — 로우데이터 업로드 → 가공 → v3.3 엑셀 다운로드 (전 팀원 사용 가능)."""
+    st.subheader("🏷️ 쇼핑몰 재고 가공 · 1차 (260731 확정 기준 · v3.3 112열)")
+    st.caption("재고모니터링 로우데이터(94열, '사이즈구분' 컬럼 포함)를 올리면 AA·AB 5등급, AF(AI제안방향), "
+               "사이즈 등급(AC), SET 판정(AD·AE), 가격 시뮬레이션 5컬럼을 부여한 112열 v3.3 엑셀을 만들어 드려요. "
+               "재고 데이터는 DB에 저장하지 않아요(가공 → 다운로드만). "
+               "260811부터 사이즈코드는 로우데이터의 '사이즈구분' 컬럼값을 그대로 사용해요(마스터 조회 안 함). "
+               "몰가격 바로 뒤에 (네이버)상시가·(쿠폰진행)상시가·(쿠폰진행)행사가·(쿠폰X/무배)상시가·"
+               "(쿠폰X/무배)행사가 5컬럼이 노란색으로 추가돼요(100원 단위 반올림, 기준판매가 넘으면 자동 캡핑).")
 
     master = load_size_master()
     n_master = len(master)
     n_item_master = item_master_row_count()
     tpl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), INV_TEMPLATE_FILE)
     c_info1, c_info2, c_info3 = st.columns(3)
-    c_info1.caption(f"📏 사이즈 마스터: **{n_master:,}개** 품번"
-                    + ("" if n_master else " — ⚠️ 관리자가 사이드바에서 업로드해야 해요"))
+    c_info1.caption(f"📏 사이즈 마스터(참고용, 판정엔 미사용): **{n_master:,}개** 품번"
+                    if n_master else "📏 사이즈 마스터(참고용): 미등록 — 없어도 판정엔 지장 없어요")
     c_info2.caption("🧾 서식 템플릿: " + ("**동봉됨** (inventory_template.xlsx)" if os.path.exists(tpl_path)
                                           else "⚠️ **없음** — inventory_template.xlsx를 GitHub에 올려야 해요"))
     c_info3.caption(f"🗂️ 아이템 마스터: **{n_item_master:,}개** 코드"
                     + ("" if n_item_master else " — 미등록 시 구 기준(니트류·티셔츠류 분리)으로 자동 대체"))
-    if not n_master:
-        st.warning("사이즈 마스터(품번→사이즈코드)가 비어 있어요. 사이즈 등급(AC)·SET 판정(AD·AE)이 "
-                   "전부 '해당없음'으로 나오니, 관리자에게 사이드바 **📏 사이즈 마스터 업로드**를 요청하세요.")
+    st.caption("ℹ️ **260811부터 사이즈 마스터는 판정에 쓰지 않아요.** 사이즈 등급(AC)·SET 판정(AD·AE)은 "
+               "로우데이터에 함께 오는 '사이즈구분' 컬럼값을 그대로 사용해요. 사이즈 마스터를 등록해두면 "
+               "새 컬럼값과 다른 건수만 참고로 알려드려요(결과에는 영향 없음).")
 
     # ── 가공 옵션 (X·Y는 변수 — 시즌 시점 따라 조정, 하드코딩 금지 원칙) ──
     o1, o2, o3, o4 = st.columns(4)
     X = o1.number_input("변수 X — 사이즈 OK 기준(장)", min_value=1, max_value=999, value=10, key="inv_x")
-    Y = o2.number_input("변수 Y — 동일등급 내 세분 기준(장)", min_value=1, max_value=999, value=20, key="inv_y")
+    # 260811 재확인: size-grade-classifier 스킬(classify.py/set_classify.py) 기본값이 Y=30이라
+    # 스킬과 맞춤(과거 이 화면의 기본값 20은 기준 문서와 어긋나 있었음).
+    Y = o2.number_input("변수 Y — 동일등급 내 세분 기준(장)", min_value=1, max_value=999, value=30, key="inv_y")
     workdate = o3.text_input("작업일", value=datetime.now().strftime("%y.%m.%d"), key="inv_workdate")
     period = o4.text_input("기간판매 조회 기준", placeholder="예: 26.07.20~26.07.31", key="inv_period")
 
@@ -4600,7 +4766,7 @@ def render_inventory():
                "결과 엑셀 C열의 헤더·값도 이 선택을 그대로 따라가요. 기본값은 중카테고리(기존과 동일)예요.")
     cat_level = st.selectbox("카테고리 기준", INV_CAT_LEVELS, index=0, key="inv_catlevel")
 
-    up = st.file_uploader("재고모니터링 로우데이터 업로드 (93열 엑셀 1개)",
+    up = st.file_uploader("재고모니터링 로우데이터 업로드 (94열 엑셀 1개 · '사이즈구분' 컬럼 포함)",
                           type=["xlsx"], accept_multiple_files=False, key="inv_up")
 
     # ── 시즌·년도 비교 대상군(묶음) 설정 — AA·AB 등급 모집단(카테고리×년도×시즌)의 '시즌'·'년도' 축을
@@ -4688,15 +4854,29 @@ def render_inventory():
         if rep["af_bad"]:
             st.warning(f"⚠️ AF 매트릭스 미커버 {rep['af_bad']}건 — '검증필요'로 표시했어요. 규칙 점검이 필요해요.")
         if rep["unmatched"]:
-            st.warning(f"⚠️ 사이즈 마스터 미매칭 {len(rep['unmatched'])}건 — AC/SET '해당없음' 처리. "
+            st.warning(f"⚠️ '사이즈구분' 공란(미매칭) {len(rep['unmatched'])}건 — AC/SET '해당없음' 처리. "
                        f"예: {', '.join(rep['unmatched'][:10])}"
                        + (" …" if len(rep["unmatched"]) > 10 else ""))
+            if rep.get("has_size_master") and rep.get("scode_blank_had_master"):
+                st.caption(f"↳ 이 중 과거 사이즈 마스터엔 값이 있었던 건 **{rep['scode_blank_had_master']}건** "
+                           f"— 로우데이터 생성 단계에서 '사이즈구분'을 못 채운 건일 수 있어요(신규 상품이라 "
+                           f"마스터에도 없는 것과는 성격이 달라요).")
+        if rep.get("unknown_size_codes"):
+            st.warning(f"⚠️ '사이즈구분'에 정식 6종(A16/A17/A09/A05/A06/A18) 외의 값 "
+                       f"{len(rep['unknown_size_codes'])}종 발견: **{', '.join(rep['unknown_size_codes'])}** "
+                       f"— 오탈자이거나 신규 사이즈체계일 수 있어요. 해당 건은 AC/SET '해당없음' 처리했어요.")
+        if rep.get("has_size_master") and rep.get("scode_mismatch"):
+            mm = rep["scode_mismatch"]
+            st.info(f"ℹ️ '사이즈구분' 값이 등록된 사이즈 마스터와 다른 건 {len(mm)}건 — "
+                    f"결과에는 항상 '사이즈구분' 값을 그대로 반영했어요(참고용). "
+                    f"예: {', '.join(f'{pn}({new}≠{old})' for pn, new, old in mm[:5])}"
+                    + (" …" if len(mm) > 5 else ""))
         if rep.get("unmapped_items"):
             st.warning(
                 f"⚠️ 중카테고리 매핑 없는 아이템 코드 {len(rep['unmapped_items'])}종 "
                 f"(**{', '.join(rep['unmapped_items'])}**) · 상품 {rep['unmapped_rows']:,}행 — "
                 f"가공은 정상 완료했고, 이 상품들만 C열·AA·AB·AF를 '{_INV_UNMAPPED}'로 표기했어요. "
-                f"사이즈 등급(AC)·SET 판정은 사이즈 마스터 기준이라 정상입니다. "
+                f"사이즈 등급(AC)·SET 판정은 로우데이터 '사이즈구분' 컬럼 기준이라 아이템 마스터와 무관하게 정상입니다. "
                 f"아이템 마스터에 코드를 추가하고 다시 돌리면 정상 등급을 받아요.")
             with st.expander(f"🔎 '{_INV_UNMAPPED}' 처리된 품번 {len(rep.get('unmapped_pns', []))}건 보기"):
                 st.dataframe(pd.DataFrame({"품번": rep.get("unmapped_pns", [])}),
@@ -4722,10 +4902,10 @@ def render_inventory():
             if rep["small_groups"]:
                 st.caption("AA 소형 모집단(≤4개): " +
                            " · ".join(f"{k} {v}개" for k, v in rep["small_groups"].items()))
-    st.caption("※ 판정 규칙(260731 확정판): AA/AB 모집단=카테고리(선택한 기준)×년도×시즌(카테고리는 "
-               "아이템 마스터 기준·소형그룹 예외 없음) · 선판정: 오프라인→'오프라인', 온라인창고<20→"
-               "'재고20미만'(AB 미적용) · AF 재고 분기 200 · AC/SET은 사이즈 마스터(A16 상의/A17 하의/"
-               "A09 M-L-X/A05 신발/A06 FREE/A18 아동) 기준.")
+    st.caption("※ 판정 규칙(260731 확정판 + 260811 사이즈구분 로우컬럼 반영): AA/AB 모집단=카테고리(선택한 "
+               "기준)×년도×시즌(카테고리는 아이템 마스터 기준·소형그룹 예외 없음) · 선판정: 오프라인→'오프라인', "
+               "온라인창고<20→'재고20미만'(AB 미적용) · AF 재고 분기 200 · AC/SET은 로우데이터 '사이즈구분' "
+               "컬럼(A16 상의/A17 하의/A09 M-L-X/A05 신발/A06 FREE/A18 아동) 기준, 공란은 '해당없음' 처리.")
 
 
 # ==============================================================================
@@ -6899,8 +7079,10 @@ def main():
                         st.error(f"사업계획 오류: {ex}")
 
             st.divider()
-            st.caption(f"📏 사이즈 마스터(품번→사이즈코드): 현재 **{size_master_row_count():,}개** 품번")
-            sup = st.file_uploader("사이즈 마스터 업로드 (재고 가공용 · C열=품번, D열=사이즈코드)",
+            st.caption(f"📏 사이즈 마스터(품번→사이즈코드): 현재 **{size_master_row_count():,}개** 품번 "
+                       "· 260811부터 재고 가공 판정에는 안 쓰고, 로우데이터 '사이즈구분' 컬럼값과의 "
+                       "불일치를 참고 보고하는 용도로만 쓰여요(없어도 무방).")
+            sup = st.file_uploader("사이즈 마스터 업로드 (참고용 · C열=품번, D열=사이즈코드)",
                                    type=["xlsx"], accept_multiple_files=False, key="sizemaster_up")
             if sup is not None:
                 if st.button("📏 사이즈 마스터 적용(전체 교체)", use_container_width=True):
