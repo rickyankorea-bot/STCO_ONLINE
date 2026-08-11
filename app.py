@@ -4793,7 +4793,10 @@ def render_inventory():
     # 260811 재확인: size-grade-classifier 스킬(classify.py/set_classify.py) 기본값이 Y=30이라
     # 스킬과 맞춤(과거 이 화면의 기본값 20은 기준 문서와 어긋나 있었음).
     Y = o2.number_input("변수 Y — 동일등급 내 세분 기준(장)", min_value=1, max_value=999, value=30, key="inv_y")
-    workdate = o3.text_input("작업일", value=datetime.now().strftime("%y.%m.%d"), key="inv_workdate")
+    # 260811: 같은 날 여러 번 다운로드해도 파일이 안 겹치도록 기본값에 시간(시:분)까지 포함.
+    # 사용자가 직접 지우고 다시 입력할 수도 있는 텍스트칸이라 강제는 아님(수정하면 엑셀 안
+    # "작업일" 표기·파일명 둘 다 그 값을 그대로 따라감).
+    workdate = o3.text_input("작업일", value=datetime.now().strftime("%y.%m.%d %H:%M"), key="inv_workdate")
     period = o4.text_input("기간판매 조회 기준", placeholder="예: 26.07.20~26.07.31", key="inv_period")
 
     # ── 카테고리 기준 설정 — AA·AB 등급 모집단·C열 표기에 쓸 카테고리 세분화 레벨을 고른다.
