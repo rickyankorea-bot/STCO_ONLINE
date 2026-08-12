@@ -28,18 +28,8 @@ import gc
 import hmac
 import math
 import hashlib
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from urllib.parse import quote_plus
-
-# 260811: 배포 서버(Streamlit Cloud)가 UTC로 도는 경우가 있어 datetime.now()를 화면 표시용으로 쓰면
-# 한국 시간보다 9시간 늦게 나오는 문제가 있었음(예: 실제 14:xx인데 05:xx로 표시). 서버 로컬 설정과
-# 무관하게 항상 정확한 한국 시간(KST, UTC+9 고정 — 서머타임 없음)을 돌려주는 헬퍼.
-KST = timezone(timedelta(hours=9))
-
-
-def now_kst():
-    """화면에 표시하거나 파일명·날짜 기본값으로 쓸 '지금'은 이 함수로 구한다(서버 시간대 무관하게 KST)."""
-    return datetime.now(timezone.utc).astimezone(KST)
 
 import numpy as np
 import pandas as pd
@@ -716,20 +706,42 @@ def style_yoy(D):
     return sty
 
 
+def _highlight_rows_by_color(sty, lbl_color_map):
+    """행 라벨별 배경색 지정 — 값 칸(td)뿐 아니라 맨 왼쪽 라벨 칸(인덱스, th)까지 동일하게 채운다.
+
+    2026-08-08 신설(중태님 지적: extra_rows로 끼워 넣은 담당자별 TOTAL 행이 값 칸만 하늘색이고
+    맨 왼쪽 라벨 칸엔 색이 안 들어가 있었음). lbl_color_map={행라벨: '#RRGGBB', ...}.
+    **앞으로 표에 행 강조색을 넣을 땐(TOTAL류 소계 행 등) 이 함수로 통일할 것** — set_properties만
+    쓰면 인덱스(th) 칸이 빠지는 실수가 재발한다.
+    """
+    if not lbl_color_map:
+        return sty
+    by_color = {}
+    for lbl, color in lbl_color_map.items():
+        by_color.setdefault(color, []).append(lbl)
+    for color, labels in by_color.items():
+        sty = sty.set_properties(subset=pd.IndexSlice[labels, :], **{"background-color": color})
+        sty = sty.apply_index(
+            lambda s, labs=set(labels), c=color: [f"background-color:{c}" if v in labs else "" for v in s],
+            axis=0)
+    return sty
+
+
 # ── 룰13 (2026-07-31): 엑셀 다운로드 = 화면에 보이는 컬러·셀서식 그대로 ──────
 _XL_SEASON_BOLD = {"S/S TOTAL", "F/W TOTAL"}
 _XL_SEASON_SUB = {"Z (공통)", "A (봄)", "B (여름)", "C (가을)", "D (겨울)"}
 _XL_DELTA_SUBS = ("증감율", "증감", "편차")
 
 
-def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_labels=None):
+def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_colors=None):
     """표시용(포맷 문자열) DataFrame을 화면 서식 그대로 엑셀로 변환 (룰13).
 
     화면과 동일: 헤더 회색+볼드, 구분(인덱스) 연회색, 첫 행 노란 강조(G.TOTAL),
     시즌 TOTAL 블루그레이 / 개별 시즌 연블루, 증감·편차 +초록/-빨강, 숫자 우측정렬,
     전셀 얇은 테두리. first_block_cols=첫 기간블록 컬럼 수 → 경계 두꺼운 세로선(룰12).
-    extra_row_labels(2026-08-07 추가)=[라벨, ...]이면 그 행들을 하늘색으로 채움
-    (예: 유통채널별 표의 '담당자별 TOTAL' 행 — 화면(perf_table)과 동일 색).
+    extra_row_colors(2026-08-08 갱신)={라벨: '#RRGGBB', ...}면 그 행들을 라벨별로 지정된 색으로
+    채움(예: 유통채널별 표의 '담당자별 TOTAL'=하늘색·'유통 구분별 TOTAL'=초록색 — 화면(perf_table)과
+    동일 색). 인덱스(맨 왼쪽 라벨) 칸도 데이터 칸과 항상 같은 색으로 채워진다.
     """
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -747,8 +759,14 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_label
         gt_fill = PatternFill("solid", fgColor="FFF2B8")
         sg_fill = PatternFill("solid", fgColor="E3ECF7")
         ss_fill = PatternFill("solid", fgColor="F4F8FC")
-        xr_fill = PatternFill("solid", fgColor="D6F0FA")   # 담당자별 TOTAL 등 extra_rows 하늘색
-        _extra_set = set(extra_row_labels or [])
+        _extra_colors = extra_row_colors or {}
+        _fill_cache = {}
+
+        def _fill_for(hexcolor):
+            key = hexcolor.lstrip("#").upper()
+            if key not in _fill_cache:
+                _fill_cache[key] = PatternFill("solid", fgColor=key)
+            return _fill_cache[key]
         bcol = (n_idx + first_block_cols + 1) if first_block_cols else None
         subs = [c[-1] if isinstance(c, tuple) else str(c) for c in disp.columns]
 
@@ -764,14 +782,15 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_label
             r = data_start + ri
             ilab = disp.index[ri]
             labs = [str(x) for x in (ilab if isinstance(ilab, tuple) else (ilab,))]
+            _extra_hit = next((_extra_colors[x] for x in labs if x in _extra_colors), None)
             if ri == 0:                                # 룰6: 첫 행(G.TOTAL/합계) 노란 강조
                 fill, bold = gt_fill, True
             elif any(x in _XL_SEASON_BOLD for x in labs):
                 fill, bold = sg_fill, True
             elif any(x in _XL_SEASON_SUB for x in labs):
                 fill, bold = ss_fill, False
-            elif any(x in _extra_set for x in labs):
-                fill, bold = xr_fill, False
+            elif _extra_hit:
+                fill, bold = _fill_for(_extra_hit), False
             else:
                 fill, bold = None, False
             for k in range(1, n_idx + 1):              # 구분(인덱스) 셀
@@ -800,11 +819,11 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_label
     return buf.getvalue()
 
 
-def yoy_excel_bytes(D, sheet="분석", first_block_cols=None, extra_row_labels=None):
+def yoy_excel_bytes(D, sheet="분석", first_block_cols=None, extra_row_colors=None):
     disp = D.copy()
     for col in disp.columns:
         disp[col] = [_fmt_cell(col, v) for v in disp[col]]
-    return styled_excel_bytes(disp, sheet, first_block_cols, extra_row_labels)   # 룰13: 화면 서식 그대로
+    return styled_excel_bytes(disp, sheet, first_block_cols, extra_row_colors)   # 룰13: 화면 서식 그대로
 
 
 # ── 공통(룰11 · 2026-07-31): 모든 조회 표 엑셀 다운로드 기본 제공 ──────────────
@@ -955,12 +974,11 @@ MENU_DASH = "📊 종합 대시보드"
 MENU_WEEK = "📋 주간회의 보고자료"
 MENU_FLAG = "📅 연차·아이템 세부분석"
 MENU_CHAN = "📈 유통별 세부 분석"
-MENU_CATMIX = "🧵 복종별 판매비중 분석"
 MENU_INV  = "🏷️ 재고 가공"
 MENU_TRND = "📉 추세분석"
 MENU_RTN  = "🔄 반품률 분석"
 MENU_SET  = "🧩 SET/단품 판매 분석"
-MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX,
+MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN,
          MENU_INV, MENU_TRND, MENU_RTN, MENU_SET]
 
 
@@ -986,7 +1004,7 @@ def render_styled_table(sty, extra_class="", extra_css=""):
 
 def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False,
                month=None, blk_labels=("당월누계", "연간누계"), preview=False, big_title=False,
-               cy=None, extra_rows=None):
+               cy=None, extra_rows=None, extra_row_colors=None):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
 
     extra=(컬럼명, {행라벨: 값})이면 표 맨 앞(행이름 바로 옆)에 텍스트 컬럼을 삽입
@@ -996,7 +1014,12 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     month=(cur_m, prev_m)이면 당월누계+연간누계 2블록 표(플래그십 탭 전용, 2026-07-31).
     extra_rows=[(라벨, mask_fn), ...] (2026-08-07 추가)면 G.TOTAL 바로 아래에 임의 그룹 소계
     행을 끼워 넣는다 — 예: 유통채널별 표의 '담당자별 TOTAL'. month와 함께 쓰면 두 블록에
-    동일하게 적용된다(yoy_frame2 참고).
+    동일하게 적용된다(yoy_frame2 참고). 여러 종류를 섞어 넣을 땐 리스트 순서가 곧 삽입 순서다
+    (예: [유통구분 5개] + [담당자별] → G.TOTAL 다음 유통구분 5행, 그다음 담당자별행).
+    extra_row_colors(2026-08-08 추가)={라벨: '#RRGGBB', ...}로 extra_rows 각 행의 강조색을
+    라벨별로 지정 — extra_rows는 있는데 이 값이 없거나 특정 라벨이 빠져 있으면 기본 하늘색
+    (#d6f0fa)이 적용된다. 값 칸과 맨 왼쪽 라벨 칸(인덱스) 모두 같은 색으로 채워진다(화면·엑셀 공통,
+    `_highlight_rows_by_color` 참고) — 앞으로 표에 강조행을 추가할 때도 이 파라미터로 통일할 것.
     preview=True(2026-08-06 추가)면 '🔍 조회 누르기 전' 안내용 — cur/prev가 빈 DataFrame이라
     yoy_frame이 전부 0/"–"로 채운 스켈레톤을 반환하는 걸 이용해, 실제 계산 없이 이 화면에서
     나올 표의 헤더·행 구조만 미리 보여준다(엑셀 다운로드 버튼은 숨김 — 아직 실데이터가 아니므로).
@@ -1026,9 +1049,12 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
         # 2026-08-07: extra 컬럼('담당자' 등)이 맨 앞에 삽입돼 있으면 실제 경계선 위치(컬럼
         # 순번)가 1 밀린다 — 안 더해주면 block_border가 블록1 마지막 칸에 선을 그어버린다.
         nblk += 1
-    # 2026-08-07 추가: extra_rows(담당자별 TOTAL 등)로 끼워 넣은 행은 화면·엑셀 모두 하늘색으로
+    # 2026-08-07 추가: extra_rows(담당자별 TOTAL 등)로 끼워 넣은 행은 화면·엑셀 모두 색으로
     # 구분 표시 — 바로 아래 개별 매장행과 헷갈리지 않게. 실제로 D에 남아있는 라벨만 사용.
+    # 2026-08-08 추가: 라벨별 색 지정 가능(extra_row_colors) — 지정 없으면 기본 하늘색.
     _extra_lbls = [lbl for lbl, _ in extra_rows if lbl in D.index] if extra_rows else []
+    _DEFAULT_EXTRA_COLOR = "#d6f0fa"
+    _lbl_color = {lbl: (extra_row_colors or {}).get(lbl, _DEFAULT_EXTRA_COLOR) for lbl in _extra_lbls}
     h1, h2 = st.columns([4, 1])
     # 2026-08-06 (중태님 컨펌): 제목↔자기표 간격은 좁히고, 이전표↔제목 간격은 넓혀서
     # "이 제목이 바로 아래 표 것"임을 분명하게 함. big_title=True면 글자도 1.5배.
@@ -1047,7 +1073,7 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
         h1.markdown(f"<div class='perf-title' style='{_tstyle}'>{title}{_NOTE_FLOAT}</div>",
                    unsafe_allow_html=True)
         h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28], first_block_cols=nblk,
-                                                      extra_row_labels=_extra_lbls),
+                                                      extra_row_colors=_lbl_color),
                            file_name=f"{_safe_name(title)[:24]}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key=f"dl_{key}", use_container_width=True)
@@ -1055,8 +1081,9 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     if nblk:
         sty = block_border(sty, nblk)   # 룰12: 당월/연간 경계 두꺼운 선
     if _extra_lbls:
-        # 담당자별 TOTAL 등 extra_rows 행 — 하늘색으로 개별 매장행과 구분(중태님 요청, 2026-08-07)
-        sty = sty.set_properties(subset=pd.IndexSlice[_extra_lbls, :], **{"background-color": "#d6f0fa"})
+        # extra_rows 행(담당자별 TOTAL·유통구분별 TOTAL 등) — 라벨별 색으로 개별 매장행과 구분,
+        # 맨 왼쪽 라벨 칸까지 동일하게 채움(2026-08-08, 중태님 지적으로 인덱스 칸 누락 수정).
+        sty = _highlight_rows_by_color(sty, _lbl_color)
     if season_rows:
         render_styled_table(sty, extra_class="erp-season", extra_css=_SEASON_ROW_CSS)
     else:
@@ -1167,20 +1194,15 @@ def _pn_detail(sub):
 
 
 def _show_pn_dialog(title, sub_title, detail, group_col="품번", key_prefix="pn",
-                     on_row_click=None, on_dismiss=None, on_back=None):
+                     on_row_click=None, on_dismiss=None):
     """품번별(또는 매장코드별) 상세 DataFrame을 팝업(또는 expander)으로 렌더링.
 
     on_row_click(선택값): 지정하면 표 행 선택을 켜서(단일행), 행을 클릭했을 때 그 행의
     group_col 값으로 콜백을 호출한다 — 품번별 표에서 행 클릭 → 매장별 2차 팝업 연결용.
     on_dismiss: 팝업을 X로 닫을 때 세션 상태를 정리하는 콜백(안 넘기면 st.dialog 기본 동작).
-    on_back(2026-08-10 추가): 지정하면 팝업 맨 위에 "← 뒤로가기" 버튼을 보여주고, 누르면
-    콜백을 호출한다 — 매장별(3단계) 팝업에서 품번별(2단계) 팝업으로 돌아가는 용도.
     """
     @_dialog_or_expander(title, on_dismiss=on_dismiss)
     def _popup():
-        if on_back is not None:
-            if st.button("← 뒤로가기", key=f"{key_prefix}_back"):
-                on_back()
         st.caption(sub_title)
         if detail.empty:
             st.info("해당 조건에 판매 데이터가 없어요.")
@@ -1229,11 +1251,10 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
     period = c3.selectbox("기간", ["당월누계", "연간누계"], key=f"{key_prefix}_pd")
     yr = c4.selectbox("연도", [cy, cy - 1], key=f"{key_prefix}_yr")
 
-    stage_key, pn_key, pn_df_key = f"{key_prefix}_stage", f"{key_prefix}_pnsel", f"{key_prefix}_df"
+    stage_key, pn_key = f"{key_prefix}_stage", f"{key_prefix}_pnsel"
     if go:
         st.session_state[stage_key] = "pn"
         st.session_state.pop(pn_key, None)
-        st.session_state.pop(pn_df_key, None)  # 이전 행 선택 상태 초기화(안 지우면 재조회 즉시 3단계로 다시 넘어감)
     stage = st.session_state.get(stage_key)
     if not stage:
         return
@@ -1248,16 +1269,6 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
     def _close_all():
         st.session_state.pop(stage_key, None)
         st.session_state.pop(pn_key, None)
-
-    def _back_to_pn():
-        # 2026-08-10 추가(중태님 요청): 매장별(3단계) 팝업 → 품번별(2단계) 팝업으로 복귀.
-        # pn_key(선택했던 품번)는 남겨두지 않음 — 다시 목록에서 고르도록.
-        # pn_df_key(품번별 표의 행 선택 상태)도 같이 지워야 함 — 안 지우면 이전에 클릭했던 행이
-        # 여전히 "선택됨" 상태로 남아 있어서 되돌아가자마자 곧바로 다시 3단계로 넘어가버림.
-        st.session_state[stage_key] = "pn"
-        st.session_state.pop(pn_key, None)
-        st.session_state.pop(pn_df_key, None)
-        st.rerun()
 
     if stage == "store":
         pn_sel = st.session_state.get(pn_key)
@@ -1275,7 +1286,7 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
         _show_pn_dialog(f"{yr}년 매장별상세 · {period} · {sel_v} · {pn_label}",
                          f"실판매금액 큰 순 정렬 · 합계 {_mm(total_rev):,.1f}백만원",
                          store_detail, group_col="매장코드", key_prefix=f"{key_prefix}_st",
-                         on_dismiss=_close_all, on_back=_back_to_pn)
+                         on_dismiss=_close_all)
         return
 
     detail = _pn_detail(sub)
@@ -1949,6 +1960,13 @@ def render_channel_brand(df):
         d["_담당자"] = d["매장코드"].astype(str).str.strip().map(_mgr_map)
     else:
         d["_담당자"] = None
+    # 260808 추가: 유통 구분별 TOTAL(통합몰·네이버스토어·원래직입점·웹뜰이관·웍스바이이관, _CHANNEL_MASKS)
+    # 판정용 — 주간회의 보고자료와 동일 소스(채널스토리)
+    if not master.empty and "채널스토리" in master.columns:
+        _cs_map = dict(zip(master["매장코드"].astype(str).str.strip(), master["채널스토리"]))
+        d["_채널스토리"] = d["매장코드"].astype(str).str.strip().map(_cs_map)
+    else:
+        d["_채널스토리"] = None
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     default_start = (pd.to_datetime(dmax) - pd.Timedelta(days=6)).date()
 
@@ -1971,6 +1989,13 @@ def render_channel_brand(df):
         _preview_mgr_rows = [
             (f"{m} TOTAL", (lambda name: (lambda x: x["_담당자"].astype(str).str.strip() == name))(m))
             for m in _mans if m not in _CH_MGR_TOTAL_EXCL]
+        # 260808 추가: G.TOTAL 아래 '유통 구분별 TOTAL' 5행(통합몰·네이버스토어·원래직입점·웹뜰이관·
+        # 웍스바이이관, 주간회의 보고자료와 동일 기준 _CHANNEL_MASKS) — 담당자별 TOTAL보다 먼저 삽입.
+        _CH_GROUP_COLOR, _CH_MGR_COLOR = "#d8f3df", "#d6f0fa"   # 초록 / 하늘색
+        channel_extra_rows = [(f"{name} TOTAL", mask) for name, mask in _CHANNEL_MASKS.items()]
+        _preview_extra_rows = channel_extra_rows + _preview_mgr_rows
+        _preview_extra_colors = {lbl: _CH_GROUP_COLOR for lbl, _ in channel_extra_rows}
+        _preview_extra_colors.update({lbl: _CH_MGR_COLOR for lbl, _ in _preview_mgr_rows})
         selb = cb1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cb_brand")
         sela = cb2.multiselect("연차별", ages, default=[], placeholder="전체", key="cb_age")
         sels = cb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cb_season")
@@ -1983,7 +2008,8 @@ def render_channel_brand(df):
         _empty = pd.DataFrame()
         perf_table(_empty, _empty, "_채널", None, "유통채널별 매출현황", "cb_ch_preview",
                    extra=("담당자", {}), month=(_empty, _empty),
-                   blk_labels=("조회기간", "연간누계"), extra_rows=_preview_mgr_rows, preview=True)
+                   blk_labels=("조회기간", "연간누계"), extra_rows=_preview_extra_rows,
+                   extra_row_colors=_preview_extra_colors, preview=True)
         perf_table(_empty, _empty, "브랜드명", None, "브랜드별 매출현황", "cb_br_preview",
                    preview=True)
         return
@@ -2041,826 +2067,20 @@ def render_channel_brand(df):
     mgr_extra_rows = [
         (f"{m} TOTAL", (lambda name: (lambda x: x["_담당자"].astype(str).str.strip() == name))(m))
         for m in _ch_mans]
+    # 260808 추가(중태님 지시): G.TOTAL 아래 → 유통 구분별 TOTAL 5행(초록) → 담당자별 TOTAL(하늘색)
+    # → 개별 매장, 순서로 삽입. channel_extra_rows·색상 상수는 위 미리보기 준비 블록에서 이미 정의됨.
+    ch_all_extra_rows = channel_extra_rows + mgr_extra_rows
+    ch_extra_colors = {lbl: _CH_GROUP_COLOR for lbl, _ in channel_extra_rows}
+    ch_extra_colors.update({lbl: _CH_MGR_COLOR for lbl, _ in mgr_extra_rows})
     perf_table(cur_y, prev_y, "_채널", None, "유통채널별 매출현황", "cb_ch",
                extra=("담당자", chan_mgr), month=(cur, prev), blk_labels=("조회기간", "연간누계"),
-               extra_rows=mgr_extra_rows, cy=cy_cb)
+               extra_rows=ch_all_extra_rows, extra_row_colors=ch_extra_colors, cy=cy_cb)
     st.caption("※ 채널을 자사몰/외부몰 등 그룹으로 묶으려면 '채널 기준정보(매핑)'가 필요해요 — 준비되면 그룹 집계도 추가해드릴게요. "
-               "G.TOTAL 아래 담당자별 TOTAL(연간누계 매출 큰 순) → 개별 매장 순으로 표시돼요. "
+               "G.TOTAL 아래 유통 구분별 TOTAL(초록) → 담당자별 TOTAL(하늘색, 연간누계 매출 큰 순) → 개별 매장 순으로 표시돼요. "
                "담당자 미지정 매장은 담당자별 TOTAL 어디에도 안 잡히지만 G.TOTAL엔 포함돼요.")
 
     st.markdown("### B. 브랜드별")
     perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br", cy=cy_cb)
-
-
-# ==============================================================================
-# 복종별 판매비중 분석 (2026-08-08 신규, 같은 날 수정1~3) — 매장별 아이템(복종) 판매 구성비 현황표.
-#   과거 "매장별 아이템 비중 분석"(반자동 Python 스크립트 + 엑셀 3시트 산출물) 프로젝트의 시트1
-#   (원본+집계 데이터 표)만 이식한 것 — 시트2(베스트/워스트 정리)·시트3(매장별 제안 문구)은 이번
-#   범위 밖(중태님 확정, 2026-08-08 "일단 첫번째 시트의 기본 복종별 판매 비중 현황표만").
-#   카테고리 매핑은 그 스크립트의 자체 9분류(CATEGORY_MAP) 대신, 이 ERP의 상품마스터 기반
-#   중카테고리/소카테고리(item_master, get_itemgroup_map 계열)를 그대로 재사용해서 재고 가공·
-#   판매분석 화면과 기준을 통일했다(claude/쇼핑몰재고모니터링_전달사항_260803 원칙과 동일).
-#   색상 규칙(중태님 확정, 2026-08-08):
-#     ① SD065(온라인통합몰) 행 = 주황색 — 다른 매장이 참조하는 비교 기준선이라 항상 눈에 띄게.
-#     ② 복종별 '금액' 열에서 매출 top5 매장(SD065·매장담당별평균 제외) = 녹색.
-#     ③ 복종별 '%' 열에서 상위5(SD065·매장담당별평균 제외) = 빨간색 / 하위5(동일 제외) = 파란색.
-#        (SD065·매장담당별평균은 '비교 기준선'이지 순위 경쟁 대상이 아니므로 ②·③ 모두에서 제외.)
-#     ④ 기간 합계매출 100만원 미만 매장은 G.TOTAL 합계엔 포함하되 목록에는 표시하지 않음.
-#   같은 날 후속 수정 3건(중태님):
-#     [수정1] 복종 '금액' 열 헤더를 "슈트류 금액(백만)" → "슈트류"로 간결화(단위는 표 제목 옆
-#             [금액: 백만원 / VAT+] 표기로 이미 안내됨).
-#     [수정2] G.TOTAL과 개별 매장행 사이에 '{담당자} 평균' 행을 담당자마다 하나씩 삽입 — 그
-#             담당자가 맡은 매장(표시 대상 중) 평균값. 하늘색(#d6f0fa, 유통별 세부분석의
-#             담당자별 TOTAL 행과 동일 색)으로 구분, 순위 경쟁(①·②·③)에서는 제외.
-#     [수정3] 복종(금액·% 2열 묶음) 사이 경계에 진한 회색 세로선을 넣어 복종별 구분을 명확히
-#             (기존 block_border 재사용 — 룰12와 동일 메커니즘, 복종 수만큼 반복 호출).
-#     [수정4] 위 ②(아이템별 매출 top5) 강조색을 분홍 → 녹색으로 변경(2026-08-09).
-#   2026-08-09 추가 수정 2건:
-#     [수정5] '%' 열 헤더를 "슈트류 %"처럼 복종명을 붙이지 않고 그냥 "%"로 간결화 — 표1·표2(아래
-#             신규 YoY 표) 둘 다 적용. 내부 컬럼명(랭킹·구분선 계산에 쓰는 실제 키)은 그대로 두고
-#             Styler.format_index()/엑셀 헤더 셀 값만 표시용으로 바꿔치기(로직에 영향 없음).
-#     [수정6] "담당별 전년대비 복종 비중 변화" 표 신규 — 표1과 동일한 행 구성(G.TOTAL·매장담당별
-#             평균·SD065·개별 매장)을 "{전년} 라벨"/"{올해} 라벨"/"ㄴ증감" 3행씩 쌓아 전년 동기간
-#             대비 변화를 보여줌. 전년 동기간=조회기간을 그대로 1년 시프트(이 앱의 기존 YoY 관행과
-#             동일). ㄴ증감 행: 합계·복종 금액 열=증감액(백만) (증감율%) 둘 다 표기, %열=%p 차이,
-#             양수 초록/음수 빨강(이 앱의 기존 증감 색 관행과 동일). 순위는 연도별로 그 해 자체
-#             매출 100만원 이상 매장 모집단 안에서 따로 계산(전년에 데이터 없으면 "–").
-#     [수정7] "담당별" 필터 추가(브랜드/연차/시즌과 동일한 형태, 총 4개) — 상단 필터에서 담당자를
-#             고르면 표1·표2 모두 그 담당자 소관 매장만으로 줄어드는 드릴다운(2026-08-09). 구현:
-#             row-level(base/prev_base)에 _담당자 컬럼을 매장코드→담당자 매핑으로 미리 붙여두고
-#             selm(멀티셀렉트)을 다른 필터와 동일하게 .isin()으로 적용 — 이후 G.TOTAL/shown/piv/
-#             매장담당별 평균이 전부 자동으로 좁혀지므로 표1·표2 자체 로직은 수정 불필요.
-# ==============================================================================
-_CATMIX_SD065 = "SD065"
-_CATMIX_FLOOR = 1_000_000    # 원 단위 — 기간 합계매출 이 미만인 매장은 목록에서 제외(총계엔 포함)
-_CATMIX_GREEN = "background-color:#c8e6c9;font-weight:600"   # ② 아이템별 매출 top5
-_CATMIX_RED = "background-color:#ffcdd2;font-weight:600"     # ③ 복종 비중 상위5
-_CATMIX_BLUE = "background-color:#bbdefb;font-weight:600"    # ③ 복종 비중 하위5
-_CATMIX_MGR_BG = "#d6f0fa"    # 수정2: 매장담당별 평균 행 — 유통별 세부분석의 담당자별 TOTAL과 동일 색
-
-
-def _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=None, n_meta=3):
-    """복종별 판매비중 표 전용 Styler — 아이템별 top5(녹색)·복종비중 상하위5(빨강/파랑)·SD065(주황)·
-    매장담당별 평균(하늘색, 수정2) · 복종 사이 진한 회색 구분선(수정3).
-
-    disp=화면 표시용(포맷 문자열) DataFrame, num=랭킹 계산용 원본 숫자 DataFrame(동일 index·columns).
-    G.TOTAL·SD065·매장담당별 평균 행은 순위 경쟁(top5/bottom5/녹색)에서 제외한다.
-    n_meta=매장코드·합계·순위 등 복종 앞에 오는 메타 컬럼 수(복종 구분선 위치 계산용).
-    """
-    mgr_labels = mgr_labels or []
-    excl = [lbl for lbl in (["G.TOTAL", sd_label] + list(mgr_labels)) if lbl and lbl in num.index]
-
-    def _green(col):
-        pool = num[col].drop(index=excl, errors="ignore")
-        top = set(pool[pool > 0].nlargest(5).index)
-        return [_CATMIX_GREEN if idx in top else "" for idx in num.index]
-
-    def _redblue(col):
-        pool = num[col].drop(index=excl, errors="ignore")
-        top = set(pool.nlargest(5).index)
-        bot = set(pool.nsmallest(5).index)
-        out = []
-        for idx in num.index:
-            if idx in top:
-                out.append(_CATMIX_RED)
-            elif idx in bot:
-                out.append(_CATMIX_BLUE)
-            else:
-                out.append("")
-        return out
-
-    sty = disp.style
-    for col in amt_cols:
-        sty = sty.apply(lambda s, c=col: _green(c), subset=pd.IndexSlice[:, [col]])
-    for col in pct_cols:
-        sty = sty.apply(lambda s, c=col: _redblue(c), subset=pd.IndexSlice[:, [col]])
-    _mgr_in = [lbl for lbl in mgr_labels if lbl in disp.index]
-    if _mgr_in:
-        # 수정2: 매장담당별 평균 행 — 유통별 세부분석의 담당자별 TOTAL과 동일하게 하늘색만(볼드 없음)
-        sty = sty.set_properties(subset=pd.IndexSlice[_mgr_in, :], **{"background-color": _CATMIX_MGR_BG})
-    if sd_label and sd_label in disp.index:
-        sty = sty.set_properties(subset=pd.IndexSlice[[sd_label], :],
-                                  **{"background-color": "#ffe0b2", "font-weight": "700"})
-    sty = sty.set_properties(**{"text-align": "right"})
-    # 수정3: 복종(금액·% 2열 묶음) 사이 경계에 진한 회색 세로선 — 메타 컬럼 뒤부터 복종마다 반복
-    for i in range(len(amt_cols)):
-        sty = block_border(sty, n_meta + 2 * i)
-    # 수정5: '%' 열 헤더를 "슈트류 %" → "%"로 간결화(내부 컬럼명은 그대로 유지 — 랭킹·구분선 계산에 영향 없음)
-    _pct_set = set(pct_cols)
-    sty = sty.format_index(lambda c: "%" if c in _pct_set else c, axis=1)
-    return sty
-
-
-def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종별판매비중",
-                         mgr_labels=None, n_meta=3):
-    """룰13: 화면 서식(G.TOTAL 노랑·SD065 주황·담당별평균 하늘색·아이템top5 녹색·복종비중 상하위5
-    빨강파랑·복종 구분 진한 회색 세로선) 그대로 엑셀 반영."""
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-    mgr_labels = mgr_labels or []
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        disp.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "표")
-        ws = w.book.worksheets[0]
-        n_idx = disp.index.nlevels
-        n_rows = len(disp)
-        data_start = ws.max_row - n_rows + 1
-        thin = Side(style="thin", color="D9D9D9")
-        thick = Side(style="medium", color="555555")   # 수정3: 복종 구분 진한 회색 세로선
-        head_fill = PatternFill("solid", fgColor="F4F4F6")
-        idx_fill = PatternFill("solid", fgColor="FAFAFA")
-        gt_fill = PatternFill("solid", fgColor="FFF2B8")     # G.TOTAL 노랑
-        sd_fill = PatternFill("solid", fgColor="FFE0B2")     # ① SD065 주황
-        mgr_fill = PatternFill("solid", fgColor="D6F0FA")    # 수정2: 매장담당별 평균 하늘색
-        green_fill = PatternFill("solid", fgColor="C8E6C9")  # ② 아이템별 매출 top5
-        red_fill = PatternFill("solid", fgColor="FFCDD2")    # ③ 복종비중 상위5
-        blue_fill = PatternFill("solid", fgColor="BBDEFB")   # ③ 복종비중 하위5
-
-        _mgr_set = set(mgr_labels)
-        excl = [lbl for lbl in (["G.TOTAL", sd_label] + list(mgr_labels)) if lbl and lbl in num.index]
-        top5_amt = {c: set(num[c].drop(index=excl, errors="ignore").pipe(lambda s: s[s > 0]).nlargest(5).index)
-                    for c in amt_cols}
-        top5_pct = {c: set(num[c].drop(index=excl, errors="ignore").nlargest(5).index) for c in pct_cols}
-        bot5_pct = {c: set(num[c].drop(index=excl, errors="ignore").nsmallest(5).index) for c in pct_cols}
-        bcols = {n_idx + (n_meta + 2 * i) + 1 for i in range(len(amt_cols))}   # 수정3: 진한 세로선 절대열번호
-
-        for r in range(1, data_start):
-            for k in range(1, ws.max_column + 1):
-                cell = ws.cell(r, k)
-                cell.fill = head_fill
-                cell.font = Font(bold=True, color="111111")
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-        # 수정5: '%' 열 헤더 셀 텍스트를 "슈트류 %" → "%"로 간결화(화면과 동일)
-        _pct_set = set(pct_cols)
-        for cj, col in enumerate(disp.columns):
-            if col in _pct_set:
-                ws.cell(data_start - 1, n_idx + 1 + cj).value = "%"
-
-        for ri in range(n_rows):
-            r = data_start + ri
-            lbl = disp.index[ri]
-            row_fill, row_bold = None, False
-            if ri == 0:
-                row_fill, row_bold = gt_fill, True
-            elif lbl in _mgr_set:
-                row_fill, row_bold = mgr_fill, False
-            elif lbl == sd_label:
-                row_fill, row_bold = sd_fill, True
-            for k in range(1, n_idx + 1):
-                c = ws.cell(r, k)
-                c.fill = row_fill or idx_fill
-                c.font = Font(bold=True, color="111111")
-                c.alignment = Alignment(horizontal="left", vertical="center")
-            for cj, col in enumerate(disp.columns):
-                c = ws.cell(r, n_idx + 1 + cj)
-                c.alignment = Alignment(horizontal="right", vertical="center")
-                cell_fill = row_fill
-                if col in amt_cols and lbl in top5_amt.get(col, ()):
-                    cell_fill = green_fill
-                elif col in pct_cols and lbl in top5_pct.get(col, ()):
-                    cell_fill = red_fill
-                elif col in pct_cols and lbl in bot5_pct.get(col, ()):
-                    cell_fill = blue_fill
-                if cell_fill:
-                    c.fill = cell_fill
-                if row_bold:
-                    c.font = Font(bold=True, color="111111")
-        for r in range(1, ws.max_row + 1):
-            for k in range(1, ws.max_column + 1):
-                ws.cell(r, k).border = Border(left=(thick if k in bcols else thin),
-                                               right=thin, top=thin, bottom=thin)
-        for k in range(1, ws.max_column + 1):
-            ws.column_dimensions[get_column_letter(k)].width = 14 if k <= n_idx else 11
-    return buf.getvalue()
-
-
-# ── 담당별 전년대비 복종 비중 변화 (2026-08-09 신규, [수정5][수정6]) ──────────────
-# 표1(복종별 판매비중)과 같은 행 구성(G.TOTAL·매장담당별 평균·SD065·개별 매장)이되, 각 행을
-# "{전년} {라벨}" / "{올해} {라벨}" / "ㄴ증감" 3개 행으로 쌓아 전년 동기간 대비 변화를 보여준다.
-# 전년 동기간 = 기존 앱 전역 관행과 동일(예: render_channel_brand)하게 s−1년~e−1년으로 계산.
-# ⚠ pandas Styler.apply/.map은 "인덱스(행 라벨)가 유일하지 않으면" 에러를 낸다(KeyError) — 그런데
-#   'ㄴ증감' 라벨은 매장/담당자 수만큼 반복돼 그 자체로는 유일하지 않다. 그래서 내부적으로는
-#   f"{_CATMIX_DIFF_PREFIX}{매장명}"처럼 매장명을 붙여 유일한 키로 쓰고, 화면 표시만
-#   format_index()로 "ㄴ증감"으로 통일해 보여준다(엑셀도 동일 방식으로 헤더 텍스트만 치환).
-_CATMIX_DIFF_LABEL = "ㄴ증감"
-_CATMIX_DIFF_PREFIX = "ㄴ증감__"
-
-
-def _catmix_yoy_style(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_cols, pct_cols, n_meta=3):
-    """담당별 전년대비 복종 비중 변화 표 전용 Styler.
-
-    disp2=표시용(포맷 문자열), sign2=증감 부호 판정용 원본 숫자(ㄴ증감 행만 값 있음, 나머진 NaN).
-    disp2.index의 ㄴ증감 행은 내부적으로 f"ㄴ증감__{매장명}"(유일 키) — 화면엔 format_index로
-    "ㄴ증감"만 보임. G.TOTAL/SD065/매장담당별 평균 행은 연도 쌍(전년·올해) 모두 표1과 동일 배경색,
-    ㄴ증감 행은 양수=초록/음수=빨강(이 앱의 기존 증감 색 관행과 동일) + 행 라벨 자체는 옅은 빨강
-    이탤릭으로 구분.
-    """
-    sty = disp2.style
-
-    def _delta_color(col):
-        vals = sign2[col]
-        out = []
-        for v in vals:
-            if pd.isna(v) or v == 0:
-                out.append("")
-            elif v > 0:
-                out.append("color:#1f8a4c;font-weight:700")
-            else:
-                out.append("color:#c62828;font-weight:700")
-        return out
-
-    for col in ["합계(백만)"] + amt_cols + pct_cols:
-        sty = sty.apply(lambda s, c=col: _delta_color(c), subset=pd.IndexSlice[:, [col]])
-    if gt_labels:
-        sty = sty.set_properties(subset=pd.IndexSlice[gt_labels, :],
-                                  **{"background-color": "#fff2b8", "font-weight": "700"})
-    if sd_labels:
-        sty = sty.set_properties(subset=pd.IndexSlice[sd_labels, :],
-                                  **{"background-color": "#ffe0b2", "font-weight": "700"})
-    if mgr_labels:
-        sty = sty.set_properties(subset=pd.IndexSlice[mgr_labels, :],
-                                  **{"background-color": _CATMIX_MGR_BG})
-    sty = sty.set_properties(**{"text-align": "right"})
-    for i in range(len(amt_cols)):
-        sty = block_border(sty, n_meta + 2 * i)
-    _pct_set = set(pct_cols)
-    sty = sty.format_index(lambda c: "%" if c in _pct_set else c, axis=1)      # 수정5
-    # 행 라벨(인덱스) 셀만 스타일/치환 — map_index·format_index는 데이터 셀(td)엔 영향 없어
-    # 위 증감 색과 안 섞인다. 유일 키(ㄴ증감__매장명)를 화면엔 "ㄴ증감"으로만 보이게 함.
-    sty = sty.map_index(lambda v: ("color:#c0392b;font-style:italic;font-weight:600"
-                                    if str(v).startswith(_CATMIX_DIFF_PREFIX) else ""), axis=0)
-    sty = sty.format_index(lambda v: (_CATMIX_DIFF_LABEL if str(v).startswith(_CATMIX_DIFF_PREFIX) else v),
-                            axis=0)
-    return sty
-
-
-def _catmix_yoy_excel_bytes(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_cols, pct_cols,
-                             sheet="복종비중YoY", n_meta=3):
-    """룰13: 화면 서식(G.TOTAL·SD065·담당별평균 배경 + ㄴ증감 행 +초록/-빨강 + 복종 구분 세로선 +
-    % 헤더 간결화) 그대로 엑셀 반영."""
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        disp2.to_excel(w, sheet_name=_safe_name(sheet)[:28] or "표")
-        ws = w.book.worksheets[0]
-        n_idx = disp2.index.nlevels
-        n_rows = len(disp2)
-        data_start = ws.max_row - n_rows + 1
-        thin = Side(style="thin", color="D9D9D9")
-        thick = Side(style="medium", color="555555")
-        head_fill = PatternFill("solid", fgColor="F4F4F6")
-        idx_fill = PatternFill("solid", fgColor="FAFAFA")
-        gt_fill = PatternFill("solid", fgColor="FFF2B8")
-        sd_fill = PatternFill("solid", fgColor="FFE0B2")
-        mgr_fill = PatternFill("solid", fgColor="D6F0FA")
-        gt_set, sd_set, mgr_set = set(gt_labels or []), set(sd_labels or []), set(mgr_labels or [])
-        delta_cols = set(["합계(백만)"] + amt_cols + pct_cols)
-        pct_set = set(pct_cols)
-        bcols = {n_idx + (n_meta + 2 * i) + 1 for i in range(len(amt_cols))}
-
-        hdr_r = data_start - 1
-        for k in range(1, ws.max_column + 1):
-            cell = ws.cell(hdr_r, k)
-            cell.fill = head_fill
-            cell.font = Font(bold=True, color="111111")
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-        for cj, col in enumerate(disp2.columns):     # 수정5: % 헤더 간결화
-            if col in pct_set:
-                ws.cell(hdr_r, n_idx + 1 + cj).value = "%"
-
-        for ri in range(n_rows):
-            r = data_start + ri
-            lbl = disp2.index[ri]
-            is_diff = str(lbl).startswith(_CATMIX_DIFF_PREFIX)
-            row_fill, row_bold = None, False
-            if lbl in gt_set:
-                row_fill, row_bold = gt_fill, True
-            elif lbl in sd_set:
-                row_fill, row_bold = sd_fill, True
-            elif lbl in mgr_set:
-                row_fill, row_bold = mgr_fill, False
-            for k in range(1, n_idx + 1):
-                c = ws.cell(r, k)
-                c.fill = row_fill or idx_fill
-                c.font = Font(bold=True, color=("C0392B" if is_diff else "111111"), italic=is_diff)
-                c.alignment = Alignment(horizontal="left", vertical="center")
-                if is_diff:      # 유일 키(ㄴ증감__매장명) 대신 화면과 동일하게 "ㄴ증감"만 표시
-                    c.value = _CATMIX_DIFF_LABEL
-            for cj, col in enumerate(disp2.columns):
-                c = ws.cell(r, n_idx + 1 + cj)
-                c.alignment = Alignment(horizontal="right", vertical="center")
-                if row_fill:
-                    c.fill = row_fill
-                if is_diff and col in delta_cols:
-                    sv = sign2.iloc[ri][col] if col in sign2.columns else None
-                    if pd.notna(sv) and sv != 0:
-                        c.font = Font(bold=True, color=("1F8A4C" if sv > 0 else "C62828"))
-                elif row_bold:
-                    c.font = Font(bold=True, color="111111")
-        for r in range(1, ws.max_row + 1):
-            for k in range(1, ws.max_column + 1):
-                ws.cell(r, k).border = Border(left=(thick if k in bcols else thin),
-                                               right=thin, top=thin, bottom=thin)
-        for k in range(1, ws.max_column + 1):
-            ws.column_dimensions[get_column_letter(k)].width = 14 if k <= n_idx else 12
-    return buf.getvalue()
-
-
-# ── [수정8] 매장별 가이드 (2026-08-09 신규, 시트3 "매장별 제안" v2 이관) ──────────────
-# 설계 근거: claude/시트3_매장별제안_v2_요약.md (2026-08-08 업로드 v2 이관문서 요약).
-# 중태님 확정(2026-08-09): (1) 복종 분류는 원본 9분류 대신 이 ERP 자체 중/소카테고리 재사용
-# (표1·표2와 동일 기준 — 시트3_요약.md의 "이식 시 유의점 6" 결정) (2) 화면 표(세로 병합 필요)가
-# 아니라 표1 옆 "⬇ 매장별 가이드" 엑셀 다운로드로 구현 — 세로 병합은 openpyxl로 간단하지만 이 앱의
-# 기존 pandas Styler/HTML 표 방식으로는 신규 패턴이 필요했던 문제를 우회.
-# 모집단: 강점/약점 판정·비교매장 2곳 = shown(현재 조회조건의 100만원 이상 매장, 표1과 동일 모집단).
-#         전사 평균(G열)만 예외 = store_tot(같은 조회조건, 100만원 미만 포함 전체 매장) — 원본 스펙의
-#         "필터 적용 전 전체 매장"을 이 ERP 맥락으로 매핑(원본엔 브랜드/연차/시즌/담당 필터가 없었으므로
-#         "필터"=100만원 매출 플로어만을 의미했던 것으로 해석, claude/시트3_매장별제안_v2_요약.md 참고).
-# "기타" 복종은 강점/약점 후보에서 제외(전사평균 G열 계산엔 자연히 포함 — 매장 합계에 이미 반영됨).
-# ⚠️ 문서에 명시 안 된 세부 결정(구현 시 임의 보완, 추후 확인 필요):
-#   - 약점 복종이 3개 이상일 때 "최대 2개"로 자르는 기준 = cat_rank가 가장 나쁜(큰) 순으로 2개 채택.
-#   - 카테고리 내 동순위(rank) 타이브레이크 = pandas rank(method="min") 표준 처리.
-_CATMIX_GUIDE_WEAK_FILL = "FDF6F4"   # 약점 행 배경(연한 살구색, 원본 스펙과 동일)
-
-
-def _rankgap_verdict(rank_total, cat_rank):
-    """시트3_요약.md '강점/약점 판정 로직(6장)' — rank_total=매장 전체순위, cat_rank=그 복종 절대금액
-    순위(모집단 내). 1~3위 매장은 별도 규칙(중태님 2026-07-01 확정, 임의 단순화 금지)."""
-    if rank_total == 1:
-        return "강점" if cat_rank == 1 else ("중립" if cat_rank == 2 else "약점")
-    if rank_total in (2, 3):
-        return "강점" if cat_rank <= 3 else "약점"
-    gap = rank_total - cat_rank
-    return "강점" if gap > 0 else ("약점" if gap < 0 else "중립")
-
-
-def _catmix_guide_coach(my_pct):
-    """시트3_요약.md K열 코칭 멘트 3단계 분기(규칙 기반, LLM 호출 불필요). 어휘 규칙(2026-08-08
-    담당자 피드백): 온라인 쇼핑몰 매장이므로 '진열'·'매대' 금지, '노출'·'상품 등록'·'세트 구성'만 사용."""
-    if my_pct <= 1.0:
-        return ("판매가 사실상 없는 상태 — '안 팔리는 아이템'이 아니라 '거의 팔고 있지 않은 아이템'입니다. "
-                "입점 여부와 카테고리·검색 노출 구성부터 점검해주세요.")
-    if my_pct <= 3.0:
-        return "보조 아이템으로 최소한만 취급되는 상태로 보여요. 상품 등록·메인/카테고리 노출 여부부터 확인해주세요."
-    return "매장 규모 대비 노출이 약한 편이에요. 연관 상품 노출과 세트 구성 제안을 점검해보세요."
-
-
-def _catmix_guide_rows(shown, piv, store_tot, cats):
-    """매장별 가이드 원본 행 데이터 조립(엑셀 작성과 분리 — 단위 테스트 용이하게). 반환: list[dict],
-    각 dict는 A~K열 값 + 병합용 메타(_block_first/_block_size)를 담음."""
-    cats_rank = [c for c in cats if c != "기타" and c in piv.columns]
-    total_all = float(store_tot["합계"].sum())
-    cat_total_all = {c: float(piv[c].sum()) for c in cats_rank}
-    overall_avg_pct = {c: (cat_total_all[c] / total_all * 100.0 if total_all else 0.0) for c in cats_rank}
-
-    codes = shown["매장코드"].astype(str).tolist()
-    piv_codes = piv.reindex(codes).fillna(0.0)
-    cat_rank_map = {c: piv_codes[c].rank(ascending=False, method="min") for c in cats_rank}
-    # rank()의 인덱스는 piv_codes.index(=codes 순서 그대로) — code→rank 조회용 dict로 변환
-    cat_rank_map = {c: dict(zip(codes, ranks.tolist())) for c, ranks in cat_rank_map.items()}
-
-    total_map = dict(zip(shown["매장코드"], shown["합계"]))
-    name_map = dict(zip(shown["매장코드"], shown["매장명"]))
-
-    rows = []
-    for _, srow in shown.sort_values("순위").iterrows():
-        code, name = srow["매장코드"], srow["매장명"]
-        rank_total = int(srow["순위"]); my_total = float(srow["합계"])
-        cat_amt = piv.loc[code] if code in piv.index else pd.Series(0.0, index=cats)
-
-        strengths, weaknesses = [], []
-        for c in cats_rank:
-            cr = cat_rank_map[c].get(code)
-            if cr is None:
-                continue
-            cr = int(cr)
-            my_pct = (float(cat_amt.get(c, 0.0)) / my_total * 100.0) if my_total else 0.0
-            verdict = _rankgap_verdict(rank_total, cr)
-            if verdict == "강점":
-                strengths.append((c, cr, my_pct))
-            elif verdict == "약점":
-                weaknesses.append((c, cr, my_pct))
-
-        strengths.sort(key=lambda t: t[1])                       # cat_rank 좋은(작은) 순 — 최대 2개
-        top_strengths = strengths[:2]
-        strength_txt = ("\n".join(f"{c}({cr}위, {pct:.1f}%)" for c, cr, pct in top_strengths)
-                         if top_strengths else "뚜렷한 강점 복종 없음")
-
-        weaknesses.sort(key=lambda t: t[1], reverse=True)        # cat_rank 나쁜(큰) 순 — 최대 2개
-        top_weak = weaknesses[:2]
-
-        if not top_weak:
-            rows.append({
-                "매장코드": code, "매장명": name, "합계순위": rank_total, "강점요약": strength_txt,
-                "약점카테고리": "뚜렷한 약점 복종 없음(전 복종 고르게 강세)",
-                "내비중": None, "전사평균": None, "격차": None, "비교매장": "",
-                "기회금액": None, "코칭멘트": "강점 유지·확대에 집중하세요.",
-                "_block_first": True, "_block_size": 1,
-            })
-            continue
-
-        for wi, (c, cr, my_pct) in enumerate(top_weak):
-            avg_pct = overall_avg_pct.get(c, 0.0)
-            gap = avg_pct - my_pct
-            amt_series = piv_codes[c] if c in piv_codes.columns else pd.Series(0.0, index=codes)
-            peers = amt_series.drop(index=[code], errors="ignore").sort_values(ascending=False)
-            peer_codes = peers.head(2).index.tolist()
-            peer_pcts, peer_strs = [], []
-            for pc in peer_codes:
-                p_total = total_map.get(pc, 0.0)
-                p_amt = float(piv.loc[pc, c]) if (pc in piv.index and c in piv.columns) else 0.0
-                p_pct = (p_amt / p_total * 100.0) if p_total else 0.0
-                peer_pcts.append(p_pct)
-                peer_strs.append(f"{name_map.get(pc, pc)} {p_pct:.1f}%")
-            peer_txt = "\n".join(peer_strs)
-
-            opp_amt, coach_prefix = None, ""
-            if gap > 0:
-                opp_amt = (gap / 100.0) * my_total
-            else:
-                # 예외 케이스(시트3_요약.md): rank-gap상 약점인데 전사평균 이상 비중 →
-                # 비교 매장 중 비중이 더 높은 쪽과의 격차로 대체 계산. 그마저 낮으면 J열 문자 그대로 "-".
-                alt_gap = (max(peer_pcts) - my_pct) if peer_pcts else -1.0
-                opp_amt = (alt_gap / 100.0) * my_total if alt_gap > 0 else "-"
-                coach_prefix = ("전사 평균 대비는 낮지 않지만, 매출 규모가 비슷한 매장들과 비교하면 "
-                                 "상대적으로 약한 편이에요. ")
-
-            rows.append({
-                "매장코드": code, "매장명": name, "합계순위": rank_total, "강점요약": strength_txt,
-                "약점카테고리": f"{c} ({cr}위)", "내비중": my_pct, "전사평균": avg_pct, "격차": gap,
-                "비교매장": peer_txt, "기회금액": opp_amt, "코칭멘트": coach_prefix + _catmix_guide_coach(my_pct),
-                "_block_first": (wi == 0), "_block_size": len(top_weak),
-            })
-    return rows
-
-
-def _catmix_guide_excel_bytes(shown, piv, store_tot, cats, sheet="매장별가이드"):
-    """시트3(매장별 제안) v2 구조 — 매장별 강점/약점 복종을 rank-gap 판정으로 뽑아 전사 평균·비교
-    매장·기회금액·코칭 멘트까지 묶어 보여주는 담당자용 가이드 엑셀(11열 A~K, A~D 세로 병합)."""
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-    import openpyxl
-
-    rows = _catmix_guide_rows(shown, piv, store_tot, cats)
-    headers = ["매장코드", "매장명", "합계순위", "강점 요약", "약점 카테고리", "내 비중(%)",
-               "전사 평균(%)", "격차(%p)", "비교 매장(비중)", "평균 대비 놓친 매출(원)", "담당자 코칭 멘트"]
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = _safe_name(sheet)[:28] or "매장별가이드"
-
-    head_fill = PatternFill("solid", fgColor="F2F2F2")
-    weak_fill = PatternFill("solid", fgColor=_CATMIX_GUIDE_WEAK_FILL)
-    thin = Side(style="thin", color="D9D9D9")
-
-    for cj, h in enumerate(headers, start=1):
-        c = ws.cell(1, cj, h)
-        c.fill = head_fill
-        c.font = Font(name="맑은 고딕", size=9, bold=True, color="404040")
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    if not rows:
-        ws.freeze_panes = "A2"
-        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
-
-    r = 2
-    for row in rows:
-        is_weak = row["약점카테고리"] != "뚜렷한 약점 복종 없음(전 복종 고르게 강세)"
-        vals = [row["매장코드"], row["매장명"], row["합계순위"], row["강점요약"], row["약점카테고리"],
-                row["내비중"], row["전사평균"], row["격차"], row["비교매장"], row["기회금액"], row["코칭멘트"]]
-        for cj, v in enumerate(vals, start=1):
-            c = ws.cell(r, cj, v)
-            c.alignment = Alignment(horizontal=("left" if cj in (2, 4, 5, 9, 11) else "center"),
-                                     vertical="center", wrap_text=(cj in (4, 5, 9, 11)))
-            if cj == 6 and v is not None:      # F 내비중
-                c.number_format = '0.0"%"'
-            elif cj == 7 and v is not None:    # G 전사평균
-                c.number_format = '0.0"%"'
-            elif cj == 8 and v is not None:    # H 격차
-                c.number_format = '0.0"%p"'
-                if v > 0:
-                    c.font = Font(bold=True, color="C0392B")
-            elif cj == 10 and isinstance(v, (int, float)):   # J 기회금액(양수 값이 있을 때만 강조)
-                c.number_format = '#,##0"원"'
-                c.font = Font(bold=True, color="8A5300")
-            if is_weak and cj >= 5:            # E~K 약점 행 배경(원본 스펙)
-                c.fill = weak_fill
-        r += 1
-
-    # A~D 세로 병합(매장 블록 단위)
-    r = 2
-    for row in rows:
-        if row["_block_first"]:
-            n = row["_block_size"]
-            if n > 1:
-                for col in (1, 2, 3, 4):
-                    ws.merge_cells(start_row=r, start_column=col, end_row=r + n - 1, end_column=col)
-                    ws.cell(r, col).alignment = Alignment(horizontal=("left" if col in (2, 4) else "center"),
-                                                           vertical="center", wrap_text=(col == 4))
-        r += 1
-
-    for rr in range(1, ws.max_row + 1):
-        for cc in range(1, len(headers) + 1):
-            ws.cell(rr, cc).border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    widths = {1: 10, 2: 14, 3: 9, 4: 22, 5: 16, 6: 9, 7: 10, 8: 9, 9: 24, 10: 16, 11: 42}
-    for cj, w in widths.items():
-        ws.column_dimensions[get_column_letter(cj)].width = w
-    ws.freeze_panes = "A2"
-
-    buf = io.BytesIO(); wb.save(buf)
-    return buf.getvalue()
-
-
-def render_category_mix(df):
-    """🧵 복종별 판매비중 분석 — 매장별 복종(중/소카테고리)별 판매 금액·비중 현황표.
-
-    과거 "매장별 아이템 비중 분석" 프로젝트(엑셀 3시트 산출물)의 시트1(원본+집계 데이터)만 이식한
-    것 — 시트2(베스트/워스트)·시트3(매장별 제안)은 이번 범위 밖(중태님 확정, 2026-08-08).
-    """
-    st.subheader("🧵 복종별 판매비중 분석")
-    if df is None or df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
-        st.info("데이터를 먼저 적재하세요.")
-        return
-    need_cols = {"아이템", "매장코드", "매장명", "_매출액", "_판매일"}
-    if not need_cols.issubset(df.columns):
-        st.info("이 리포트에 필요한 컬럼(아이템·매장코드·매장명 등)이 없어요.")
-        return
-    d = df[df["_판매일"].notna()].copy()
-
-    # [수정7, 2026-08-09] 담당별 필터 추가 위해 매장 담당자를 행(거래) 단위로 먼저 매핑 — 이 앱의
-    # 기존 관행(render_channel_brand 등)과 동일한 패턴. shown["_담당자"] 산출에도 동일 맵 재사용.
-    master = load_master()
-    if not master.empty and "담당자" in master.columns:
-        _mgr_map = dict(zip(master["매장코드"].astype(str).str.strip(),
-                            master["담당자"].astype(str).str.strip()))
-        d["_담당자"] = d["매장코드"].astype(str).str.strip().map(_mgr_map)
-        d["_담당자"] = d["_담당자"].where(
-            d["_담당자"].notna() & d["_담당자"].str.strip().ne("")
-            & ~d["_담당자"].str.lower().isin(["nan", "none"]), None)
-    else:
-        _mgr_map = {}
-        d["_담당자"] = None
-    _mans = sorted({str(m).strip() for m in d["_담당자"].dropna().astype(str)
-                    if str(m).strip() and str(m).strip().lower() not in ("nan", "none")})
-
-    st.caption("매장별로 어떤 복종(아이템군)의 판매 비중이 높고 낮은지 보여줘요. "
-               "🟧 온라인통합몰(SD065)은 다른 매장이 참조하는 비교 기준선이라 항상 주황색으로 표시돼요. "
-               "🟦 G.TOTAL 바로 아래엔 매장담당별 평균(하늘색)이 담당자마다 한 행씩 나와요. "
-               "🟢 복종별 '금액' 열의 매출 상위 5개 매장(SD065·담당별평균 제외)은 녹색, "
-               "🔴🔵 '%' 열의 상위 5개는 빨간색·하위 5개는 파란색(둘 다 SD065·담당별평균 제외)으로 "
-               "표시돼요. 기간 합계매출 100만원 미만 매장은 총계엔 포함되지만 목록엔 표시하지 않아요. "
-               "🔽 담당별 필터에서 담당자를 고르면 두 표(복종별 판매비중·전년대비 변화) 모두 그 "
-               "담당자의 매장만으로 줄어들어요(드릴다운, 2026-08-09).")
-
-    dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
-    default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
-    with st.form("cm_form"):
-        rng = st.date_input("조회기간 (시작일~종료일 직접 지정)", value=(default_start, dmax),
-                            min_value=dmin, max_value=dmax, key="cm_rng")
-        cm0, cm1, cm2, cm3, cm4 = st.columns([1.1, 1, 1, 1, 1])
-        level = cm0.radio("카테고리 기준", CATMIX_CAT_LEVELS, horizontal=True, key="cm_level")
-        # [수정7] 담당별 필터 추가 — 공통룰10(브랜드/연차/시즌) 4번째 필터, 빈칸=전체
-        brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
-        ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
-        seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
-        selb = cm1.multiselect("브랜드별", brands, default=[], placeholder="전체", key="cm_brand")
-        sela = cm2.multiselect("연차별", ages, default=[], placeholder="전체", key="cm_age")
-        sels = cm3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="cm_season")
-        selm = cm4.multiselect("담당별", _mans, default=[], placeholder="전체", key="cm_mgr")
-        if not _mans:
-            st.caption("※ 매장 기준정보(담당자)가 없어 담당별 필터가 비어 있어요 — 사이드바에서 매장 기준정보를 업로드하면 채워져요.")
-        run = st.form_submit_button("🔍 조회", type="primary")
-    if _need_search("cm_go", run):
-        return
-    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
-        st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
-        return
-    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
-    if e < s:
-        st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
-        return
-
-    base = d[(d["_판매일"] >= s) & (d["_판매일"] <= e)]
-    if selb and "브랜드명" in base.columns:
-        base = base[base["브랜드명"].isin(selb)]
-    if sela and "연차" in base.columns:
-        base = base[base["연차"].isin(sela)]
-    if sels and "시즌명" in base.columns:
-        base = base[base["시즌명"].isin(sels)]
-    if selm and "_담당자" in base.columns:      # [수정7] 담당별 드릴다운 — 선택한 담당자의 매장만
-        base = base[base["_담당자"].astype(str).str.strip().isin(selm)]
-    if base.empty:
-        st.info("선택한 조건에 매출 데이터가 없어요.")
-        return
-
-    cat_map = get_itemgroup_map() if level == "중카테고리" else get_itemgroup_map_small()
-    base = base.assign(_복종=base["아이템"].astype(str).str.strip().str.upper().map(cat_map).fillna("기타"))
-
-    store_tot = base.groupby(["매장코드", "매장명"])["_매출액"].sum().rename("합계").reset_index()
-    shown = store_tot[store_tot["합계"] >= _CATMIX_FLOOR].copy()
-    hidden_n = len(store_tot) - len(shown)
-    if shown.empty:
-        st.info("기간 합계매출 100만원 이상인 매장이 없어요.")
-        return
-    shown = shown.sort_values("합계", ascending=False).reset_index(drop=True)
-    shown["순위"] = shown.index + 1
-
-    # 수정2: 매장담당별 평균 — 매장 기준정보(담당자)와 매칭, 표시 대상(shown) 매장만 대상으로 그룹평균
-    # (담당자 맵은 위 [수정7]에서 이미 계산해둔 _mgr_map 재사용)
-    shown["_담당자"] = shown["매장코드"].astype(str).str.strip().map(_mgr_map)
-    shown["_담당자"] = shown["_담당자"].where(
-        shown["_담당자"].notna() & shown["_담당자"].astype(str).str.strip().ne("")
-        & ~shown["_담당자"].astype(str).str.lower().isin(["nan", "none"]), None)
-
-    piv = base.pivot_table(index="매장코드", columns="_복종", values="_매출액", aggfunc="sum", fill_value=0.0)
-    cats = piv.sum(axis=0).sort_values(ascending=False).index.tolist()
-    piv = piv.reindex(columns=cats, fill_value=0.0)
-    amt_cols = list(cats)              # 수정1: "{복종} 금액(백만)" → "{복종}"으로 간결화
-    pct_cols = [f"{c} %" for c in cats]
-    n_meta = 3    # 매장코드·합계(백만)·순위 — 복종 구분선(수정3) 위치 계산용
-
-    def _row(cat_amt, total, code_disp, rank_val):
-        out = {"매장코드": code_disp, "합계(백만)": total / 1e6, "순위": rank_val}
-        for c in cats:
-            a = float(cat_amt.get(c, 0.0))
-            out[c] = a / 1e6
-            out[f"{c} %"] = (a / total * 100) if total else 0.0
-        return out
-
-    rows, index = [], []
-    total_amt_all = float(store_tot["합계"].sum())
-    rows.append(_row(piv.sum(axis=0), total_amt_all, "", None))
-    index.append("G.TOTAL")
-
-    # 수정2: 매장담당별 평균 행 — G.TOTAL 바로 아래, 개별 매장행 위. 평균 합계 큰 순 정렬.
-    # mgr_avg_tot는 아래 "담당별 전년대비 복종 비중 변화" 표(2026-08-09 신규, 수정6)에서도 재사용
-    # 하므로 if 안이 아니라 항상(빈 Series라도) 계산해둔다 — 동작은 기존과 동일(빈 Series면 루프 무실행).
-    mgr_labels = []
-    mgr_avg_tot = (shown.groupby("_담당자")["합계"].mean().sort_values(ascending=False)
-                   if shown["_담당자"].notna().any() else pd.Series(dtype="float64"))
-    for mgr, avg_tot in mgr_avg_tot.items():
-        codes = shown.loc[shown["_담당자"] == mgr, "매장코드"]
-        cat_amt_avg = piv.reindex(codes).fillna(0.0)[cats].mean(axis=0)
-        lbl = f"{mgr} 평균"
-        rows.append(_row(cat_amt_avg, float(avg_tot), "", None))
-        index.append(lbl)
-        mgr_labels.append(lbl)
-
-    for _, r in shown.iterrows():
-        code = r["매장코드"]
-        cat_amt = piv.loc[code] if code in piv.index else pd.Series(0.0, index=cats)
-        rows.append(_row(cat_amt, float(r["합계"]), code, int(r["순위"])))
-        index.append(r["매장명"])
-    num = pd.DataFrame(rows, index=index)
-    num.index.name = "매장명"
-
-    sd_row = shown[shown["매장코드"].astype(str).str.strip().str.upper() == _CATMIX_SD065]
-    sd_label = sd_row.iloc[0]["매장명"] if not sd_row.empty else None
-
-    disp = num.copy()
-    disp["합계(백만)"] = num["합계(백만)"].map(lambda v: f"{v:,.1f}")
-    disp["순위"] = num["순위"].map(lambda v: "–" if pd.isna(v) else f"{int(v)}")
-    for c in amt_cols:
-        disp[c] = num[c].map(lambda v: f"{v:,.1f}")
-    for c in pct_cols:
-        disp[c] = num[c].map(lambda v: f"{v:.1f}%")
-
-    h1, h2, h2g = st.columns([3.4, 1, 1])
-    h1.markdown(f"### 매장별 복종({level}) 판매비중{_NOTE_FLOAT}", unsafe_allow_html=True)
-    h2.download_button("⬇ 엑셀", _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num,
-                                                       sheet=f"복종별판매비중_{level}",
-                                                       mgr_labels=mgr_labels, n_meta=n_meta),
-                       file_name=f"복종별판매비중_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
-                       key="cm_dl", use_container_width=True)
-    # [수정8, 2026-08-09] 매장별 가이드(시트3 v2 이관) — 표1과 같은 조회조건(shown/piv/store_tot)을
-    # 그대로 재사용해 강점/약점·전사평균·비교매장·기회금액·코칭멘트를 엑셀로 내려받음(화면 표는 없음).
-    h2g.download_button("⬇ 매장별 가이드", _catmix_guide_excel_bytes(shown, piv, store_tot, cats,
-                                                                     sheet=f"매장별가이드_{level}"),
-                       file_name=f"매장별가이드_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
-                       key="cm_guide_dl", use_container_width=True)
-    sty = _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=mgr_labels, n_meta=n_meta)
-    render_styled_table(sty)
-    _mgr_note = (f" · 매장담당별 평균 {len(mgr_labels)}명(하늘색, 표시된 매장 기준)" if mgr_labels
-                 else " · 매장 기준정보(담당자)가 없어 매장담당별 평균은 표시되지 않았어요")
-    st.caption(f"※ 매장 {len(shown)}개 표시(기간 합계매출 100만원 미만 {hidden_n}개 매장은 총계엔 "
-               "포함되지만 목록에서는 제외) · 순위=표시된 매장 안에서 매출 큰 순 · "
-               "복종 열은 총매출 큰 순으로 정렬돼요" + _mgr_note + ".")
-
-    # ── [수정6] 담당별 전년대비 복종 비중 변화 (2026-08-09 신규) ──────────────
-    # 표1과 동일한 행 구성(G.TOTAL·매장담당별 평균·SD065·개별 매장)을 "{전년} 라벨"/"{올해} 라벨"/
-    # "ㄴ증감" 3행씩으로 쌓아 전년 동기간 대비 변화를 보여줌. 전년 동기간 계산은 이 앱의 기존 관행
-    # (render_channel_brand 등)과 동일하게 조회기간을 그대로 1년 전으로 시프트.
-    ps, pe = s - pd.DateOffset(years=1), e - pd.DateOffset(years=1)
-    prev_base = d[(d["_판매일"] >= ps) & (d["_판매일"] <= pe)]
-    if selb and "브랜드명" in prev_base.columns:
-        prev_base = prev_base[prev_base["브랜드명"].isin(selb)]
-    if sela and "연차" in prev_base.columns:
-        prev_base = prev_base[prev_base["연차"].isin(sela)]
-    if sels and "시즌명" in prev_base.columns:
-        prev_base = prev_base[prev_base["시즌명"].isin(sels)]
-    if selm and "_담당자" in prev_base.columns:  # [수정7] 담당별 드릴다운 — base와 동일하게 적용
-        prev_base = prev_base[prev_base["_담당자"].astype(str).str.strip().isin(selm)]
-
-    cy = int(e.year)
-    py2, cy2 = (cy - 1) % 100, cy % 100
-
-    h3, h4 = st.columns([4, 1])
-    h3.markdown(f"### 담당별 전년대비 복종 비중 변화 (전년 동기간 비교){_NOTE_FLOAT}", unsafe_allow_html=True)
-    if prev_base.empty:
-        st.info(f"전년 동기간({ps.date()}~{pe.date()}) 매출 데이터가 없어서 전년대비 비교표를 만들 수 없어요.")
-        return
-
-    prev_base = prev_base.assign(
-        _복종=prev_base["아이템"].astype(str).str.strip().str.upper().map(cat_map).fillna("기타"))
-    store_tot_prev = prev_base.groupby(["매장코드", "매장명"])["_매출액"].sum().rename("합계").reset_index()
-    prev_total_map = dict(zip(store_tot_prev["매장코드"], store_tot_prev["합계"]))
-    shown_prev = store_tot_prev[store_tot_prev["합계"] >= _CATMIX_FLOOR].copy()
-    shown_prev = shown_prev.sort_values("합계", ascending=False).reset_index(drop=True)
-    shown_prev["순위"] = shown_prev.index + 1
-    prev_rank_map = dict(zip(shown_prev["매장코드"], shown_prev["순위"]))
-    piv_prev = prev_base.pivot_table(index="매장코드", columns="_복종", values="_매출액",
-                                      aggfunc="sum", fill_value=0.0).reindex(columns=cats, fill_value=0.0)
-
-    # 전년 데이터도 표1과 동일한 _row() 헬퍼로 조립 — 컬럼 순서·계산 방식(총액 0이면 %도 0) 일치 보장
-    prev_rows = [_row(piv_prev.sum(axis=0), float(store_tot_prev["합계"].sum()), "", None)]
-    for mgr, avg_tot in mgr_avg_tot.items():
-        codes = shown.loc[shown["_담당자"] == mgr, "매장코드"]
-        cat_amt_avg_prev = piv_prev.reindex(codes).fillna(0.0)[cats].mean(axis=0)
-        avg_tot_prev = float(pd.Series([prev_total_map.get(c, 0.0) for c in codes]).mean()) if len(codes) else 0.0
-        prev_rows.append(_row(cat_amt_avg_prev, avg_tot_prev, "", None))
-    for _, r in shown.iterrows():
-        code = r["매장코드"]
-        cat_amt_prev = piv_prev.loc[code] if code in piv_prev.index else pd.Series(0.0, index=cats)
-        # 순위(전년)는 전년도 자체 매출 100만원 이상 매장 모집단 안에서 재계산(연도별로 다를 수 있음,
-        # 중태님 확인 완료) — 해당 매장이 전년엔 100만원 미만·데이터 없음이면 "–"로 표시.
-        prev_rows.append(_row(cat_amt_prev, float(prev_total_map.get(code, 0.0)), code,
-                               prev_rank_map.get(code)))
-    prev_num = pd.DataFrame(prev_rows, index=num.index)
-    prev_num.index.name = "매장명"
-
-    def _fmt_row2(r):
-        out = {"매장코드": r["매장코드"], "합계(백만)": f"{r['합계(백만)']:,.1f}",
-               "순위": "–" if pd.isna(r["순위"]) else f"{int(r['순위'])}"}
-        for c in cats:
-            out[c] = f"{r[c]:,.1f}"
-            out[f"{c} %"] = f"{r[f'{c} %']:.1f}%"
-        return out
-
-    def _yoy_amt(cv, pv):
-        # 중태님 확인(2026-08-09): 증감액(절대값, 백만원)과 증감율(%) 둘 다 함께 표기.
-        diff = cv - pv
-        if pv == 0:
-            return (f"{diff:+,.1f} (신규)" if diff else "–"), diff
-        return f"{diff:+,.1f} ({diff / pv * 100:+.1f}%)", diff
-
-    def _yoy_pct(cv, pv):
-        diff = cv - pv
-        return f"{diff:+.1f}%p", diff
-
-    def _diff_row2(cur_r, prev_r):
-        out, sig = {"매장코드": "", "합계(백만)": None, "순위": "–"}, {}
-        out["합계(백만)"], sig["합계(백만)"] = _yoy_amt(cur_r["합계(백만)"], prev_r["합계(백만)"])
-        for c in cats:
-            out[c], sig[c] = _yoy_amt(cur_r[c], prev_r[c])
-            pc = f"{c} %"
-            out[pc], sig[pc] = _yoy_pct(cur_r[pc], prev_r[pc])
-        return out, sig
-
-    rows2, index2, sign_rows2 = [], [], []
-    gt_labels2, sd_labels2, mgr_labels2 = [], [], []
-    for lbl in num.index:
-        cur_r, prev_r = num.loc[lbl], prev_num.loc[lbl]
-        py_lbl, cy_lbl = f"{py2} {lbl}", f"{cy2} {lbl}"
-        rows2.append(_fmt_row2(prev_r)); index2.append(py_lbl); sign_rows2.append({})
-        rows2.append(_fmt_row2(cur_r)); index2.append(cy_lbl); sign_rows2.append({})
-        dtxt, dsig = _diff_row2(cur_r, prev_r)
-        # 유일 키(라벨별 매장명 접미사) — 표시는 format_index()로 전부 "ㄴ증감"으로 통일(위 함수 참고)
-        rows2.append(dtxt); index2.append(f"{_CATMIX_DIFF_PREFIX}{lbl}"); sign_rows2.append(dsig)
-        if lbl == "G.TOTAL":
-            gt_labels2 += [py_lbl, cy_lbl]
-        elif sd_label and lbl == sd_label:
-            sd_labels2 += [py_lbl, cy_lbl]
-        elif lbl in mgr_labels:
-            mgr_labels2 += [py_lbl, cy_lbl]
-
-    disp2 = pd.DataFrame(rows2, index=index2)
-    disp2.index.name = "매장명"
-    sign2 = pd.DataFrame(sign_rows2, index=index2).reindex(columns=disp2.columns)
-
-    h4.download_button(
-        "⬇ 엑셀",
-        _catmix_yoy_excel_bytes(disp2, sign2, gt_labels2, sd_labels2, mgr_labels2, amt_cols, pct_cols,
-                                 sheet=f"복종비중YoY_{level}", n_meta=n_meta),
-        file_name=f"담당별_전년대비_복종비중변화_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
-        key="cm_yoy_dl", use_container_width=True)
-    sty2 = _catmix_yoy_style(disp2, sign2, gt_labels2, sd_labels2, mgr_labels2, amt_cols, pct_cols,
-                              n_meta=n_meta)
-    render_styled_table(sty2)
-    st.caption(f"※ {py2}년={ps.date()}~{pe.date()}(전년 동기간) · {cy2}년={s.date()}~{e.date()}(조회기간, "
-               "위 표와 동일 대상) · ㄴ증감 행 — 합계·복종 금액 열: 증감액(백만) (증감율%), "
-               "% 열: %p 차이 · 초록=증가 빨강=감소 · 순위는 각 연도 자체 매출 100만원 이상 매장 "
-               "모집단 안에서 따로 계산(연도별로 달라질 수 있어요, 전년에 없던 매장은 \"–\").")
 
 
 # ==============================================================================
@@ -3134,31 +2354,6 @@ _CHANNEL_MASKS = {
     "웹뜰이관":     lambda x: x["_채널스토리"].astype(str).str.contains("웹뜰", na=False),
     "웍스바이이관": lambda x: x["_채널스토리"].astype(str).str.contains("웍스", na=False),
 }
-
-# 브랜드별 5개 분류 기준 (드릴다운3 "유통/브랜드 선택" 필터 전용 · _wk_rows 브랜드별 행과 동일 기준)
-_BRAND_MASKS = {
-    "S/D/L":       lambda x: x["브랜드명"].isin(SDL_BRANDS),
-    "CODI GALLERY": lambda x: x["브랜드명"] == "CODI GALLERY",
-    "ZERO LOUNGE": lambda x: x["브랜드명"] == "ZERO LOUNGE",
-    "GENTLEMENS":  lambda x: x["브랜드명"] == "GENTLEMENS PHILOSOPHY",
-    "NORATED":     lambda x: x["브랜드명"] == "NORATED",
-}
-
-# 드릴다운3 "연차" 필터 버킷 — None은 "위 4개 버킷에 없는 나머지 연차 전부(4년차 이상)"를 뜻하며
-# 실행 시점에 실제 데이터의 연차값을 훑어 동적으로 채운다(연차 표기가 "4년차"/"5년차"/"4년차↑" 등
-# 데이터마다 다를 수 있어 하드코딩하지 않음).
-_AGE_BUCKET_DEFS = [
-    ("신상+내년신상", ["신상", "내년신상"]),
-    ("1년차", ["1년차"]),
-    ("2년차", ["2년차"]),
-    ("3년차", ["3년차"]),
-    ("4년차↑", None),
-]
-
-# 드릴다운3 "아이템 or 매장" 선택지 — '아이템'은 중카테고리(아이템그룹) 기준 breakdown(드릴다운2와
-# 동일한 render_weekly_item_drilldown 재사용), '매장별'은 필터에 해당하는 매장 목록(드릴다운1과
-# 동일한 render_weekly_drilldown 재사용).
-WK_DIM_OPTS = ["아이템", "매장별"]
 
 
 def _wk_metrics(cur_sub, prev_sub, total_c):
@@ -3449,77 +2644,6 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
     render_styled_table(sty)
 
 
-def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
-    """🔍 (드릴다운 3) 유통/브랜드 · 연차 · 아이템/매장별 상세 보기 — 2026-08-10 신규.
-
-    드릴다운1(유통 또는 담당자 '하나')·드릴다운2(매장 또는 담당자 '하나')와 달리, 유통·브랜드
-    (다중선택·OR)와 연차(다중선택·OR)로 데이터 자체를 자유롭게 좁힌 뒤, 그 결과를 "아이템"
-    (중카테고리 기준) 또는 "매장별"(그 필터에 해당하는 매장 목록)로 펼쳐 본다. 이미 검증된
-    render_weekly_item_drilldown/render_weekly_drilldown에 필터링 끝난 데이터 + '항상 참' 마스크를
-    그대로 넘겨 재사용 — 헤더(당월실적·연간누계)·엑셀 다운로드·비중 계산 방식이 메인 표·드릴다운1·2와
-    완전히 동일하다(중복 로직 없음).
-    """
-    st.markdown("##### 🔍 유통/브랜드 · 연차 · 아이템/매장별 상세 보기")
-    pool = pd.concat([cur_m, prev_m, cur_y, prev_y])
-    if pool.empty:
-        st.info("표시할 데이터가 없어요.")
-        return
-
-    group_opts = list(_CHANNEL_MASKS.keys()) + list(_BRAND_MASKS.keys())
-    age_opts = [lbl for lbl, _ in _AGE_BUCKET_DEFS]
-    with st.form("wk_cat_form"):
-        wc0, wc1, wc2 = st.columns([1.6, 1, 1])
-        selg = wc0.multiselect("유통/브랜드 선택", group_opts, default=[], placeholder="전체", key="wk_cat_grp")
-        sela = wc1.multiselect("연차", age_opts, default=[], placeholder="전체", key="wk_cat_age")
-        dim = wc2.radio("아이템 or 매장", WK_DIM_OPTS, horizontal=True, key="wk_cat_dim")
-        run = st.form_submit_button("🔍 상세보기", type="primary")
-    if _need_search("wk_cat_go", run):
-        return
-
-    def _grp_mask(frame, name):
-        fn = _CHANNEL_MASKS.get(name) or _BRAND_MASKS.get(name)
-        return fn(frame) if fn is not None else pd.Series(False, index=frame.index)
-
-    def _apply(frame):
-        if frame.empty:
-            return frame
-        out = frame
-        if selg:
-            comb = _grp_mask(out, selg[0])
-            for nm in selg[1:]:
-                comb = comb | _grp_mask(out, nm)
-            out = out[comb]
-        if sela and "연차" in out.columns:
-            known_ages = {"신상", "내년신상", "1년차", "2년차", "3년차"}
-            all_ages = set(str(a) for a in pool["연차"].dropna().unique()) if "연차" in pool.columns else set()
-            rest_ages = all_ages - known_ages
-            age_vals = set()
-            for lbl in sela:
-                bucket = dict(_AGE_BUCKET_DEFS)[lbl]
-                age_vals |= set(bucket) if bucket is not None else rest_ages
-            out = out[out["연차"].astype(str).isin(age_vals)]
-        return out
-
-    fcm, fpm, fcy, fpy = _apply(cur_m), _apply(prev_m), _apply(cur_y), _apply(prev_y)
-    if fcm.empty and fpm.empty and fcy.empty and fpy.empty:
-        st.info("선택한 조건에 해당하는 데이터가 없어요.")
-        return
-
-    _selg_txt = "·".join(selg) if selg else "전체"
-    _sela_txt = "·".join(sela) if sela else "전체"
-    label = f"유통/브랜드: {_selg_txt} · 연차: {_sela_txt}"
-    _all_true = lambda x: pd.Series(True, index=x.index)   # 이미 필터링된 데이터를 그대로 통과시킴
-
-    if dim == "아이템":
-        render_weekly_item_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py)
-    else:
-        render_weekly_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, show_plan=False)
-    st.caption("※ 유통/브랜드·연차는 다중선택(선택한 항목 중 하나라도 해당하면 포함, OR 조건) — "
-               "빈칸이면 전체. '아이템'은 중카테고리(아이템그룹) 기준 breakdown, '매장별'은 위 필터에 "
-               "해당하는 매장 목록을 보여줘요. 비중=선택 조건 내 비중, 필터가 걸린 상태라 사업계획·진도율은 "
-               "'–'로 표시돼요.")
-
-
 def render_weekly_report(df):
     st.subheader("📋 주간회의 보고자료 (당월 · 연간누계, 전년 동기간 비교)")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
@@ -3597,9 +2721,6 @@ def render_weekly_report(df):
     st.caption("※ 유통별 5개는 주요 채널만 (직영몰·특수채널·K2K이관 등은 G.TOTAL엔 포함, 유통 행엔 미표기). "
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
 
-    st.divider()
-    render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py)   # 2026-08-10, 메인 표 바로 아래로 배치(중태님 지시)
-
     # ── 매장 담당별 분석 (위 표와 동일 프레임, 행만 담당자) ──
     _MGR_BOTTOM = ["없음", "26년 미운영", "직원구매"]   # 비담당 라벨 → 맨 아래(이 순서)
     managers = []
@@ -3667,13 +2788,10 @@ def render_weekly_report(df):
 
 
 # ==============================================================================
-# 재고 모니터링 1차 가공  ─ 260731 확정 기준 · v3.3 113열 (2026-08-02 ERP 이식, 260811 사이즈구분 컬럼 + 가격시뮬 반영)
+# 재고 모니터링 1차 가공  ─ 260731 확정 기준 · v3 106열 (2026-08-02 ERP 이식)
 # ==============================================================================
 # 원본: '쇼핑몰재고 모니터링 자료 1차 가공' 프로젝트 process_260731.py (판정 로직 1:1 이식)
-#  · 선판정: 수정일='오프라인' → AA·AB·AF '오프라인' / 온라인창고<20 → AA·AF '재고20미만'(AB 미적용)
-#    (260811: 판정 소스를 '이관구분' 컬럼에서 '수정일' 컬럼으로 변경 — 로우데이터상 실제 오프라인/
-#     온라인/부분이관 값은 '수정일'이라는 이름의 컬럼(raw21)에 들어오고, '이관구분' 컬럼(raw22)은
-#     현재 로우데이터에서 공란으로 내려온다. 컬럼명과 실제 내용이 어긋난 회사 ERP 추출 특성.)
+#  · 선판정: 이관구분='오프라인' → AA·AB·AF '오프라인' / 온라인창고<20 → AA·AF '재고20미만'(AB 미적용)
 #  · AA/AB 5등급: A 상위20% / B 21~50 / C 51~80 / D 81~100 / E 판매0(자동부여)
 #  · 등급 모집단 = (중카테고리 × 년도 × 시즌) — 중카테고리는 아이템 마스터(item_master) 기준,
 #    260803부터 니트류·티셔츠류가 "니트/티셔츠류" 한 중카테고리로 통일됨(마스터 미등록 시엔 구 분리판 폴백)
@@ -3689,57 +2807,15 @@ def render_weekly_report(df):
 #  · 260807 개정(size-grade-classifier 스킬 반영): A09 핵심 사이즈 M·L(2개) → M·L·XL(3개) 확장,
 #    빅은 XXL만 남음. 단품 등급(_INV_SYSTEMS["A09"])·SET 등급(_INV_SET_CORE_A09 등) 둘 다 반영.
 #    A16(핵심 2개 그대로)은 영향 없음.
-#  · ⚠️ 260811 개정 — 사이즈코드 판정 소스 전환('쇼핑몰재고 모니터링 1차' 프로젝트 260811 전달사항 + process_260811.py):
-#    로우데이터에 신규 컬럼 '사이즈구분'이 추가됨(사이즈정보 14칸 그룹 바로 앞, raw 79번째 열=0-index 78).
-#    이제 이 컬럼값을 사이즈코드(A16/A17/A09/A05/A06/A18)로 "직접" 사용한다 — 더 이상 사이즈 마스터
-#    (품번→사이즈코드)를 조회해서 채우지 않는다. 등급 산정 알고리즘(_inv_grade_one/_inv_set_grade 등)
-#    자체는 전혀 바뀌지 않았다 — 바뀐 건 "사이즈코드를 어디서 가져오는가" 뿐이다.
-#    · 공란(값 없음) → 사이즈 마스터로 되돌아가 보완하지 않고 바로 '해당없음'(미매칭) 처리.
-#    · 사이즈 마스터는 이제 필수가 아니라 옵션(참고용) — 있으면 새 컬럼값과의 불일치 건수만 참고 표시.
-#    · 로우데이터 열 수 기준 93 → 94열로 상향(신규 컬럼 1개 증가). 94열이 아니면 처리 거부.
-#    · 출력도 신규 '사이즈구분' 컬럼 1개가 늘어 106 → 107열(v3.2)로 변경, CN열(92번째)에 위치.
-#      구 106열 템플릿을 넣으면 자동으로 컬럼 1개를 삽입해 107열로 보정한다.
-#  · 출력: 113열 v3.3 — 서식은 저장소 동봉 템플릿(inventory_template.xlsx = 최신 v3.3 결과물)에서 1:1 복제
+#  · 출력: 106열 v3 — 서식은 저장소 동봉 템플릿(inventory_template.xlsx = 최신 v3 결과물)에서 1:1 복제
 #  · 260802 서식 확정: C·K·L·M·AA·AB·AF·AG·AH·AI 노란색 / BA·BG·BH·BI 초록색 / BK~CM 숨김
-#    (사이즈구분 신규 컬럼은 로우파일에 이미 있는 값을 그대로 통과시키는 열이라 노란색 대상 아님 — 기본 서식 유지)
-#  · ⚠️ 260811 추가 개정 — 가격 시뮬레이션 5컬럼 신설(팀장 지시, 중태님과 채팅으로 계산식 검증 확정):
-#    로우데이터의 '몰가격'(raw J열=0-idx9) · '기준판매가'(raw AB열=0-idx27) 두 값으로 결과물의 몰가격
-#    컬럼(V열=22번째) 바로 뒤에 신규 가격 5컬럼을 삽입한다 — (네이버)상시가·(쿠폰진행)상시가·
-#    (쿠폰진행)행사가·(쿠폰X/무배)상시가·(쿠폰X/무배)행사가. 계산식:
-#      · 상시가(네이버) = 몰가격×1.05 / 상시가(쿠폰진행) = 몰가격×1.15 / 행사가(쿠폰진행) = 몰가격×1.1
-#      · 상시가(쿠폰X/무배) = 몰가격<30,000이면 (몰가격×1.05)+3,000, 아니면 몰가격×1.05
-#      · 행사가(쿠폰X/무배) = 몰가격<30,000이면 몰가격+3,000, 아니면 몰가격
-#    공통 규칙: (1) 5개 전부 100원 단위로 반올림(10원 단위가 안 남게). (2) 기준판매가에 값이 있고
-#    계산값이 그 값을 넘으면 → 그 계산 하나만 기준판매가로 대체(중간 단계 없이 1회 비교·캡핑). 기준
-#    판매가가 공란이면 캡핑 없이 계산값 그대로. (3) 몰가격이 공란인 행은 5컬럼 전부 공란.
-#    서식: 5컬럼 전부 노란색, 헤더는 그룹행(GROUP_R) 비우고 실제 컬럼명만(사이즈구분과 동일 방식).
-#  · ⚠️ 260811 추가 개정(2) — 기준판매가 복제 컬럼 신설(팀장 지시): 몰가격 바로 뒤(가격5컬럼보다도
-#    앞)에 기준판매가 값을 그대로 복제한 컬럼 1개를 초록색으로 추가 삽입 — 뒤쪽(패스스루 구간)의
-#    원본 기준판매가 컬럼은 그대로 유지, 값만 똑같이 한 번 더 보여주는 것(몰가격 옆에서 바로 비교
-#    하기 편하도록). 결과물이 107 → 112 → 113열(v3.3)로 확장된다.
-#    구 107열 템플릿을 넣으면 자동으로 6컬럼(가격5+기준판매가복제1)을 삽입해 113열로 보정한다
-#    (구 106열 템플릿도 106→107→112→113 3단계 자동 보정).
-# ※ 사이즈 마스터(품번→사이즈코드)는 DB(size_master)에 저장 — 260811부터 판정에는 미사용, 참고 보고 전용.
+# ※ 사이즈 마스터(품번→사이즈코드)는 DB(size_master)에 저장 — 사이드바(관리자)에서 업로드/교체.
 # ※ 아이템 마스터(아이템코드→대/중/소카테고리)는 DB(item_master)에 저장 — 사이드바(관리자)에서 업로드/교체.
 #   재고모니터링 중카테고리·판매분석 아이템그룹이 모두 여기서 나온다(단일 소스). 미등록 코드만 구 하드코딩 폴백.
 # ※ 재고 로우데이터는 DB에 적재하지 않음(그때그때 가공→엑셀 다운로드만). 가공은 전 팀원 사용 가능.
 INV_TEMPLATE_FILE = "inventory_template.xlsx"   # GitHub 저장소에 weekly_template.xlsx처럼 동봉
 SIZE_MASTER_TABLE = "size_master"
 ITEM_MASTER_TABLE = "item_master"
-# 260811: 사이즈구분 컬럼 도입으로 입출력 스펙 변경 — 하드코딩 대신 상수로 관리.
-INV_RAW_COLS = 94          # 로우데이터 총 열 수 (구 93 → 94, '사이즈구분' 신규 1열)
-INV_RAW_MOLGA_COL = 9      # raw 0-index — 몰가격(J열)
-INV_RAW_GIJUN_COL = 27     # raw 0-index — 기준판매가(AB열)
-# 260811(가격시뮬): 몰가격(22) 바로 뒤에 ① 기준판매가 복제 1컬럼(녹색) → ② 신규 가격 5컬럼(노란색)
-# 순서로 삽입 — 결과물 107 → 112 → 113열(v3.3)로 확장.
-INV_GIJUN_COPY_COL = 23    # 기준판매가 복제 컬럼 위치(몰가격 바로 다음, 원본 기준판매가는 뒤쪽 그대로 유지)
-INV_PRICE_SIM_COL = 24     # 신규 가격 5컬럼 시작 위치(기준판매가 복제 컬럼 바로 다음)
-INV_PRICE_SIM_N = 5
-INV_PRICE_SIM_HEADERS = ["(네이버) 상시가", "(쿠폰진행) 상시가", "(쿠폰진행) 행사가",
-                         "(쿠폰X/무배) 상시가", "(쿠폰X/무배) 행사가"]
-INV_TOTAL_COLS = 113       # 결과물 총 열 수 (구 106→107→112→113)
-INV_SIZECODE_COL = 98      # 결과물에서 '사이즈구분' 컬럼 위치 (구 92 + 가격시뮬 5칸 + 기준판매가 복제 1칸)
-_INV_KNOWN_SIZE_CODES = {"A16", "A17", "A09", "A05", "A06", "A18"}
 
 # 260806: 아이템 마스터에도 폴백에도 없는 아이템 코드의 표기값. 예전엔 이런 코드를 만나면 가공을
 #         통째로 중단했는데(팀 요청으로 변경), 이제는 해당 상품 행만 이 값으로 표기하고 등급
@@ -3843,15 +2919,9 @@ def _inv_set_side(rec):
     return None
 
 # 260802 확정: 컬럼 전체(헤더+데이터) 채우기 색 강제 지정 + 상시 숨김 컬럼
-# 260811(가격시뮬 + 기준판매가 복제): 몰가격(22) 뒤에 기준판매가 복제 1컬럼 + 가격5컬럼이 끼어들면서
-# 구 27번째 이후 컬럼이 전부 +6 밀림 — 아래 세 상수는 밀린 뒤(113열 기준) 위치. C,K,L,M(그대로) +
-# 기준판매가 복제 컬럼(23, 초록색) + 신규 가격5컬럼(24~28, 전부 노란색) +
-# AA,AB,AF,AG,AH,AI(구 27,28,32,33,34,35 → +6 = 33,34,38,39,40,41 → 260811 '수정일' 재배치로
-# AA~변경후할인율 블록이 한 칸씩 앞당겨져 최종 32,33,37,38,39,40).
-_INV_YELLOW_COLS = ({3, 11, 12, 13} | set(range(INV_PRICE_SIM_COL, INV_PRICE_SIM_COL + INV_PRICE_SIM_N))
-                    | {32, 33, 37, 38, 39, 40})
-_INV_GREEN_COLS = {INV_GIJUN_COPY_COL, 59, 65, 66, 67}        # 기준판매가 복제(23) + BA,BG,BH,BI(구 53,59,60,61 → +6)
-_INV_HIDE_COLS = set(range(69, 98))                           # BK~CM (구 63~91 → +6)
+_INV_YELLOW_COLS = {3, 11, 12, 13, 27, 28, 32, 33, 34, 35}   # C,K,L,M,AA,AB,AF,AG,AH,AI
+_INV_GREEN_COLS = {53, 59, 60, 61}                            # BA,BG,BH,BI
+_INV_HIDE_COLS = set(range(63, 92))                           # BK~CM
 
 
 def _inv_grade_one(s14, sd, X, Y):
@@ -3949,45 +3019,6 @@ def _inv_num(v):
 
 def _inv_cutoff(p):
     return "A" if p <= 20 else "B" if p <= 50 else "C" if p <= 80 else "D"
-
-
-def _inv_price_sim(mol, gijun):
-    """260811(가격시뮬) 몰가격·기준판매가로 신규 가격 5컬럼 계산 — (네이버)상시가·(쿠폰진행)상시가·
-    (쿠폰진행)행사가·(쿠폰X/무배)상시가·(쿠폰X/무배)행사가 순.
-
-    mol=몰가격(숫자 또는 None), gijun=기준판매가(숫자 또는 None) — 둘 다 _inv_num() 등으로 이미
-    숫자/None 변환된 값이어야 한다.
-    - 몰가격이 없으면(공란) 5개 전부 None.
-    - 계산식: 상시가(네이버)=몰가격×1.05 / 상시가(쿠폰진행)=몰가격×1.15 / 행사가(쿠폰진행)=몰가격×1.1 /
-      상시가(쿠폰X/무배)=몰가격<30,000이면 (몰가격×1.05)+3,000 아니면 몰가격×1.05 /
-      행사가(쿠폰X/무배)=몰가격<30,000이면 몰가격+3,000 아니면 몰가격.
-    - 5개 전부 100원 단위 반올림(10원 단위가 안 남게).
-    - 기준판매가가 있고 계산값이 그 값을 넘으면 → 그 계산 하나만 기준판매가로 대체(1회 비교·캡핑,
-      중간 단계 없음). 기준판매가가 공란이면 캡핑 없이 계산값 그대로.
-    (2026-08-11 팀장 지시 · 채팅으로 8개 실데이터 예시 40칸 전수 검증 후 확정된 로직)
-    """
-    if mol is None:
-        return [None] * 5
-
-    def _r100(v):
-        return int(round(v / 100.0)) * 100
-
-    def _cap(v):
-        v = _r100(v)
-        if gijun is not None and v > _r100(gijun):
-            v = _r100(gijun)
-        return v
-
-    c1 = _cap(mol * 1.05)
-    c2 = _cap(mol * 1.15)
-    c3 = _cap(mol * 1.1)
-    if mol < 30000:
-        c4 = _cap(mol * 1.05 + 3000)
-        c5 = _cap(mol + 3000)
-    else:
-        c4 = _cap(mol * 1.05)
-        c5 = _cap(mol)
-    return [c1, c2, c3, c4, c5]
 
 
 def read_size_master_file(uploaded_file):
@@ -4180,27 +3211,6 @@ def get_itemgroup_map():
     return out
 
 
-# 복종별 판매비중 분석(2026-08-08) 전용 소카테고리 맵 — get_itemgroup_map()(중카테고리)과 짝을 이룬다.
-# 아이템 마스터의 small 필드 우선, 없으면 중카테고리 값을 그대로 대신 사용(재고모니터링의
-# _inv_cat_small_lookup과 동일한 폴백 원칙 — 소카테고리가 따로 없는 코드는 최선 근사치로 보여줌).
-@st.cache_data(ttl=21600)
-def get_itemgroup_map_small():
-    m = load_item_master()
-    out = dict(get_itemgroup_map())  # 폴백: 마스터에 없거나 small이 비어있으면 중카테고리 값 사용
-    for code, rec in m.items():
-        if code in _ITEMGROUP_OVERRIDE_SPLIT:
-            out[code] = _ITEMGROUP_OVERRIDE_SPLIT[code]
-        elif rec["small"]:
-            out[code] = rec["small"]
-        elif rec["mid"]:
-            out[code] = rec["mid"]
-    return out
-
-
-# 복종별 판매비중 분석 카테고리 기준 — 중카테고리(기본)/소카테고리 중 선택.
-CATMIX_CAT_LEVELS = ["중카테고리", "소카테고리"]
-
-
 def _inv_peek_seasons(raw_file):
     """업로드된 로우데이터에서 실제로 쓰인 시즌 코드(컬럼17·raw[16])를 미리 훑어 목록으로 반환.
 
@@ -4264,12 +3274,9 @@ def _inv_peek_years(raw_file):
 
 def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                       season_group_map=None, year_group_map=None, cat_level="중카테고리"):
-    """재고 모니터링 로우데이터(94열, '사이즈구분' 컬럼 포함) → 113열 v3.3 가공 엑셀
-    (process_260731 main() 1:1 이식 + 260811 사이즈코드 판정 소스 전환 + 가격 시뮬레이션 5컬럼 +
-    기준판매가 비교컬럼 반영).
+    """재고 모니터링 로우데이터(93열) → 106열 v3 가공 엑셀 (process_260731 main() 1:1 이식).
 
-    raw_file=업로드 파일 객체, master=dict{품번:사이즈코드}(260811부터 판정에는 미사용, 참고 보고 전용),
-    template_path=v3.3 서식 템플릿 경로.
+    raw_file=업로드 파일 객체, master=dict{품번:사이즈코드}, template_path=v3 서식 템플릿 경로.
     season_group_map={시즌코드: 비교대상군 라벨}, year_group_map={년도코드: 비교대상군 라벨}이면
     AA·AB 등급의 모집단(카테고리×년도×시즌)에서 시즌·년도 축을 각각 그 라벨 기준으로 묶어서 계산한다
     (예: season_group_map={"Z":"Z+A+C+D","A":"Z+A+C+D","C":"Z+A+C+D","D":"Z+A+C+D","B":"B"}
@@ -4296,22 +3303,8 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         pass
     wb = openpyxl.load_workbook(raw_file, read_only=True)
     ws = wb.worksheets[0]
-    _tail_col_ignored = ws.max_column == INV_RAW_COLS + 1
-    if _tail_col_ignored:
-        # 260811 이후 회사 ERP 추출 파일 일부에서 95번째(맨 끝) 열이 통째로 빈 채 딸려오는 경우가
-        # 확인됨(엑셀 병합헤더 잔재로 추정 — row1 그룹헤더 '계'가 실제 재고계 칸보다 1칸 더 넓게
-        # 병합돼 있고, row2 컬럼명·데이터는 전부 공란). 그 칸에 실제 값이 있으면(향후 로우데이터
-        # 스펙이 진짜로 바뀐 걸 수 있으니) 중단하고 확인을 요청, 전부 공란이면 무시하고 94열로 처리
-        # (아래 로직은 어차피 인덱스 0~93만 사용하므로 95번째 열은 있어도 그냥 안 쓰인다).
-        _tail_vals = [r[INV_RAW_COLS] for r in ws.iter_rows(min_row=3, values_only=True)
-                     if r and r[0] not in (None, "")]
-        if any(v not in (None, "") for v in _tail_vals):
-            raise ValueError(f"로우데이터 열 수 {ws.max_column} ≠ {INV_RAW_COLS} — 마지막(95번째) 열에 "
-                             f"값이 들어있어요. 빈 꼬리 컬럼이면 자동으로 무시하는데, 이번엔 값이 있어서 "
-                             f"로우데이터 스펙이 바뀐 건 아닌지 확인이 필요해요(담당팀에 문의해주세요).")
-    elif ws.max_column != INV_RAW_COLS:
-        raise ValueError(f"로우데이터 열 수 {ws.max_column} ≠ {INV_RAW_COLS} — 파일을 확인하세요 "
-                         f"(93열이면 '사이즈구분' 컬럼이 없는 구형식이에요 · 48열이면 매출 파일이에요).")
+    if ws.max_column != 93:
+        raise ValueError(f"로우데이터 열 수 {ws.max_column} ≠ 93 — 파일을 확인하세요 (48열이면 매출 파일이에요).")
     rows = [r for r in ws.iter_rows(min_row=3, values_only=True)]
     skipped = sum(1 for r in rows if r[0] in (None, ""))
     rows = [r for r in rows if r[0] not in (None, "")]
@@ -4324,36 +3317,16 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         pn = str(r[0]).strip(); item = str(r[14]).strip()
         season_raw = str(r[16]).strip()
         year_raw = str(r[15]).strip()
-        # 260811: 사이즈코드는 사이즈 마스터 조회 대신 로우데이터의 '사이즈구분' 컬럼(raw 79번째 열,
-        # 0-index 78)에서 직접 읽는다. 공란이면 마스터로 되돌아가 보완하지 않고 바로 '해당없음' 처리
-        # (scode=None). 사이즈 마스터(master)는 더 이상 판정에 쓰지 않고, 새 컬럼값과의 불일치를
-        # 참고 보고하는 용도로만 scode_master에 남겨둔다.
-        scode_cell = r[78]
-        scode = str(scode_cell).strip() if scode_cell not in (None, "") else None
         rec = dict(raw=r, pn=pn, item=item, cat=_inv_cat_lookup(item),
                    cat_level_val=_inv_cat_level_value(item, cat_level),  # C열·모집단에 실제로 쓰이는 값
                    year=year_raw, season=season_raw,
                    season_grp=(season_group_map or {}).get(season_raw, season_raw),  # 비교 대상군(묶음) 라벨
                    year_grp=(year_group_map or {}).get(year_raw, year_raw),          # 비교 대상군(묶음) 라벨
-                   # 260811: 오프라인 판정 소스를 '이관구분'(raw22)에서 '수정일'(raw21)로 변경
-                   # — 실제 오프라인/온라인/부분이관 값이 담긴 컬럼은 '수정일'이라는 이름으로 내려온다.
-                   off=str(r[21]).strip() == "오프라인",
+                   off=str(r[22]).strip() == "오프라인",
                    stock=_inv_num(r[39]) or 0, sales=_inv_num(r[45]) or 0, depl=_inv_num(r[47]),
-                   size14={i + 1: int(_inv_num(r[79 + i]) or 0) for i in range(14)},
-                   scode=scode, scode_master=master.get(pn))
+                   size14={i + 1: int(_inv_num(r[78 + i]) or 0) for i in range(14)},
+                   scode=master.get(pn))
         recs.append(rec)
-
-    # 260811: 사이즈구분에 정식 6종(A16/A17/A09/A05/A06/A18) 외의 값이 있으면 중단하지 않고 경고만
-    # 남긴다 — 오탈자이거나, 아직 등급 로직에 반영되지 않은 신규 사이즈체계일 수 있음. 해당 건은
-    # _INV_SYSTEMS에 없으므로 AC 판정에서 자동으로 '해당없음' 처리된다.
-    unk_size_codes = sorted({r["scode"] for r in recs
-                             if r["scode"] and r["scode"] not in _INV_KNOWN_SIZE_CODES})
-    # 260811: 사이즈구분 공란(미매칭) 건수 + 참고용 사이즈 마스터 대조(마스터가 있을 때만 의미 있음).
-    scode_blank = sum(1 for r in recs if r["scode"] is None)
-    scode_blank_had_master = sum(1 for r in recs if r["scode"] is None and r.get("scode_master"))
-    scode_mismatch = [(r["pn"], r["scode"], r["scode_master"]) for r in recs
-                      if master and r["scode"] and r.get("scode_master")
-                      and r["scode"] != r["scode_master"]]
 
     _item_master = load_item_master()
     fallback_items = sorted({r["item"] for r in recs if r["item"] not in _item_master})
@@ -4521,58 +3494,14 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         for r in g:
             r["AD"] = stt; r["AE"] = sg
 
-    # ── 출력: 템플릿(v3.3 113열) 복제 후 데이터 교체 (상단 메타 6행 + 데이터 9행~) ──
+    # ── 출력: 템플릿(v3 106열) 복제 후 데이터 교체 (v3.1: 상단 메타 5행 + 데이터 9행~) ──
     if not os.path.exists(template_path):
         raise ValueError("서식 템플릿(inventory_template.xlsx)이 저장소에 없어요 — "
-                         "최신 v3.3 결과물을 inventory_template.xlsx로 GitHub에 올려주세요.")
+                         "최신 v3 결과물을 inventory_template.xlsx로 GitHub에 올려주세요.")
     twb = openpyxl.load_workbook(template_path)
     tws = twb.active
-
-    def _upgrade_insert(col, amount, style_src_col):
-        """템플릿에 col 위치부터 amount개 컬럼을 삽입하고, 병합범위를 이동 재병합한 뒤
-        style_src_col의 서식(폰트·테두리·정렬·표시형식·채우기·열너비)을 새 컬럼들에 복제한다.
-        openpyxl의 insert_cols는 병합 셀 범위를 자동으로 밀어주지 않으므로(문서상 명시된 한계),
-        삽입 지점 이상에 걸린 병합을 먼저 해제한 뒤 삽입하고, 같은 범위를 +amount칸 이동해 재병합한다.
-        """
-        affected = [m for m in list(tws.merged_cells.ranges) if m.max_col >= col]
-        saved = [(m.min_row, m.max_row, m.min_col, m.max_col) for m in affected]
-        for m in affected:
-            tws.unmerge_cells(str(m))
-        tws.insert_cols(col, amount=amount)
-        for r1, r2, c1, c2 in saved:
-            nc1 = c1 + amount if c1 >= col else c1
-            nc2 = c2 + amount if c2 >= col else c2
-            tws.merge_cells(start_row=r1, start_column=nc1, end_row=r2, end_column=nc2)
-        for row in range(1, tws.max_row + 1):
-            src = tws.cell(row, style_src_col)
-            for k in range(amount):
-                dst = tws.cell(row, col + k)
-                dst.font = copy(src.font); dst.border = copy(src.border)
-                dst.alignment = copy(src.alignment); dst.number_format = src.number_format
-                dst.fill = copy(src.fill)
-        src_w = tws.column_dimensions[get_column_letter(style_src_col)].width
-        if src_w:
-            for k in range(amount):
-                tws.column_dimensions[get_column_letter(col + k)].width = src_w
-
-    if tws.max_column == 106:
-        # 260811: 구 106열 템플릿(사이즈구분 컬럼 도입 전) 자동 보정 — 신규 컬럼 1개 삽입(구 92번째,
-        # 오른쪽 이웃이던 구 사이즈95 칸 서식을 복제). 106→107이 된 뒤 아래 107 분기로 이어서 처리된다.
-        _upgrade_insert(92, 1, 93)
-    if tws.max_column == 107:
-        # 260811(가격시뮬 2차): 몰가격(22) 바로 뒤에 기준판매가 복제 컬럼 1개 먼저 삽입 — 107→108.
-        # 서식은 몰가격 칸(왼쪽 이웃) 것을 그대로 복제. 108→113은 아래 108 분기로 이어서 처리된다.
-        _upgrade_insert(INV_GIJUN_COPY_COL, 1, INV_GIJUN_COPY_COL - 1)
-    if tws.max_column == 108:
-        # 260811(가격시뮬 1차): 기준판매가 복제 컬럼(23) 바로 뒤에 신규 가격 5컬럼 삽입 — 108→113.
-        _upgrade_insert(INV_PRICE_SIM_COL, INV_PRICE_SIM_N, INV_PRICE_SIM_COL - 1)
-    if tws.max_column == 112:
-        # 260811(가격시뮬 2차): 이미 가격5컬럼(구 23~27)까지만 반영된 112열 템플릿(직전 배포본)이면,
-        # 몰가격 바로 뒤에 기준판매가 복제 컬럼 1개만 추가로 삽입 — 기존 가격5컬럼은 24~28로 밀림.
-        _upgrade_insert(INV_GIJUN_COPY_COL, 1, INV_GIJUN_COPY_COL - 1)
-    if tws.max_column != INV_TOTAL_COLS:
-        raise ValueError(f"템플릿 열 수 {tws.max_column} ≠ {INV_TOTAL_COLS}(또는 구버전 106·107·108·112) — "
-                         f"v3 계열 결과물을 템플릿으로 지정하세요.")
+    if tws.max_column != 106:
+        raise ValueError(f"템플릿 열 수 {tws.max_column} ≠ 106 — v3 결과물 파일을 템플릿으로 지정하세요.")
     names_row = next((r for r in range(1, 12) if tws.cell(r, 10).value == "품번"), None)
     if names_row is None:
         raise ValueError("템플릿에서 컬럼명 행(품번)을 찾지 못했어요.")
@@ -4607,8 +3536,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         f"변수 X= {X}장 (사이즈 OK 기준)",
         f"변수 Y= {Y}장 (동일등급내에서 추가로 등급 나눌때 기준 수량)",
         f"작업일: {workdate}",
-        f"가공기준: 260731 확정판 + 260811 사이즈구분 로우컬럼 직접반영 + 가격 시뮬레이션 5컬럼 "
-        f"(5등급 A~E · 재고20미만 · 오프라인 제외 · 모집단 {cat_level}×년도×시즌)",
+        f"가공기준: 260731 확정판 (5등급 A~E · 재고20미만 · 오프라인 제외 · 모집단 {cat_level}×년도×시즌)",
         f"비교 대상군(등급 모집단 묶음) — 시즌: {season_group_summary} / 년도: {year_group_summary}",
     ]
     mf = Font(name="맑은 고딕", size=11, bold=True)
@@ -4626,43 +3554,6 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         tws.cell(NAMES_R, c).fill = fill_green
     # 260803: C열 헤더는 cat_level 선택(중카테고리/소카테고리/아이템코드)에 맞춰 텍스트도 같이 바뀐다.
     tws.cell(NAMES_R, 3).value = cat_level
-    # 260811: 신규 '사이즈구분' 컬럼 헤더명 기입 (그룹행은 비워둠 — 사이즈정보 그룹과는 별개의
-    # 단일 컬럼, J·Z·AJ열과 같은 성격). 로우파일 값을 그대로 통과시키는 열이라 노란색 대상 아님.
-    tws.cell(NAMES_R, INV_SIZECODE_COL).value = "사이즈구분"
-    # 260811(가격시뮬): 신규 가격 5컬럼 헤더명 기입 (그룹행은 비워둠 — 사이즈구분과 동일 방식).
-    for _k, _h in enumerate(INV_PRICE_SIM_HEADERS):
-        tws.cell(NAMES_R, INV_PRICE_SIM_COL + _k).value = _h
-    # 260811 추가 개정(2): 몰가격 바로 옆에 '기준판매가' 복제 컬럼 헤더명 기입 (그룹행은 비워둠 —
-    # 사이즈구분과 동일 방식). 원본 기준판매가 컬럼(뒤쪽 패스스루 구간)은 헤더/값 모두 그대로 유지된다.
-    tws.cell(NAMES_R, INV_GIJUN_COPY_COL).value = "기준판매가"
-
-    # 260811 추가 개정(3): '수정일'을 로우데이터 순서대로 '이관구분' 바로 왼쪽(41번째 칸)으로 옮기며
-    # AA~변경후할인율 블록이 한 칸씩 앞당겨졌다 — 템플릿에 박혀있던 32~42번째 칸 헤더명(NAMES_R)을
-    # 새 순서에 맞게 코드로 다시 써준다(안 그러면 헤더 텍스트와 실제 값이 어긋난다).
-    _INV_COL32_42_HEADERS = ["기간판매수량분석", "소진예상기간분석", "사이즈\n등급", "SET\n상태 구분",
-                             "SET\n등급", "AI제안방향", "휴먼의사결정", "변동가격", "변경후할인율",
-                             "수정일", "이관구분"]
-    for _k, _h in enumerate(_INV_COL32_42_HEADERS):
-        tws.cell(NAMES_R, 32 + _k).value = _h
-
-    # 260811 추가 개정(3): 위 재배치에 맞춰 GROUP_R(7행) 상위 그룹 병합 범위도 조정.
-    #   · '기본사항' 그룹 14~32 → 14~31 ('수정일'이 빠져나가 1칸 축소)
-    #   · '분석·의사결정' 그룹 33~41 → 32~40 (그만큼 1칸 앞으로 당겨짐)
-    #   · 41번째 칸('수정일'의 새 위치)은 사이즈구분·가격시뮬 컬럼과 동일하게 그룹헤더 없는
-    #     단일 컬럼으로 둔다.
-    def _inv_regroup(old_min, old_max, new_min, new_max, label):
-        for m in list(tws.merged_cells.ranges):
-            if m.min_row <= GROUP_R <= m.max_row and m.min_col == old_min and m.max_col == old_max:
-                tws.unmerge_cells(start_row=m.min_row, start_column=m.min_col,
-                                   end_row=m.max_row, end_column=m.max_col)
-                break
-        tws.cell(GROUP_R, old_min).value = None
-        tws.cell(GROUP_R, new_min).value = label
-        if new_max > new_min:
-            tws.merge_cells(start_row=GROUP_R, start_column=new_min, end_row=GROUP_R, end_column=new_max)
-    _inv_regroup(14, 32, 14, 31, "기본사항")
-    _inv_regroup(33, 41, 32, 40, "분석·의사결정")
-    tws.cell(GROUP_R, 41).value = None   # 수정일 — 그룹헤더 없음(단일 컬럼)
 
     # 260803 확정: 위 초록(GREEN) 컬럼들의 상위 그룹 헤더(GROUP_R, 병합 셀)도 같은 초록으로.
     # 병합 셀은 좌상단 셀에만 실제로 서식이 저장되므로, 열이 속한 병합범위의 좌상단 열을 찾아 그 칸에만 칠한다
@@ -4676,16 +3567,11 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         tws.cell(GROUP_R, _group_header_fill_col(c)).fill = fill_green
     dstyle = {c: (copy(tws.cell(DATA_R, c).font), copy(tws.cell(DATA_R, c).border),
                   copy(tws.cell(DATA_R, c).alignment), tws.cell(DATA_R, c).number_format,
-                  copy(tws.cell(DATA_R, c).fill)) for c in range(1, INV_TOTAL_COLS + 1)}
+                  copy(tws.cell(DATA_R, c).fill)) for c in range(1, 107)}
     if tws.max_row >= DATA_R:
         tws.delete_rows(DATA_R, tws.max_row - DATA_R + 1)
 
-    # 260811(가격시뮬 + 기준판매가 복제): 구 range(19,24)·range(37,...) → 가격5컬럼(24~28) +
-    # 기준판매가 복제(23) 포함해 +6 밀림.
-    NUM_COLS = set(range(19, 30)) | set(range(43, INV_TOTAL_COLS + 1))
-    # 구 AH(34)열 → +5(가격시뮬)+1(기준판매가 복제)-1(260811 수정일 재배치로 AA~변경후할인율 블록이
-    # 한 칸씩 앞으로 당겨짐) 이동한 위치
-    _INV_AH_COL_LETTER = get_column_letter(34 + INV_PRICE_SIM_N + 1 - 1)
+    NUM_COLS = set(range(19, 24)) | set(range(37, 107))
 
     def to_num(v):
         if v is None or v == "":
@@ -4704,30 +3590,17 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             vals[4 + j] = raw[rc]
         vals[10], vals[11] = rec["pn"], rec["K"]
         vals[12] = rec["L"] or None; vals[13] = rec["M"] or None
-        for j in range(9):
-            vals[14 + j] = raw[1 + j]                          # 14~22 = raw1~9 (색상..몰가격)
-        # 260811 추가 개정(2): 몰가격(22) 바로 뒤에 '기준판매가' 복제 컬럼(23) 1칸 삽입 — 원본
-        # 기준판매가 컬럼은 뒤쪽 패스스루 구간에 그대로 남아 있고, 이건 순수 참고용 복제일 뿐이다.
-        _mol = _inv_num(raw[INV_RAW_MOLGA_COL])
-        _gijun = _inv_num(raw[INV_RAW_GIJUN_COL])
-        vals[INV_GIJUN_COPY_COL] = raw[INV_RAW_GIJUN_COL]
-        # 260811(가격시뮬): 그 다음에 신규 가격 5컬럼(24~28) 삽입 — 이후 컬럼은 전부 +6(가격시뮬5 + 기준판매가복제1).
-        for _k, _v in enumerate(_inv_price_sim(_mol, _gijun)):
-            vals[INV_PRICE_SIM_COL + _k] = _v
-        vals[29], vals[30], vals[31] = raw[10], raw[11], raw[12]   # 할인율·최초입고일·최초출고일(구23~25)
-        # 260811: '수정일'을 이 자리(구26)에서 빼서 로우데이터 원래 순서대로 '이관구분' 바로 왼쪽
-        # (41번째 칸)으로 옮긴다 — 아래 AA~변경후할인율 블록이 그만큼 한 칸씩 앞으로 당겨진다.
-        vals[32], vals[33], vals[34] = rec["AA"], rec["AB"], rec["AC"]   # 구27,28,29
-        vals[35], vals[36], vals[37] = rec["AD"], rec["AE"], rec["AF"]   # 구30,31,32
-        vals[38] = vals[39] = None                                  # 구33,34
-        vals[40] = f"={_INV_AH_COL_LETTER}{rr}/T{rr}"                # 구35 (AH→새 위치로 셀참조 갱신)
-        vals[41] = raw[21]                                          # 수정일(구26, 이관구분 바로 왼쪽으로 이동)
-        vals[42] = raw[22]                                          # 이관구분(구36)
-        # 260811: 패스스루 구간이 raw24~93(70열) → raw24~94(71열)로 1열 확장. 신규 '사이즈구분'이
-        # raw79 자리에 자연스럽게 끼어 있어 이 구간 안에서 함께 넘어간다(출력 98번째 칸에 그대로 안착).
-        for j in range(71):
-            vals[43 + j] = raw[23 + j]                              # 구 37+j → +6
-        for c in range(1, INV_TOTAL_COLS + 1):
+        for j in range(12):
+            vals[14 + j] = raw[1 + j]
+        vals[26] = raw[21]
+        vals[27], vals[28], vals[29] = rec["AA"], rec["AB"], rec["AC"]
+        vals[30], vals[31], vals[32] = rec["AD"], rec["AE"], rec["AF"]
+        vals[33] = vals[34] = None
+        vals[35] = f"=AH{rr}/T{rr}"
+        vals[36] = raw[22]
+        for j in range(70):
+            vals[37 + j] = raw[23 + j]
+        for c in range(1, 107):
             v = vals.get(c)
             if v == "":
                 v = None
@@ -4744,7 +3617,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                 nc.fill = fl
         tws.row_dimensions[rr].height = 20.25
 
-    tws.auto_filter.ref = f"A{NAMES_R}:{get_column_letter(INV_TOTAL_COLS)}{NAMES_R + len(recs)}"
+    tws.auto_filter.ref = f"A{NAMES_R}:DB{NAMES_R + len(recs)}"
     tws.freeze_panes = f"K{DATA_R}"
     # 260802 확정: BK~CM 항상 숨김
     for c in _INV_HIDE_COLS:
@@ -4772,14 +3645,6 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         "unmapped_rows": unk_rows,
         "unmapped_pns": sorted({r["pn"] for r in recs if r["unmapped"]}),
         "cat_level": cat_level,
-        # 260811: 사이즈코드 소스가 '사이즈구분' 로우컬럼으로 바뀐 데 따른 참고 리포트.
-        "unknown_size_codes": unk_size_codes,
-        "scode_blank": scode_blank,
-        "scode_blank_had_master": scode_blank_had_master,
-        "scode_mismatch": scode_mismatch,
-        "has_size_master": bool(master),
-        # 260811: 로우데이터 맨 끝에 빈 95번째 열이 딸려와서 94열로 취급하고 무시했는지 여부.
-        "tail_col_ignored": _tail_col_ignored,
     }
     return buf.getvalue(), report
 
@@ -4810,43 +3675,32 @@ def _inv_group_ui(codes, key_prefix):
 
 
 def render_inventory():
-    """🏷️ 재고 가공 메뉴 — 로우데이터 업로드 → 가공 → v3.3 엑셀 다운로드 (전 팀원 사용 가능)."""
-    st.subheader("🏷️ 쇼핑몰 재고 가공 · 1차 (260731 확정 기준 · 가격 시뮬레이션 5컬럼 + 기준판매가 비교컬럼 추가)")
-    st.caption("재고모니터링 로우데이터(94열, '사이즈구분' 컬럼 포함)를 올리면 AA·AB 5등급, AF(AI제안방향), "
-               "사이즈 등급(AC), SET 판정(AD·AE), 기준판매가 비교컬럼, 가격 시뮬레이션 5컬럼을 부여한 113열 v3.3 엑셀을 만들어 드려요. "
-               "재고 데이터는 DB에 저장하지 않아요(가공 → 다운로드만). "
-               "260811부터 사이즈코드는 로우데이터의 '사이즈구분' 컬럼값을 그대로 사용해요(마스터 조회 안 함). "
-               "몰가격 바로 뒤에 기준판매가를 그대로 복제한 컬럼이 초록색으로 1개 추가되고(원본 기준판매가 컬럼은 "
-               "뒤쪽 그대로 유지, 비교하기 편하도록 옆에 나란히 표시), 그 뒤로 (네이버)상시가·(쿠폰진행)상시가·(쿠폰진행)행사가·"
-               "(쿠폰X/무배)상시가·(쿠폰X/무배)행사가 5컬럼이 노란색으로 추가돼요(100원 단위 반올림, 기준판매가 넘으면 자동 캡핑).")
+    """🏷️ 재고 가공 메뉴 — 로우데이터 업로드 → 가공 → v3 엑셀 다운로드 (전 팀원 사용 가능)."""
+    st.subheader("🏷️ 쇼핑몰 재고 가공 · 1차 (260731 확정 기준 · v3 106열)")
+    st.caption("재고모니터링 로우데이터(93열)를 올리면 AA·AB 5등급, AF(AI제안방향), "
+               "사이즈 등급(AC), SET 판정(AD·AE)을 부여한 106열 v3 엑셀을 만들어 드려요. "
+               "재고 데이터는 DB에 저장하지 않아요(가공 → 다운로드만).")
 
     master = load_size_master()
     n_master = len(master)
     n_item_master = item_master_row_count()
     tpl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), INV_TEMPLATE_FILE)
     c_info1, c_info2, c_info3 = st.columns(3)
-    c_info1.caption(f"📏 사이즈 마스터(참고용, 판정엔 미사용): **{n_master:,}개** 품번"
-                    if n_master else "📏 사이즈 마스터(참고용): 미등록 — 없어도 판정엔 지장 없어요")
+    c_info1.caption(f"📏 사이즈 마스터: **{n_master:,}개** 품번"
+                    + ("" if n_master else " — ⚠️ 관리자가 사이드바에서 업로드해야 해요"))
     c_info2.caption("🧾 서식 템플릿: " + ("**동봉됨** (inventory_template.xlsx)" if os.path.exists(tpl_path)
                                           else "⚠️ **없음** — inventory_template.xlsx를 GitHub에 올려야 해요"))
     c_info3.caption(f"🗂️ 아이템 마스터: **{n_item_master:,}개** 코드"
                     + ("" if n_item_master else " — 미등록 시 구 기준(니트류·티셔츠류 분리)으로 자동 대체"))
-    st.caption("ℹ️ **260811부터 사이즈 마스터는 판정에 쓰지 않아요.** 사이즈 등급(AC)·SET 판정(AD·AE)은 "
-               "로우데이터에 함께 오는 '사이즈구분' 컬럼값을 그대로 사용해요. 사이즈 마스터를 등록해두면 "
-               "새 컬럼값과 다른 건수만 참고로 알려드려요(결과에는 영향 없음).")
+    if not n_master:
+        st.warning("사이즈 마스터(품번→사이즈코드)가 비어 있어요. 사이즈 등급(AC)·SET 판정(AD·AE)이 "
+                   "전부 '해당없음'으로 나오니, 관리자에게 사이드바 **📏 사이즈 마스터 업로드**를 요청하세요.")
 
     # ── 가공 옵션 (X·Y는 변수 — 시즌 시점 따라 조정, 하드코딩 금지 원칙) ──
     o1, o2, o3, o4 = st.columns(4)
     X = o1.number_input("변수 X — 사이즈 OK 기준(장)", min_value=1, max_value=999, value=10, key="inv_x")
-    # 260811 재확인: size-grade-classifier 스킬(classify.py/set_classify.py) 기본값이 Y=30이라
-    # 스킬과 맞춤(과거 이 화면의 기본값 20은 기준 문서와 어긋나 있었음).
-    Y = o2.number_input("변수 Y — 동일등급 내 세분 기준(장)", min_value=1, max_value=999, value=30, key="inv_y")
-    # 260811: 같은 날 여러 번 다운로드해도 파일이 안 겹치도록 기본값에 시간(시:분)까지 포함.
-    # 사용자가 직접 지우고 다시 입력할 수도 있는 텍스트칸이라 강제는 아님(수정하면 엑셀 안
-    # "작업일" 표기·파일명 둘 다 그 값을 그대로 따라감).
-    # 260811(2차 수정): datetime.now()는 배포 서버(UTC로 도는 경우)의 시각을 그대로 쓰기 때문에
-    # 실제 한국 시간보다 9시간 늦게 표시되는 버그가 있었음 → now_kst()로 교체.
-    workdate = o3.text_input("작업일", value=now_kst().strftime("%y.%m.%d %H:%M"), key="inv_workdate")
+    Y = o2.number_input("변수 Y — 동일등급 내 세분 기준(장)", min_value=1, max_value=999, value=20, key="inv_y")
+    workdate = o3.text_input("작업일", value=datetime.now().strftime("%y.%m.%d"), key="inv_workdate")
     period = o4.text_input("기간판매 조회 기준", placeholder="예: 26.07.20~26.07.31", key="inv_period")
 
     # ── 카테고리 기준 설정 — AA·AB 등급 모집단·C열 표기에 쓸 카테고리 세분화 레벨을 고른다.
@@ -4856,7 +3710,7 @@ def render_inventory():
                "결과 엑셀 C열의 헤더·값도 이 선택을 그대로 따라가요. 기본값은 중카테고리(기존과 동일)예요.")
     cat_level = st.selectbox("카테고리 기준", INV_CAT_LEVELS, index=0, key="inv_catlevel")
 
-    up = st.file_uploader("재고모니터링 로우데이터 업로드 (94열 엑셀 1개 · '사이즈구분' 컬럼 포함)",
+    up = st.file_uploader("재고모니터링 로우데이터 업로드 (93열 엑셀 1개)",
                           type=["xlsx"], accept_multiple_files=False, key="inv_up")
 
     # ── 시즌·년도 비교 대상군(묶음) 설정 — AA·AB 등급 모집단(카테고리×년도×시즌)의 '시즌'·'년도' 축을
@@ -4937,9 +3791,6 @@ def render_inventory():
                    f"X={rep['X']} · Y={rep['Y']} · 세트그룹 {rep['pairs']}쌍 (짝없음 {rep['nopair']})")
         st.download_button("⬇ 가공 결과 엑셀 다운로드", res["bytes"], file_name=res["fname"],
                            mime=XLSX_MIME, type="primary", use_container_width=True, key="inv_dl")
-        if rep.get("tail_col_ignored"):
-            st.caption("ℹ️ 로우데이터 맨 끝에 빈 95번째 열이 딸려있어서 자동으로 무시하고 94열로 처리했어요"
-                      "(엑셀 병합헤더 잔재로 보여요 — 값이 있었다면 에러로 중단됐을 거예요).")
         if rep.get("season_group_summary") or rep.get("year_group_summary") or rep.get("cat_level"):
             st.caption(f"🧩 적용된 비교 대상군 — 카테고리 기준: **{rep.get('cat_level', '중카테고리')}** · "
                        f"시즌: **{rep.get('season_group_summary', '–')}** · "
@@ -4947,29 +3798,15 @@ def render_inventory():
         if rep["af_bad"]:
             st.warning(f"⚠️ AF 매트릭스 미커버 {rep['af_bad']}건 — '검증필요'로 표시했어요. 규칙 점검이 필요해요.")
         if rep["unmatched"]:
-            st.warning(f"⚠️ '사이즈구분' 공란(미매칭) {len(rep['unmatched'])}건 — AC/SET '해당없음' 처리. "
+            st.warning(f"⚠️ 사이즈 마스터 미매칭 {len(rep['unmatched'])}건 — AC/SET '해당없음' 처리. "
                        f"예: {', '.join(rep['unmatched'][:10])}"
                        + (" …" if len(rep["unmatched"]) > 10 else ""))
-            if rep.get("has_size_master") and rep.get("scode_blank_had_master"):
-                st.caption(f"↳ 이 중 과거 사이즈 마스터엔 값이 있었던 건 **{rep['scode_blank_had_master']}건** "
-                           f"— 로우데이터 생성 단계에서 '사이즈구분'을 못 채운 건일 수 있어요(신규 상품이라 "
-                           f"마스터에도 없는 것과는 성격이 달라요).")
-        if rep.get("unknown_size_codes"):
-            st.warning(f"⚠️ '사이즈구분'에 정식 6종(A16/A17/A09/A05/A06/A18) 외의 값 "
-                       f"{len(rep['unknown_size_codes'])}종 발견: **{', '.join(rep['unknown_size_codes'])}** "
-                       f"— 오탈자이거나 신규 사이즈체계일 수 있어요. 해당 건은 AC/SET '해당없음' 처리했어요.")
-        if rep.get("has_size_master") and rep.get("scode_mismatch"):
-            mm = rep["scode_mismatch"]
-            st.info(f"ℹ️ '사이즈구분' 값이 등록된 사이즈 마스터와 다른 건 {len(mm)}건 — "
-                    f"결과에는 항상 '사이즈구분' 값을 그대로 반영했어요(참고용). "
-                    f"예: {', '.join(f'{pn}({new}≠{old})' for pn, new, old in mm[:5])}"
-                    + (" …" if len(mm) > 5 else ""))
         if rep.get("unmapped_items"):
             st.warning(
                 f"⚠️ 중카테고리 매핑 없는 아이템 코드 {len(rep['unmapped_items'])}종 "
                 f"(**{', '.join(rep['unmapped_items'])}**) · 상품 {rep['unmapped_rows']:,}행 — "
                 f"가공은 정상 완료했고, 이 상품들만 C열·AA·AB·AF를 '{_INV_UNMAPPED}'로 표기했어요. "
-                f"사이즈 등급(AC)·SET 판정은 로우데이터 '사이즈구분' 컬럼 기준이라 아이템 마스터와 무관하게 정상입니다. "
+                f"사이즈 등급(AC)·SET 판정은 사이즈 마스터 기준이라 정상입니다. "
                 f"아이템 마스터에 코드를 추가하고 다시 돌리면 정상 등급을 받아요.")
             with st.expander(f"🔎 '{_INV_UNMAPPED}' 처리된 품번 {len(rep.get('unmapped_pns', []))}건 보기"):
                 st.dataframe(pd.DataFrame({"품번": rep.get("unmapped_pns", [])}),
@@ -4995,10 +3832,10 @@ def render_inventory():
             if rep["small_groups"]:
                 st.caption("AA 소형 모집단(≤4개): " +
                            " · ".join(f"{k} {v}개" for k, v in rep["small_groups"].items()))
-    st.caption("※ 판정 규칙(260731 확정판 + 260811 사이즈구분 로우컬럼 반영): AA/AB 모집단=카테고리(선택한 "
-               "기준)×년도×시즌(카테고리는 아이템 마스터 기준·소형그룹 예외 없음) · 선판정: 오프라인→'오프라인', "
-               "온라인창고<20→'재고20미만'(AB 미적용) · AF 재고 분기 200 · AC/SET은 로우데이터 '사이즈구분' "
-               "컬럼(A16 상의/A17 하의/A09 M-L-X/A05 신발/A06 FREE/A18 아동) 기준, 공란은 '해당없음' 처리.")
+    st.caption("※ 판정 규칙(260731 확정판): AA/AB 모집단=카테고리(선택한 기준)×년도×시즌(카테고리는 "
+               "아이템 마스터 기준·소형그룹 예외 없음) · 선판정: 오프라인→'오프라인', 온라인창고<20→"
+               "'재고20미만'(AB 미적용) · AF 재고 분기 200 · AC/SET은 사이즈 마스터(A16 상의/A17 하의/"
+               "A09 M-L-X/A05 신발/A06 FREE/A18 아동) 기준.")
 
 
 # ==============================================================================
@@ -5981,9 +4818,8 @@ def render_weather_admin():
             _sk_default = ""
         key = st.text_input("인증키", value=_sk_default, type="password", key="wx_key")
         cA, cB = st.columns(2)
-        # 260811: 날짜 기본값도 서버 시간대(UTC) 영향을 받지 않도록 now_kst() 사용.
-        d_from = cA.date_input("시작일", value=(now_kst() - pd.Timedelta(days=760)).date(), key="wx_from")
-        d_to = cB.date_input("종료일", value=now_kst().date(), key="wx_to")
+        d_from = cA.date_input("시작일", value=(datetime.now() - pd.Timedelta(days=760)).date(), key="wx_from")
+        d_to = cB.date_input("종료일", value=datetime.now().date(), key="wx_to")
         stn = st.text_input("지점번호 (108=서울)", value=WEATHER_STN_DEFAULT, key="wx_stn")
         if st.button("🔗 기상청에서 받아오기", use_container_width=True, key="wx_fetch"):
             if not key.strip():
@@ -7089,7 +5925,7 @@ def main():
         if st.button("🔄 새로고침(캐시 비우기)", use_container_width=True):
             load_db.clear(); load_master.clear(); load_plan.clear()
             load_size_master.clear(); load_item_master.clear(); load_weather.clear()
-            get_itemgroup_map.clear(); get_itemgroup_map_small.clear(); _trend_cat_maps.clear()
+            get_itemgroup_map.clear(); _trend_cat_maps.clear()
             st.rerun()
 
         # ── 조회 메뉴 (탭 대체) ──────────────────────────────────────
@@ -7173,10 +6009,8 @@ def main():
                         st.error(f"사업계획 오류: {ex}")
 
             st.divider()
-            st.caption(f"📏 사이즈 마스터(품번→사이즈코드): 현재 **{size_master_row_count():,}개** 품번 "
-                       "· 260811부터 재고 가공 판정에는 안 쓰고, 로우데이터 '사이즈구분' 컬럼값과의 "
-                       "불일치를 참고 보고하는 용도로만 쓰여요(없어도 무방).")
-            sup = st.file_uploader("사이즈 마스터 업로드 (참고용 · C열=품번, D열=사이즈코드)",
+            st.caption(f"📏 사이즈 마스터(품번→사이즈코드): 현재 **{size_master_row_count():,}개** 품번")
+            sup = st.file_uploader("사이즈 마스터 업로드 (재고 가공용 · C열=품번, D열=사이즈코드)",
                                    type=["xlsx"], accept_multiple_files=False, key="sizemaster_up")
             if sup is not None:
                 if st.button("📏 사이즈 마스터 적용(전체 교체)", use_container_width=True):
@@ -7233,8 +6067,6 @@ def main():
         render_flagship(df)
     elif menu == MENU_CHAN:
         render_channel_brand(df)
-    elif menu == MENU_CATMIX:
-        render_category_mix(df)
     elif menu == MENU_INV:
         render_inventory()
     elif menu == MENU_TRND:
