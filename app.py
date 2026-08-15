@@ -3868,7 +3868,11 @@ def _inv_set_side(rec):
 # AA,AB,AF,AG,AH,AI(구 27,28,32,33,34,35 → +6 = 33,34,38,39,40,41 → 260811 '수정일' 재배치로
 # AA~변경후할인율 블록이 한 칸씩 앞당겨져 최종 32,33,37,38,39,40).
 _INV_YELLOW_COLS = ({3, 11, 12, 13} | set(range(INV_PRICE_SIM_COL, INV_PRICE_SIM_COL + INV_PRICE_SIM_N))
-                    | {32, 33, 37, 38, 39, 40})
+                    | {32, 33, 34, 38, 39, 40})
+# 260815(헤더 개편): AC·AD·AE(단품 사이즈 컨디션·SET 가능여부·SET 사이즈 컨디션) 3컬럼 = 연분홍,
+# 수정일 = 회색. AI제안방향(AF)이 34번째로 앞당겨지며 노란색 그룹에 합류하고, AC/AD/AE는 35~37로 밀림.
+_INV_PINK_COLS = {35, 36, 37}
+_INV_GRAY_COLS = {41}
 _INV_GREEN_COLS = {INV_GIJUN_COPY_COL, 59, 65, 66, 67}        # 기준판매가 복제(23) + BA,BG,BH,BI(구 53,59,60,61 → +6)
 _INV_HIDE_COLS = set(range(69, 98))                           # BK~CM (구 63~91 → +6)
 
@@ -4327,11 +4331,14 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     from copy import copy
     from collections import defaultdict, Counter
     import openpyxl
-    from openpyxl.styles import PatternFill, Font
+    from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
 
     fill_yellow = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
     fill_green = PatternFill(start_color="FF92D050", end_color="FF92D050", fill_type="solid")
+    # 260815(헤더 개편): 단품 사이즈 컨디션·SET 가능여부·SET 사이즈 컨디션 3컬럼 = 연분홍, 수정일 = 회색.
+    fill_pink = PatternFill(start_color="FFF2DCDB", end_color="FFF2DCDB", fill_type="solid")
+    fill_gray = PatternFill(start_color="FFE9E9E9", end_color="FFE9E9E9", fill_type="solid")
 
     try:
         raw_file.seek(0)
@@ -4698,6 +4705,10 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # 260802 확정: 헤더 전체 채우기 강제 지정 (템플릿 상태와 무관하게 항상 적용)
     for c in _INV_YELLOW_COLS:
         tws.cell(NAMES_R, c).fill = fill_yellow
+    for c in _INV_PINK_COLS:                                    # 260815(헤더 개편)
+        tws.cell(NAMES_R, c).fill = fill_pink
+    for c in _INV_GRAY_COLS:                                    # 260815(헤더 개편)
+        tws.cell(NAMES_R, c).fill = fill_gray
     for c in _INV_GREEN_COLS:
         tws.cell(NAMES_R, c).fill = fill_green
     # 260803: C열 헤더는 cat_level 선택(중카테고리/소카테고리/아이템코드)에 맞춰 텍스트도 같이 바뀐다.
@@ -4715,30 +4726,50 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # 260811 추가 개정(3): '수정일'을 로우데이터 순서대로 '이관구분' 바로 왼쪽(41번째 칸)으로 옮기며
     # AA~변경후할인율 블록이 한 칸씩 앞당겨졌다 — 템플릿에 박혀있던 32~42번째 칸 헤더명(NAMES_R)을
     # 새 순서에 맞게 코드로 다시 써준다(안 그러면 헤더 텍스트와 실제 값이 어긋난다).
-    _INV_COL32_42_HEADERS = ["기간판매수량분석", "소진예상기간분석", "사이즈\n등급", "SET\n상태 구분",
-                             "SET\n등급", "AI제안방향", "휴먼의사결정", "변동가격", "변경후할인율",
+    # 260815(헤더 개편, 중태님 확정): 컬럼명 3개 변경(사이즈 등급→단품 사이즈 컨디션 / SET 상태 구분→
+    # SET 가능여부 / SET 등급→SET 사이즈 컨디션) + AI제안방향을 사이즈/세트 3컬럼 앞(34번째)으로 이동.
+    _INV_COL32_42_HEADERS = ["기간판매수량분석", "소진예상기간분석", "AI제안방향",
+                             "단품\n사이즈 컨디션", "SET\n가능여부", "SET\n사이즈 컨디션",
+                             "휴먼의사결정", "변동가격", "변경후할인율",
                              "수정일", "이관구분"]
     for _k, _h in enumerate(_INV_COL32_42_HEADERS):
         tws.cell(NAMES_R, 32 + _k).value = _h
 
-    # 260811 추가 개정(3): 위 재배치에 맞춰 GROUP_R(7행) 상위 그룹 병합 범위도 조정.
-    #   · '기본사항' 그룹 14~32 → 14~31 ('수정일'이 빠져나가 1칸 축소)
-    #   · '분석·의사결정' 그룹 33~41 → 32~40 (그만큼 1칸 앞으로 당겨짐)
-    #   · 41번째 칸('수정일'의 새 위치)은 사이즈구분·가격시뮬 컬럼과 동일하게 그룹헤더 없는
-    #     단일 컬럼으로 둔다.
-    def _inv_regroup(old_min, old_max, new_min, new_max, label):
+    # 260815(헤더 개편): 위 재배치에 맞춰 GROUP_R(7행) 상위 그룹 병합 범위도 조정.
+    #   · '기본사항' 그룹 14~31 (변경 없음)
+    #   · 구 '분석·의사결정' 단일 그룹(32~40)을 3개 그룹으로 분할:
+    #     - 32~34 "판매진도에 따른 가격 변화 결정" (노랑)
+    #     - 35~37 "사이즈가 정상 인지? 세트가 되는지?" (연분홍)
+    #     - 38~40 "사람이 최종 의사 결정" (노랑)
+    #   · 41번째 칸(수정일)은 사이즈구분·가격시뮬 컬럼과 동일하게 그룹헤더 없는 단일 컬럼으로 둔다.
+    def _inv_unmerge_group(old_min, old_max):
+        """GROUP_R 행에서 (old_min~old_max) 병합 범위를 찾아 해제하고 그 라벨을 지운다.
+        해제 후에는 old_min~old_max 구간의 모든 칸이 다시 독립 셀로 돌아와 재병합 가능해진다."""
         for m in list(tws.merged_cells.ranges):
             if m.min_row <= GROUP_R <= m.max_row and m.min_col == old_min and m.max_col == old_max:
                 tws.unmerge_cells(start_row=m.min_row, start_column=m.min_col,
                                    end_row=m.max_row, end_column=m.max_col)
+                tws.cell(GROUP_R, old_min).value = None
                 break
-        tws.cell(GROUP_R, old_min).value = None
+
+    def _inv_set_group(new_min, new_max, label):
+        """이미 독립 셀 상태인 new_min~new_max 구간에 새 그룹 라벨을 쓰고 병합한다."""
         tws.cell(GROUP_R, new_min).value = label
         if new_max > new_min:
             tws.merge_cells(start_row=GROUP_R, start_column=new_min, end_row=GROUP_R, end_column=new_max)
-    _inv_regroup(14, 32, 14, 31, "기본사항")
-    _inv_regroup(33, 41, 32, 40, "분석·의사결정")
+
+    _inv_unmerge_group(14, 32)
+    _inv_set_group(14, 31, "기본사항")
+    # 260815(헤더 개편): 구 '분석·의사결정' 단일 그룹(33~41 → 재배치 전 기준)을 먼저 통째로 해제한 뒤,
+    # 3개 그룹으로 나눠 다시 병합한다(먼저 만든 그룹의 셀이 다음 그룹 생성 시 읽기전용 MergedCell이
+    # 되지 않도록, 해제를 한 번만 하고 그 다음부터는 독립 셀에 바로 병합을 건다).
+    _inv_unmerge_group(33, 41)
+    _inv_set_group(32, 34, "판매진도에 따른 가격 변화 결정")
+    _inv_set_group(35, 37, "사이즈가 정상 인지? 세트가 되는지?")
+    _inv_set_group(38, 40, "사람이 최종 의사 결정")
     tws.cell(GROUP_R, 41).value = None   # 수정일 — 그룹헤더 없음(단일 컬럼)
+    for _gc in (32, 35, 38):
+        tws.cell(GROUP_R, _gc).alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
 
     # 260803 확정: 위 초록(GREEN) 컬럼들의 상위 그룹 헤더(GROUP_R, 병합 셀)도 같은 초록으로.
     # 병합 셀은 좌상단 셀에만 실제로 서식이 저장되므로, 열이 속한 병합범위의 좌상단 열을 찾아 그 칸에만 칠한다
@@ -4750,6 +4781,11 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         return col
     for c in _INV_GREEN_COLS:
         tws.cell(GROUP_R, _group_header_fill_col(c)).fill = fill_green
+    # 260815(헤더 개편): 새로 분할된 3그룹의 그룹헤더도 각각 노랑·연분홍·노랑으로 강제 지정
+    # (템플릿 상속에 의존하지 않고 GREEN과 동일하게 항상 명시적으로 칠한다).
+    tws.cell(GROUP_R, 32).fill = fill_yellow
+    tws.cell(GROUP_R, 35).fill = fill_pink
+    tws.cell(GROUP_R, 38).fill = fill_yellow
     dstyle = {c: (copy(tws.cell(DATA_R, c).font), copy(tws.cell(DATA_R, c).border),
                   copy(tws.cell(DATA_R, c).alignment), tws.cell(DATA_R, c).number_format,
                   copy(tws.cell(DATA_R, c).fill)) for c in range(1, INV_TOTAL_COLS + 1)}
@@ -4759,9 +4795,10 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # 260811(가격시뮬 + 기준판매가 복제): 구 range(19,24)·range(37,...) → 가격5컬럼(24~28) +
     # 기준판매가 복제(23) 포함해 +6 밀림.
     NUM_COLS = set(range(19, 30)) | set(range(43, INV_TOTAL_COLS + 1))
-    # 구 AH(34)열 → +5(가격시뮬)+1(기준판매가 복제)-1(260811 수정일 재배치로 AA~변경후할인율 블록이
-    # 한 칸씩 앞으로 당겨짐) 이동한 위치
-    _INV_AH_COL_LETTER = get_column_letter(34 + INV_PRICE_SIM_N + 1 - 1)
+    # '변동가격' 칸(39번째, = AM열) 참조. 260815 헤더 개편은 32~37(AA/AB/AF ↔ AC/AD/AE 순서)만
+    # 재배치하고 38~40(휴먼의사결정·변동가격·변경후할인율)은 그대로 두므로 39는 항상 불변 — 계산식 대신
+    # 고정값으로 명시한다.
+    _INV_AH_COL_LETTER = get_column_letter(39)
 
     def to_num(v):
         if v is None or v == "":
@@ -4794,8 +4831,10 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         vals[29], vals[30], vals[31] = raw[10], raw[11], raw[12]   # 할인율·최초입고일·최초출고일(구23~25)
         # 260811: '수정일'을 이 자리(구26)에서 빼서 로우데이터 원래 순서대로 '이관구분' 바로 왼쪽
         # (41번째 칸)으로 옮긴다 — 아래 AA~변경후할인율 블록이 그만큼 한 칸씩 앞으로 당겨진다.
-        vals[32], vals[33], vals[34] = rec["AA"], rec["AB"], rec["AC"]   # 구27,28,29
-        vals[35], vals[36], vals[37] = rec["AD"], rec["AE"], rec["AF"]   # 구30,31,32
+        # 260815(헤더 개편): AI제안방향(AF)을 34번째로 앞당기고, 단품 사이즈 컨디션·SET 가능여부·
+        # SET 사이즈 컨디션(AC·AD·AE)을 35~37로 밀어 하나로 묶는다.
+        vals[32], vals[33], vals[34] = rec["AA"], rec["AB"], rec["AF"]
+        vals[35], vals[36], vals[37] = rec["AC"], rec["AD"], rec["AE"]
         vals[38] = vals[39] = None                                  # 구33,34
         vals[40] = f"={_INV_AH_COL_LETTER}{rr}/T{rr}"                # 구35 (AH→새 위치로 셀참조 갱신)
         vals[41] = raw[21]                                          # 수정일(구26, 이관구분 바로 왼쪽으로 이동)
@@ -4817,15 +4856,21 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                 nc.fill = fill_yellow
             elif c in _INV_GREEN_COLS:
                 nc.fill = fill_green
+            elif c in _INV_PINK_COLS:                               # 260815(헤더 개편)
+                nc.fill = fill_pink
+            elif c in _INV_GRAY_COLS:                                # 260815(헤더 개편)
+                nc.fill = fill_gray
             else:
                 nc.fill = fl
         tws.row_dimensions[rr].height = 20.25
 
     tws.auto_filter.ref = f"A{NAMES_R}:{get_column_letter(INV_TOTAL_COLS)}{NAMES_R + len(recs)}"
     tws.freeze_panes = f"K{DATA_R}"
-    # 260802 확정: BK~CM 항상 숨김
-    for c in _INV_HIDE_COLS:
-        tws.column_dimensions[get_column_letter(c)].hidden = True
+    # 260802 확정: BK~CM 항상 숨김. 260815(헤더 개편) 보강: 그 외 열은 템플릿에 사람이 실수로
+    # 숨겨둔 상태가 남아있어도 매번 명시적으로 숨김 해제한다(안 그러면 템플릿의 숨김 상태가 결과물에
+    # 그대로 전염된다).
+    for c in range(1, INV_TOTAL_COLS + 1):
+        tws.column_dimensions[get_column_letter(c)].hidden = (c in _INV_HIDE_COLS)
     buf = io.BytesIO()
     twb.save(buf)
 
@@ -4890,7 +4935,7 @@ def render_inventory():
     """🏷️ 재고 가공 메뉴 — 로우데이터 업로드 → 가공 → v3.3 엑셀 다운로드 (전 팀원 사용 가능)."""
     st.subheader("🏷️ 쇼핑몰 재고 가공 · 1차 (260731 확정 기준 · 가격 시뮬레이션 5컬럼 + 기준판매가 비교컬럼 추가)")
     st.caption("재고모니터링 로우데이터(94열, '사이즈구분' 컬럼 포함)를 올리면 AA·AB 5등급, AF(AI제안방향), "
-               "사이즈 등급(AC), SET 판정(AD·AE), 기준판매가 비교컬럼, 가격 시뮬레이션 5컬럼을 부여한 113열 v3.3 엑셀을 만들어 드려요. "
+               "단품 사이즈 컨디션(AC), SET 가능여부·SET 사이즈 컨디션(AD·AE), 기준판매가 비교컬럼, 가격 시뮬레이션 5컬럼을 부여한 113열 v3.3 엑셀을 만들어 드려요. "
                "재고 데이터는 DB에 저장하지 않아요(가공 → 다운로드만). "
                "260811부터 사이즈코드는 로우데이터의 '사이즈구분' 컬럼값을 그대로 사용해요(마스터 조회 안 함). "
                "몰가격 바로 뒤에 기준판매가를 그대로 복제한 컬럼이 초록색으로 1개 추가되고(원본 기준판매가 컬럼은 "
@@ -4910,7 +4955,7 @@ def render_inventory():
                                           else "⚠️ **없음** — inventory_template.xlsx를 GitHub에 올려야 해요"))
     c_info3.caption(f"🗂️ 아이템 마스터: **{n_item_master:,}개** 코드"
                     + ("" if n_item_master else " — 미등록 시 구 기준(니트류·티셔츠류 분리)으로 자동 대체"))
-    st.caption("ℹ️ **260811부터 사이즈 마스터는 판정에 쓰지 않아요.** 사이즈 등급(AC)·SET 판정(AD·AE)은 "
+    st.caption("ℹ️ **260811부터 사이즈 마스터는 판정에 쓰지 않아요.** 단품 사이즈 컨디션(AC)·SET 가능여부·SET 사이즈 컨디션(AD·AE)은 "
                "로우데이터에 함께 오는 '사이즈구분' 컬럼값을 그대로 사용해요. 사이즈 마스터를 등록해두면 "
                "새 컬럼값과 다른 건수만 참고로 알려드려요(결과에는 영향 없음).")
 
@@ -5050,7 +5095,7 @@ def render_inventory():
                 f"⚠️ 중카테고리 매핑 없는 아이템 코드 {len(rep['unmapped_items'])}종 "
                 f"(**{', '.join(rep['unmapped_items'])}**) · 상품 {rep['unmapped_rows']:,}행 — "
                 f"가공은 정상 완료했고, 이 상품들만 C열·AA·AB·AF를 '{_INV_UNMAPPED}'로 표기했어요. "
-                f"사이즈 등급(AC)·SET 판정은 로우데이터 '사이즈구분' 컬럼 기준이라 아이템 마스터와 무관하게 정상입니다. "
+                f"단품 사이즈 컨디션(AC)·SET 판정은 로우데이터 '사이즈구분' 컬럼 기준이라 아이템 마스터와 무관하게 정상입니다. "
                 f"아이템 마스터에 코드를 추가하고 다시 돌리면 정상 등급을 받아요.")
             with st.expander(f"🔎 '{_INV_UNMAPPED}' 처리된 품번 {len(rep.get('unmapped_pns', []))}건 보기"):
                 st.dataframe(pd.DataFrame({"품번": rep.get("unmapped_pns", [])}),
@@ -5066,9 +5111,9 @@ def render_inventory():
             r1.dataframe(pd.Series(rep["AB"], name="건수").rename_axis("등급"), use_container_width=True)
             r1.markdown("**AF (AI제안방향)**")
             r1.dataframe(pd.Series(rep["AF"], name="건수").rename_axis("제안"), use_container_width=True)
-            r2.markdown("**AC (사이즈 등급)**")
+            r2.markdown("**AC (단품 사이즈 컨디션)**")
             r2.dataframe(pd.Series(rep["AC"], name="건수").rename_axis("등급"), use_container_width=True)
-            r2.markdown("**SET 상태 (세트키 보유 상품)**")
+            r2.markdown("**SET 가능여부 (세트키 보유 상품)**")
             if rep["SET"]:
                 r2.dataframe(pd.Series(rep["SET"], name="건수").rename_axis("상태"), use_container_width=True)
             else:
