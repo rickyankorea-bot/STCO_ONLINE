@@ -3831,11 +3831,22 @@ _INV_SET_CORE_A09 = ("M", "L", "XL")
 _INV_SET_SMALL_A09 = ("XS", "S")
 _INV_SET_BIG_A09 = ("XXL",)
 
+# 260815 신규(중태님 지시): A09(상의, 문자 M/L/X) ↔ A17(하의, 숫자 정사이즈) 매칭표 확정 — 그동안
+# "문자→숫자 변환표 미정"으로 SET구성실패 처리되던 조합. 재킷이 A09(M/L/XL 등)인데 팬츠가 A17(숫자)인
+# 상품(예: EJ+EP 조합)을 세트로 잡을 수 있게 됨. 핵심·스몰·빅 분류는 A09↔A09와 동일하게 상의(A09)
+# 쪽 체계를 그대로 쓴다(_INV_SET_CORE_A09 등) — SET 등급은 늘 상의 쪽 핵심 성립 여부로 매기므로.
+# XS·S·XXL 행은 중태님이 별도로 지정하지 않아 매칭표에 없음 — 없는 키는 그냥 매칭 후보가 없는 것으로
+# 처리되어(빈 리스트) 기존 로직 그대로 미매칭(잔여) 취급된다.
+_INV_MATCH_A09_A17 = {"M": [78, 82], "L": [78, 82, 86], "XL": [82, 86, 90]}
+
 # 지원 조합: (상의 사이즈코드, 하의 사이즈코드) → (상의 idx맵, 하의 idx맵, 매칭표, 핵심, 스몰, 빅)
 _INV_SET_SYS = {
     ("A16", "A17"): (_INV_TOP, _INV_BOT, _INV_MATCH,
                      _INV_SET_CORE, _INV_SET_SMALL, _INV_SET_BIG),
     ("A09", "A09"): (_INV_A09, _INV_A09, _INV_MATCH_A09,
+                     _INV_SET_CORE_A09, _INV_SET_SMALL_A09, _INV_SET_BIG_A09),
+    # 260815 신규
+    ("A09", "A17"): (_INV_A09, _INV_BOT, _INV_MATCH_A09_A17,
                      _INV_SET_CORE_A09, _INV_SET_SMALL_A09, _INV_SET_BIG_A09),
 }
 
@@ -4535,16 +4546,25 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     pairs = nopair = 0
     for g in bysets.values():
         # 260806: 상/하 판별을 사이즈코드(A16/A17)가 아니라 아이템 코드로 한다 — A09↔A09 세트업을
-        #         잡으려면 필수. 지원 조합은 A16↔A17(숫자 정사이즈) · A09↔A09(문자) 둘.
-        #         그 외(A09↔A17 변환표 미정 · A18 아동 · A06 FREE · 단독행)는 이 그룹에 진입한
+        #         잡으려면 필수. 지원 조합은 A16↔A17(숫자 정사이즈) · A09↔A09(문자) · A09↔A17(신규,
+        #         260815 — 상의 문자/하의 숫자 혼합) 셋.
+        #         그 외(A06 FREE · 단독행)는 이 그룹에 진입한
         #         시점에 이미 L(SET품번)이 있는 것이 확정이므로 '단품아이템'이 아니라 'SET구성실패'로
-        #         남는다(260814, 위 기본값 설정부 참고).
+        #         남는다(260814, 위 기본값 설정부 참고). A18↔A18(아동)은 아래에서 별도로 '아동복'으로
+        #         표기한다(260815).
         tops = [r for r in g if _inv_set_side(r) == "top"]
         bots = [r for r in g if _inv_set_side(r) == "bot"]
         if not tops or not bots:
             nopair += 1; continue
         ti, bi = tops[0], bots[0]
         sys_key = (ti["scode"], bi["scode"])
+        # 260815 신규(중태님 지시): A18↔A18(아동)은 다른 미지원 조합과 묶어 "SET구성실패"로 뭉뚱그리지
+        # 않고, 아동복이라는 실제 성격을 그대로 드러내는 "아동복"으로 별도 표기한다. SET품번은 있으나
+        # (=SJ/EJ/SL/EP 아이템코드) 아동 사이즈체계(A18)라 애초에 등급 판정 대상이 아니라는 뜻.
+        if sys_key == ("A18", "A18"):
+            for r in g:
+                r["AD"] = r["AE"] = "아동복"
+            nopair += 1; continue
         if sys_key not in _INV_SET_SYS:
             nopair += 1; continue
         TMAP, BMAP, MTBL, S_CORE, S_SMALL, S_BIG = _INV_SET_SYS[sys_key]
