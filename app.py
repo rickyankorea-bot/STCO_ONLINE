@@ -3808,8 +3808,15 @@ _INV_MATCH = {95: [74, 76, 78, 80, 82], 100: [78, 80, 82, 84], 105: [82, 84, 86,
               110: [84, 86, 88, 90, 92, 94, 98],
               115: [84, 86, 88, 90, 92, 94, 98], 120: [86, 88, 90, 92, 94, 98, 102, 106],
               130: [88, 90, 92, 94, 98, 102, 106]}
-# 하의 잔여 → '하의단품' 전환 문턱 (하의 총재고 ÷ 상의 총재고). 초과일 때만 단품 전환.
-_INV_BOT_LEFT_RATIO = 1.3
+# 260815 개정(중태님 지시): 구 "하의 잔여 1.3배(그룹 총재고 비율)" 규칙 폐지. 대신 사이즈별 1.5배
+# 과다재고 판정으로 대체 — 아래 매칭 루프(for ts in top_ok) 안에서 사용.
+#   규칙(1): 특정 상의 사이즈와 SET 매칭이 안 되는 팬츠 사이즈가 X장 이상 남으면 그 자체로 바로
+#            '하의단품 별도 판매 필요' (구 비율 게이트 없이 즉시 반영).
+#   규칙(2): 상의 사이즈와 매칭되는 후보 팬츠 사이즈 중, 팬츠 재고가 매칭된 상의 재고의 1.5배
+#            이상이면 그 팬츠는 세트 수요 대비 명백한 과다재고 → 세트&하의단품.
+#   규칙(3): 반대로 상의 재고가, 매칭되는 모든 후보 팬츠 재고 합계의 1.5배 이상이면 상의가 명백한
+#            과다재고 → 세트&상의단품.
+_INV_SET_EXCESS_RATIO = 1.5
 _INV_SET_CORE = (100, 105)
 _INV_SET_SMALL = (95,)
 _INV_SET_BIG = (110, 115, 120, 130)
@@ -4540,22 +4547,27 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         top_ok = [TMAP[k] for k in TMAP if ti["size14"][k] >= X]
         bot_ok = [BMAP[k] for k in BMAP if bi["size14"][k] >= X]
         matched = {}; used = set()
+        excess_bot = set(); excess_top = set()
         for ts in top_ok:
             cand = [bs for bs in MTBL.get(ts, []) if bs in bot_ok]
             if cand:
-                matched[ts] = min(ti["size14"][T_IDX[ts]],
-                                  max(bi["size14"][B_IDX[b]] for b in cand))
+                _top_stock = ti["size14"][T_IDX[ts]]
+                matched[ts] = min(_top_stock, max(bi["size14"][B_IDX[b]] for b in cand))
                 used.update(cand)
-        tl = set(top_ok) - set(matched); bl = set(bot_ok) - used
-        # 260806: 하의 잔여 1.3배 규칙 — 세트가 성립한 경우, 남는 하의는 세트 구매자가 고를 수 있는
-        #         '선택 버퍼'로 본다. 하의 총재고 ÷ 상의 총재고가 1.3을 초과할 때만 하의단품으로 전환.
-        #         경계값 1.3 정확히는 미초과(→ 버퍼) 처리. 상의 총재고 0이면 비율은 무한대로 본다.
-        #         상의 잔여(tl)에는 적용하지 않는다 — 자켓이 남는 건 곧 상의단품 전환 신호.
-        if matched and bl:
-            _tt = sum(ti["size14"].values()); _bt = sum(bi["size14"].values())
-            _ratio = float("inf") if _tt <= 0 else _bt / _tt
-            if _ratio <= _INV_BOT_LEFT_RATIO:
-                bl = set()
+                # 260815 규칙(2): 매칭 후보 팬츠 중 재고가 이 상의 사이즈 재고의 1.5배 이상인
+                # 사이즈가 있으면 그 팬츠 사이즈는 과다재고 → 하의단품 신호로 추가.
+                for b in cand:
+                    if bi["size14"][B_IDX[b]] >= _INV_SET_EXCESS_RATIO * _top_stock:
+                        excess_bot.add(b)
+                # 260815 규칙(3): 상의 재고가 매칭되는 모든 후보 팬츠 재고 합계의 1.5배 이상이면
+                # 상의가 과다재고 → 상의단품 신호로 추가.
+                _cand_sum = sum(bi["size14"][B_IDX[b]] for b in cand)
+                if _top_stock >= _INV_SET_EXCESS_RATIO * _cand_sum:
+                    excess_top.add(ts)
+        # 260815: 구 1.3배 그룹비율 게이트 폐지. tl/bl에 규칙(1)의 미매칭 잔여와 규칙(2)/(3)의
+        # 사이즈별 과다재고 신호(excess_bot/excess_top)를 합쳐 최종 잔여로 삼는다.
+        tl = (set(top_ok) - set(matched)) | excess_top
+        bl = (set(bot_ok) - used) | excess_bot
         if matched:
             # 260807: 표기 문구 축약 (판정 로직은 그대로) — 세트만→SET만 / 세트&상하단품→SET+상하 /
             #         세트&상의단품→SET+상 / 세트&하의단품→SET+하
