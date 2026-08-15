@@ -4595,11 +4595,31 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         # 사이즈별 과다재고 신호(excess_bot/excess_top)를 합쳐 최종 잔여로 삼는다.
         tl = (set(top_ok) - set(matched)) | excess_top
         bl = (set(bot_ok) - used) | excess_bot
+        # 260815 추가(중태님 지시, 수정2): 이 행의 사이즈정보 14칸 중 "남는 상의/남는 하의"에
+        # 해당하는 실제 사이즈 칸을 결과물에서 노란색으로 표시하기 위해, idx 위치(1~14)를
+        # tops/bots 각 행에 심어둔다. 출력 시점(아래 for i, rec in enumerate(recs) 루프)에서
+        # INV_SIZECODE_COL(사이즈구분) 바로 다음 14칸 중 이 idx에 해당하는 칸만 fill_yellow 처리.
+        top_yellow_idx = {T_IDX[s] for s in tl}
+        bot_yellow_idx = {B_IDX[s] for s in bl}
+        for r in tops:
+            r["_yellow_idx"] = top_yellow_idx
+        for r in bots:
+            r["_yellow_idx"] = bot_yellow_idx
         if matched:
             # 260807: 표기 문구 축약 (판정 로직은 그대로) — 세트만→SET만 / 세트&상하단품→SET+상하 /
             #         세트&상의단품→SET+상 / 세트&하의단품→SET+하
+            # 260815 추가(중태님 지시, 수정1): "SET+상"/"SET+하"가 뜨는 이유가 실무에서 2가지로
+            # 섞여 혼동됨 — (a) 애초에 매칭 후보 자체가 없어 남는 사이즈(규칙1)와 (b) 매칭은 됐지만
+            # 1.5배 과다재고라 추가로 남는 사이즈(규칙2·3)가 같은 라벨로 나갔음. 그 사이드(상/하)의
+            # 잔여가 "전부" 1.5배 규칙 때문(=규칙1 잔여가 0개)일 때만 "(1.5배)" 태그를 붙여 구분한다.
+            # 진짜 미매칭 사이즈가 하나라도 섞여 있으면(원인이 순수 1.5배가 아니면) 태그를 붙이지 않는다.
+            top_all_matched = not (set(top_ok) - set(matched))   # 상의 OK 사이즈가 전부 매칭됐는가
+            bot_all_used = not (set(bot_ok) - used)               # 하의 OK 사이즈가 전부 매칭에 쓰였는가
+            top_tag = "(1.5배)" if tl and top_all_matched else ""
+            bot_tag = "(1.5배)" if bl and bot_all_used else ""
             stt = "SET만" if not tl and not bl else \
-                ("SET+상하" if tl and bl else ("SET+상" if tl else "SET+하"))
+                (f"SET+상{top_tag}하{bot_tag}" if tl and bl
+                 else (f"SET+상{top_tag}" if tl else f"SET+하{bot_tag}"))
             sg = _inv_set_grade(matched, Y,
                                 {s: ti["size14"][T_IDX[s]] for s in matched},
                                 S_CORE, S_SMALL, S_BIG)
@@ -4880,6 +4900,10 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                 nc.fill = fill_pink
             elif c in _INV_GRAY_COLS:                                # 260815(헤더 개편)
                 nc.fill = fill_gray
+            elif (INV_SIZECODE_COL < c <= INV_SIZECODE_COL + 14
+                  and (c - INV_SIZECODE_COL) in rec.get("_yellow_idx", ())):
+                # 260815 추가(수정2): 사이즈정보 14칸 중 "남는 상의/남는 하의"에 해당하는 사이즈 칸
+                nc.fill = fill_yellow
             else:
                 nc.fill = fl
         tws.row_dimensions[rr].height = 20.25
