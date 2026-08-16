@@ -3920,7 +3920,15 @@ _INV_YELLOW_COLS = ({3, 11, 12, 13} | set(range(INV_PRICE_SIM_COL, INV_PRICE_SIM
 _INV_PINK_COLS = {35, 36, 37}
 _INV_GRAY_COLS = {41}
 _INV_GREEN_COLS = {INV_GIJUN_COPY_COL, 59, 65, 66, 67}        # 기준판매가 복제(23) + BA,BG,BH,BI(구 53,59,60,61 → +6)
-_INV_HIDE_COLS = set(range(69, 98))                           # BK~CM (구 63~91 → +6)
+# 260816 개정(중태님 지시, "결과물파일 셀 숨기기 기준자료.xlsx" 첨부) — 구 BK~CM(69~97) 일괄
+# 숨김을 폐지하고, 팀장님이 실제 결과 파일에서 직접 지정한 개별 숨김열 18개로 전면 교체한다.
+# 첨부 파일을 openpyxl로 열어 column_dimensions.hidden을 직접 읽어 그대로 옮겨온 값 — 헤더 위치
+# 기준으로 F(순번)·G(라인)·J(품번)·N(색상)·P(몰상품명2)·U(현판가)·AC(할인율)·AD(최초입고일)·
+# AE(최초출고일)·AP(이관구분)·AY(누계입고량)·BA(누계판매량)·BB(판매율)·BH(90퍼센트 창고)·
+# BI(온라인반품창고)·BJ(원가금액)·BM(기간판매수량 — 매장기간판매수량 그룹과 별개, 65번째 칸)·
+# BP(판매비중, 68번째 칸)에 해당. 구 BK~CM(69~97, 매장별 기간판매수량/금액/비교/소진예상기간
+# 반복블록)은 이번 기준자료에서 전부 숨김 해제(가시화)됨 — 그대로 반영.
+_INV_HIDE_COLS = {6, 7, 10, 14, 16, 21, 29, 30, 31, 42, 51, 53, 54, 60, 61, 62, 65, 68}
 
 
 def _inv_grade_one(s14, sd, X, Y):
@@ -3956,6 +3964,31 @@ def _inv_grade_one(s14, sd, X, Y):
     if small:
         return "F"
     return "판정불가"
+
+
+# 260816 신규(중태님 지시, 표 첨부) — 단품 사이즈 컨디션(AC)·SET 사이즈 컨디션(AE) 출력 문구를
+# "핵심 개수/조건"이 그대로 드러나도록 라벨에 괄호 설명을 덧붙이는 방향으로 개편. 판정 로직
+# (_inv_grade_one/_inv_set_grade의 내부 조건문)은 전혀 손대지 않고, 최종 반환값만 이 표로
+# 치환한다 — 로직과 표시 문구를 분리해 두면 나중에 표시 문구만 또 바뀌어도 판정 로직은 안전.
+#   · 구 C-2 → 신 "C-1(핵심1개만)", 구 C-3 → 신 "C-2(핵심1개만)" — 번호가 한 칸씩 당겨진다(중태님
+#     제공 표 그대로). 구 C-1("핵심1개+@")과 신 "C-1(핵심1개만)"이 둘 다 "C-1"로 시작하지만 괄호
+#     설명으로 구분되므로 혼동 없음 — 표에 그렇게 명시돼 있어 그대로 반영.
+#   · 품절근처 → "전사이즈 {X}개이하" — AD(SET 가능여부)의 항목12 "상하모두 {X}개 이하"와 같은
+#     맥락(이번 실행에 쓰인 OK 문턱값 X를 그대로 대입, 하드코딩 아님). 품절은 문구 변경 없음(그대로).
+_INV_GRADE_LABEL = {
+    "A": "A(핵심2개이상)", "B": "B(핵심2개만)",
+    "C-1": "C-1(핵심1개+@)", "C-2": "C-1(핵심1개만)", "C-3": "C-2(핵심1개만)",
+    "D": "D(빅&스몰)", "E": "E(빅만)", "F": "F(스몰만)",
+    "품절": "품절",
+}
+
+
+def _inv_grade_display(code, X):
+    """_inv_grade_one()의 원시 등급코드를 260816 개편 표시 문구로 치환. 표에 없는 코드
+    (해당없음·FREE SIZE·판정불가 등)는 원문 그대로 통과."""
+    if code == "품절근처":
+        return f"전사이즈 {X}개이하"
+    return _INV_GRADE_LABEL.get(code, code)
 
 
 def _inv_set_grade(mq, Y, top_stock=None, core=None, small=None, big=None):
@@ -4003,6 +4036,27 @@ def _inv_set_grade(mq, Y, top_stock=None, core=None, small=None, big=None):
     if sm:
         return "F"
     return "해당없음"
+
+
+# 260816 신규(중태님 지시) — SET 사이즈 컨디션(AE)도 단품(AC)과 동일한 표시 문구 개편.
+# _inv_set_grade()의 내부 판정 로직은 무수정, 반환값만 이 표로 치환한다.
+#   · 구 A-1/A-2 → 신 둘 다 "A-1(핵심2개이상)" 로 통합 표시(중태님 제공 표 그대로) — A-1/A-2를
+#     가르던 "핵심 상의재고 Y 이상 여부"는 이제 문구에 안 드러나지만, 판정 로직 자체(어느 조건일 때
+#     세트가 A급인지)는 그대로 남아있어 필요하면 나중에 다시 분리해 보여줄 수 있음.
+#   · 구 C-2 → 신 "C-1(핵심1개만)", 구 C-3 → 신 "C-2(핵심1개만)" — 단품(AC)과 동일한 번호 이동.
+#   · 해당없음(세트 불가·미매칭)은 표에 없는 값이라 원문 그대로 통과.
+_INV_SET_GRADE_LABEL = {
+    "A-1": "A-1(핵심2개이상)", "A-2": "A-1(핵심2개이상)",
+    "B": "B(핵심2개만)",
+    "C-1": "C-1(핵심1개+@)", "C-2": "C-1(핵심1개만)", "C-3": "C-2(핵심1개만)",
+    "D": "D(빅&스몰)", "E": "E(빅만)", "F": "F(스몰만)",
+}
+
+
+def _inv_set_grade_display(code):
+    """_inv_set_grade()의 원시 등급코드를 260816 개편 표시 문구로 치환. 표에 없는 값
+    (해당없음 등)은 원문 그대로 통과."""
+    return _INV_SET_GRADE_LABEL.get(code, code)
 # ▲▲▲ size-grade-classifier 스킬 이식 블록 끝 (SYNC BLOCK) ▲▲▲
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -4554,9 +4608,10 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             # 260814: A06(FREE, 가방·모자·벨트 등 1사이즈 상품)은 문자 등급 대신 총재고 합계만 보고
             # X 기준 이상이면 판정 — 표기를 "OK"에서 "FREE SIZE"로 변경(팀장 지시, 상품 특성이 더
             # 잘 드러나도록). 미달 시 "품절근처"는 기존과 동일.
-            r["AC"] = "FREE SIZE" if sum(r["size14"].values()) >= X else "품절근처"
+            r["AC"] = ("FREE SIZE" if sum(r["size14"].values()) >= X
+                       else _inv_grade_display("품절근처", X))
         elif c in _INV_SYSTEMS:
-            r["AC"] = _inv_grade_one(r["size14"], _INV_SYSTEMS[c], X, Y)
+            r["AC"] = _inv_grade_display(_inv_grade_one(r["size14"], _INV_SYSTEMS[c], X, Y), X)
         else:
             r["AC"] = "해당없음"
 
@@ -4691,9 +4746,9 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             stt = "SET만" if not tl and not bl else \
                 (f"SET+상{top_tag}하{bot_tag}" if tl and bl
                  else (f"SET+상{top_tag}" if tl else f"SET+하{bot_tag}"))
-            sg = _inv_set_grade(matched, Y,
+            sg = _inv_set_grade_display(_inv_set_grade(matched, Y,
                                 {s: ti["size14"][T_IDX[s]] for s in matched},
-                                S_CORE, S_SMALL, S_BIG)
+                                S_CORE, S_SMALL, S_BIG))
         else:
             # 260815(중태님 지시): SET 가능여부(AD)에서 "품절근처"라는 출력 조건을 완전히 제거.
             # 상·하 양쪽 다 OK 사이즈가 하나도 없는 경우(구 "품절근처") 대신, 실제 조건을 그대로
