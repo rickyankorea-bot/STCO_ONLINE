@@ -3812,11 +3812,34 @@ _INV_MATCH = {95: [74, 76, 78, 80, 82], 100: [78, 80, 82, 84], 105: [82, 84, 86,
 # 과다재고 판정으로 대체 — 아래 매칭 루프(for ts in top_ok) 안에서 사용.
 #   규칙(1): 특정 상의 사이즈와 SET 매칭이 안 되는 팬츠 사이즈가 X장 이상 남으면 그 자체로 바로
 #            '하의단품 별도 판매 필요' (구 비율 게이트 없이 즉시 반영).
-#   규칙(2): 상의 사이즈와 매칭되는 후보 팬츠 사이즈 중, 팬츠 재고가 매칭된 상의 재고의 1.5배
-#            이상이면 그 팬츠는 세트 수요 대비 명백한 과다재고 → 세트&하의단품.
-#   규칙(3): 반대로 상의 재고가, 매칭되는 모든 후보 팬츠 재고 합계의 1.5배 이상이면 상의가 명백한
+#   규칙(2): 상의 사이즈와 매칭되는 후보 팬츠 사이즈 중, 팬츠 재고가 "그 팬츠를 후보로 삼는 모든
+#            매칭 상의 사이즈 재고의 합"의 1.3배 이상이면 그 팬츠는 세트 수요 대비 명백한
+#            과다재고 → 세트&하의단품.
+#            260816 개정(중태님 지시): 팬츠 한 사이즈가 여러 상의 사이즈의 매칭 후보로 동시에
+#            걸리는 경우(예: 팬츠 78은 재킷 95·100 둘 다의 후보), 종전에는 그중 하나(=재킷 100,
+#            25장)와만 비교해 과다재고로 오판했다 — 팬츠 78 재고 93장이 재킷 100 하나의 1.5배는
+#            넘지만, 실제로는 재킷 95(120장)의 수요도 동시에 받는 사이즈라 진짜 과다재고가 아니었음.
+#            그래서 "합산기준"으로 전환: 비교 대상을 단일 상의가 아니라 그 팬츠를 후보로 삼는 모든
+#            매칭 상의 재고의 합으로 바꾼다. 합산 방식은 분모가 커지므로 배율도 기존 1.5배에서
+#            1.3배로 낮춘다 — 1/1.2/1.3/1.5 시뮬레이션 결과, 1.5는 합산기준에서 과소검출(발동
+#            사이즈칸 43개, 개별기준 169개 대비 74% 급감)이라 판단, 1.3이 원래 취지(명백한
+#            과다재고만 골라내기)와 검출 민감도 균형에 가장 근접.
+#   규칙(3): 반대로 상의 재고가, 매칭되는 모든 후보 팬츠 재고 합계의 1.3배 이상이면 상의가 명백한
 #            과다재고 → 세트&상의단품.
-_INV_SET_EXCESS_RATIO = 1.5
+#            260816 2차 개정(중태님 지시): 규칙(2)를 합산기준·1.3배로 낮춘 뒤, 중태님이 "상의는 원래
+#            사이즈 종류가 적으니(보통 4~5개, 하의는 6~7개) 상의 쪽 배율은 하의보다 더 높아야 하지
+#            않겠냐"고 문제 제기 — 실측으로 검증함. 실데이터 152개 세트그룹에서 "합산 시 몇 개
+#            사이즈를 더하는지"(합산 카운트)를 직접 세어보니 오히려 반대였음: 규칙(2)는 하의 1개당
+#            평균 2.05개 상의를 합산(매칭표상 하의 하나가 겹치는 상의 사이즈가 1~2개뿐), 규칙(3)은
+#            상의 1개당 평균 2.71개 하의를 합산(재킷 하나가 팬츠 3~8개 사이즈와 넓게 매칭됨 —
+#            _INV_MATCH 참고, 110·115는 팬츠 7개와 매칭). 즉 상의 쪽이 "사이즈 종류는 적어도" 매칭
+#            폭 자체는 더 넓어서, 규칙(3)의 분모가 이미 규칙(2)보다 구조적으로 더 큼 — 배율까지
+#            더 높이면(1.5) 두 보수화 요인이 겹쳐 상의 과다재고를 과소검출하게 됨(1.3 고정 기준 실측:
+#            규칙(2) 발동 63칸 vs 규칙(3) 1.5일 때 42칸 — 33% 이상 적게 잡힘, 1.3이면 54칸으로 격차
+#            축소). 그래서 규칙(3)도 1.3으로 낮춰 규칙(2)와 통일 — 이미 분모가 큰 규칙(3)에 배율까지
+#            높이는 "이중 보수화"를 피한다.
+_INV_SET_EXCESS_RATIO = 1.3          # 규칙(3) 전용 — 상의 과다재고 판정 (260816: 1.5→1.3, 규칙2와 통일)
+_INV_SET_EXCESS_RATIO_BOT = 1.3      # 260816 신설 — 규칙(2) 전용, 합산기준 하의 과다재고 판정
 _INV_SET_CORE = (100, 105)
 _INV_SET_SMALL = (95,)
 _INV_SET_BIG = (110, 115, 120, 130)
@@ -4575,48 +4598,73 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         bot_ok = [BMAP[k] for k in BMAP if bi["size14"][k] >= X]
         matched = {}; used = set()
         excess_bot = set(); excess_top = set()
+        cand_by_ts = {}  # 260816 신설 — 규칙(2) 합산기준 계산에 재사용(아래 루프 이후)
         for ts in top_ok:
             cand = [bs for bs in MTBL.get(ts, []) if bs in bot_ok]
             if cand:
+                cand_by_ts[ts] = cand
                 _top_stock = ti["size14"][T_IDX[ts]]
                 matched[ts] = min(_top_stock, max(bi["size14"][B_IDX[b]] for b in cand))
                 used.update(cand)
-                # 260815 규칙(2): 매칭 후보 팬츠 중 재고가 이 상의 사이즈 재고의 1.5배 이상인
-                # 사이즈가 있으면 그 팬츠 사이즈는 과다재고 → 하의단품 신호로 추가.
-                for b in cand:
-                    if bi["size14"][B_IDX[b]] >= _INV_SET_EXCESS_RATIO * _top_stock:
-                        excess_bot.add(b)
                 # 260815 규칙(3): 상의 재고가 매칭되는 모든 후보 팬츠 재고 합계의 1.5배 이상이면
                 # 상의가 과다재고 → 상의단품 신호로 추가.
                 _cand_sum = sum(bi["size14"][B_IDX[b]] for b in cand)
                 if _top_stock >= _INV_SET_EXCESS_RATIO * _cand_sum:
                     excess_top.add(ts)
+        # 260816 개정(중태님 지시) — 규칙(2) 합산기준: 팬츠 한 사이즈가 여러 상의 사이즈의 매칭
+        # 후보로 동시에 걸릴 수 있어서(예: 팬츠 78 ↔ 재킷 95·100 둘 다), 종전처럼 그중 하나의
+        # 상의 재고와만 비교하면 다른 상의의 수요를 무시한 오판이 나온다(하의78=93장이 재킷100=25장
+        # 하나 기준으론 과다지만, 재킷95=120장 수요까지 합치면 전혀 과다가 아닌 사례로 실측 확인됨).
+        # → 비교 분모를 "이 팬츠를 후보로 삼는 모든 매칭 상의 사이즈 재고의 합"으로 바꾸고,
+        # 배율도 1.5배 → 1.3배로 낮춘다(합산기준은 분모가 커져 1.5배를 그대로 쓰면 과소검출됨 —
+        # 1/1.2/1.3/1.5 실측 시뮬레이션 결과에 근거).
+        for b in used:
+            _demand_sum = sum(ti["size14"][T_IDX[ts]] for ts, cand in cand_by_ts.items() if b in cand)
+            if bi["size14"][B_IDX[b]] >= _INV_SET_EXCESS_RATIO_BOT * _demand_sum:
+                excess_bot.add(b)
         # 260815: 구 1.3배 그룹비율 게이트 폐지. tl/bl에 규칙(1)의 미매칭 잔여와 규칙(2)/(3)의
         # 사이즈별 과다재고 신호(excess_bot/excess_top)를 합쳐 최종 잔여로 삼는다.
-        tl = (set(top_ok) - set(matched)) | excess_top
-        bl = (set(bot_ok) - used) | excess_bot
+        top_nomatch = set(top_ok) - set(matched)   # 규칙(1) — 애초에 매칭 후보 자체가 없는 진짜 미매칭
+        bot_nomatch = set(bot_ok) - used            # 〃
+        tl = top_nomatch | excess_top
+        bl = bot_nomatch | excess_bot
         # 260815 추가(중태님 지시, 수정2): 이 행의 사이즈정보 14칸 중 "남는 상의/남는 하의"에
-        # 해당하는 실제 사이즈 칸을 결과물에서 노란색으로 표시하기 위해, idx 위치(1~14)를
+        # 해당하는 실제 사이즈 칸을 결과물에서 색으로 표시하기 위해, idx 위치(1~14)를
         # tops/bots 각 행에 심어둔다. 출력 시점(아래 for i, rec in enumerate(recs) 루프)에서
-        # INV_SIZECODE_COL(사이즈구분) 바로 다음 14칸 중 이 idx에 해당하는 칸만 fill_yellow 처리.
-        top_yellow_idx = {T_IDX[s] for s in tl}
-        bot_yellow_idx = {B_IDX[s] for s in bl}
+        # INV_SIZECODE_COL(사이즈구분) 바로 다음 14칸 중 이 idx에 해당하는 칸만 채색 처리.
+        # 260816 3차 개정(중태님 지시): 지금까지는 "남는 사이즈"를 원인 구분 없이 전부 노란색
+        # 하나로 칠했는데, 실제로는 원인이 둘로 나뉜다 — (a) 규칙(1): 애초에 매칭되는 반대쪽
+        # 사이즈가 하나도 없어서 남는 경우(top_nomatch/bot_nomatch), (b) 규칙(2)/(3): 매칭은 됐지만
+        # 1.3배 과다재고 규칙 때문에 추가로 남는 경우(excess_bot/excess_top). 이 둘은 서로 배타적
+        # (excess_*는 matched에 들어간 사이즈에만 붙고, *_nomatch는 애초에 matched에 없는 사이즈라
+        # 절대 안 겹침) — (a)는 초록색, (b)는 기존대로 노란색으로 나눠서, "진짜 매칭 상대가 없는
+        # 사이즈"와 "재고 비율 규칙 때문에 단품 전환된 사이즈"를 결과물에서 한눈에 구분할 수 있게 한다.
+        top_yellow_idx = {T_IDX[s] for s in excess_top}
+        bot_yellow_idx = {B_IDX[s] for s in excess_bot}
+        top_green_idx = {T_IDX[s] for s in top_nomatch}
+        bot_green_idx = {B_IDX[s] for s in bot_nomatch}
         for r in tops:
             r["_yellow_idx"] = top_yellow_idx
+            r["_green_idx"] = top_green_idx
         for r in bots:
             r["_yellow_idx"] = bot_yellow_idx
+            r["_green_idx"] = bot_green_idx
         if matched:
             # 260807: 표기 문구 축약 (판정 로직은 그대로) — 세트만→SET만 / 세트&상하단품→SET+상하 /
             #         세트&상의단품→SET+상 / 세트&하의단품→SET+하
             # 260815 추가(중태님 지시, 수정1): "SET+상"/"SET+하"가 뜨는 이유가 실무에서 2가지로
             # 섞여 혼동됨 — (a) 애초에 매칭 후보 자체가 없어 남는 사이즈(규칙1)와 (b) 매칭은 됐지만
-            # 1.5배 과다재고라 추가로 남는 사이즈(규칙2·3)가 같은 라벨로 나갔음. 그 사이드(상/하)의
-            # 잔여가 "전부" 1.5배 규칙 때문(=규칙1 잔여가 0개)일 때만 "(1.5배)" 태그를 붙여 구분한다.
-            # 진짜 미매칭 사이즈가 하나라도 섞여 있으면(원인이 순수 1.5배가 아니면) 태그를 붙이지 않는다.
+            # 과다재고라 추가로 남는 사이즈(규칙2·3)가 같은 라벨로 나갔음. 그 사이드(상/하)의
+            # 잔여가 "전부" 배율 규칙 때문(=규칙1 잔여가 0개)일 때만 "(N배)" 태그를 붙여 구분한다.
+            # 진짜 미매칭 사이즈가 하나라도 섞여 있으면(원인이 순수 배율 규칙이 아니면) 태그를 붙이지 않는다.
+            # 260816 2차 개정: 규칙(2)·규칙(3) 둘 다 합산기준·1.3배로 통일됐으므로 태그도 다시
+            # "(1.3배)"로 공용 표기(직전엔 규칙(3)이 1.5였던 짧은 기간 동안만 "(1.5배)"를 따로 썼음 —
+            # 상수 _INV_SET_EXCESS_RATIO/_INV_SET_EXCESS_RATIO_BOT가 갈라지면 언제든 다시 나눌 수
+            # 있도록 태그 문자열은 상수값을 그대로 참조).
             top_all_matched = not (set(top_ok) - set(matched))   # 상의 OK 사이즈가 전부 매칭됐는가
             bot_all_used = not (set(bot_ok) - used)               # 하의 OK 사이즈가 전부 매칭에 쓰였는가
-            top_tag = "(1.5배)" if tl and top_all_matched else ""
-            bot_tag = "(1.5배)" if bl and bot_all_used else ""
+            top_tag = f"({_INV_SET_EXCESS_RATIO}배)" if tl and top_all_matched else ""
+            bot_tag = f"({_INV_SET_EXCESS_RATIO_BOT}배)" if bl and bot_all_used else ""
             stt = "SET만" if not tl and not bl else \
                 (f"SET+상{top_tag}하{bot_tag}" if tl and bl
                  else (f"SET+상{top_tag}" if tl else f"SET+하{bot_tag}"))
@@ -4902,8 +4950,15 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                 nc.fill = fill_gray
             elif (INV_SIZECODE_COL < c <= INV_SIZECODE_COL + 14
                   and (c - INV_SIZECODE_COL) in rec.get("_yellow_idx", ())):
-                # 260815 추가(수정2): 사이즈정보 14칸 중 "남는 상의/남는 하의"에 해당하는 사이즈 칸
+                # 260815 추가(수정2): 사이즈정보 14칸 중 "남는 상의/남는 하의"에 해당하는 사이즈 칸 —
+                # 260816 3차 개정으로 이제 이 노란색은 "매칭은 됐지만 1.3배 과다재고 규칙 때문에
+                # 남은" 경우(규칙2·3)만 의미한다. 애초에 매칭 후보가 없어 남은 경우는 아래 초록색 분기.
                 nc.fill = fill_yellow
+            elif (INV_SIZECODE_COL < c <= INV_SIZECODE_COL + 14
+                  and (c - INV_SIZECODE_COL) in rec.get("_green_idx", ())):
+                # 260816 신설(중태님 지시, 수정3): 애초에 매칭되는 반대쪽 사이즈가 하나도 없어서
+                # 단품 판매가 추천된 사이즈(규칙1) — 재고비율 규칙(노란색)과 시각적으로 구분.
+                nc.fill = fill_green
             else:
                 nc.fill = fl
         tws.row_dimensions[rr].height = 20.25
