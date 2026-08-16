@@ -3840,6 +3840,18 @@ _INV_MATCH = {95: [74, 76, 78, 80, 82], 100: [78, 80, 82, 84], 105: [82, 84, 86,
 #            높이는 "이중 보수화"를 피한다.
 _INV_SET_EXCESS_RATIO = 1.3          # 규칙(3) 전용 — 상의 과다재고 판정 (260816: 1.5→1.3, 규칙2와 통일)
 _INV_SET_EXCESS_RATIO_BOT = 1.3      # 260816 신설 — 규칙(2) 전용, 합산기준 하의 과다재고 판정
+# 260816 3차 개정(중태님 지시) — 규칙(2)/(3) 합산(분모) 대상의 범위 문제. 팀장님이 실제 사례(재킷
+# 100사이즈=27장, 매칭표상 후보는 78·80·82·84인데 78=9장·84=7장은 X문턱(재고 10장) 미만이라 지금까지
+# 분모 계산에서 통째로 빠지고 82=17장만 들어갔던 것)를 짚음 — "세트 성립 여부 판정"(X문턱 게이트)과
+# "과다재고 분모 계산"을 같은 X문턱으로 묶어 쓰는 게 맞냐는 문제제기. 확인 결과 맞는 지적이라 분리:
+#   · "세트 성립"(top_ok/bot_ok/matched/used, tl/bl의 진짜 미매칭 판정)은 지금처럼 X문턱(재고 X장
+#     이상)을 그대로 유지 — 이건 안 건드림.
+#   · 규칙(2)/(3)의 합산 "분모"만 X문턱과 분리 — 매칭표(MTBL)상의 후보 전체를 대상으로 하되, 처음엔
+#     "1장이라도 있으면 포함"을 제안했다가 중태님이 "1장은 너무 적다, 3장 이상이면 포함하자"로 확정.
+#     즉 분모용 후보는 "이 사이즈 체계에 실재하는 사이즈이면서 재고 3장 이상"이면 X문턱(보통 10장)
+#     미만이라도 합산에 포함한다 — 반품/샘플성 1~2장짜리 재고까지 분모를 부풀리는 건 막으면서도,
+#     78(9장)·84(7장)처럼 유의미한 재고는 분모에 정상 반영되게 함.
+_INV_SET_EXCESS_DEMAND_MIN = 3       # 260816 신설 — 규칙(2)/(3) 합산 분모에 포함시키는 최소 재고(장)
 _INV_SET_CORE = (100, 105)
 _INV_SET_SMALL = (95,)
 _INV_SET_BIG = (110, 115, 120, 130)
@@ -4598,17 +4610,24 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         bot_ok = [BMAP[k] for k in BMAP if bi["size14"][k] >= X]
         matched = {}; used = set()
         excess_bot = set(); excess_top = set()
-        cand_by_ts = {}  # 260816 신설 — 규칙(2) 합산기준 계산에 재사용(아래 루프 이후)
         for ts in top_ok:
             cand = [bs for bs in MTBL.get(ts, []) if bs in bot_ok]
             if cand:
-                cand_by_ts[ts] = cand
                 _top_stock = ti["size14"][T_IDX[ts]]
                 matched[ts] = min(_top_stock, max(bi["size14"][B_IDX[b]] for b in cand))
                 used.update(cand)
-                # 260815 규칙(3): 상의 재고가 매칭되는 모든 후보 팬츠 재고 합계의 1.5배 이상이면
+                # 260815 규칙(3): 상의 재고가 매칭되는 모든 후보 팬츠 재고 합계의 1.3배 이상이면
                 # 상의가 과다재고 → 상의단품 신호로 추가.
-                _cand_sum = sum(bi["size14"][B_IDX[b]] for b in cand)
+                # 260816 3차 개정(중태님 지시): 이 합산 분모는 "세트 성립 판정용" cand(X문턱 게이트,
+                # 위 라인)가 아니라 별도로 계산 — 매칭표(MTBL) 후보 중 이 사이즈 체계에 실재하는
+                # 사이즈(B_IDX에 있음)이면서 재고 3장(_INV_SET_EXCESS_DEMAND_MIN) 이상이면 X문턱
+                # 미만이라도 전부 포함한다. 예: 재킷100의 매칭표 후보는 78·80·82·84인데, 80은
+                # 애초에 이 사이즈체계에 없는 사이즈(B_IDX에 없음)라 제외, 78(9장)·84(7장)는 X문턱
+                # (10장) 미만이라도 3장은 넘으므로 포함 — "세트 성립"엔 못 쓰지만 과다재고 여부를
+                # 가릴 땐 무시하기엔 너무 큰 재고라 분모에 반영.
+                _cand_all = [bs for bs in MTBL.get(ts, []) if bs in B_IDX
+                             and bi["size14"][B_IDX[bs]] >= _INV_SET_EXCESS_DEMAND_MIN]
+                _cand_sum = sum(bi["size14"][B_IDX[b]] for b in _cand_all)
                 if _top_stock >= _INV_SET_EXCESS_RATIO * _cand_sum:
                     excess_top.add(ts)
         # 260816 개정(중태님 지시) — 규칙(2) 합산기준: 팬츠 한 사이즈가 여러 상의 사이즈의 매칭
@@ -4618,8 +4637,12 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         # → 비교 분모를 "이 팬츠를 후보로 삼는 모든 매칭 상의 사이즈 재고의 합"으로 바꾸고,
         # 배율도 1.5배 → 1.3배로 낮춘다(합산기준은 분모가 커져 1.5배를 그대로 쓰면 과소검출됨 —
         # 1/1.2/1.3/1.5 실측 시뮬레이션 결과에 근거).
+        # 260816 3차 개정: 규칙(3)과 동일한 이유로, 이 분모도 X문턱 게이트된 후보만이 아니라
+        # 매칭표(MTBL) 전체 상의 사이즈(TMAP.values()) 중 이 팬츠를 후보로 삼는 것들을 재고 3장
+        # 이상이면 X문턱 무관하게 전부 포함해서 계산한다.
         for b in used:
-            _demand_sum = sum(ti["size14"][T_IDX[ts]] for ts, cand in cand_by_ts.items() if b in cand)
+            _demand_sum = sum(ti["size14"][T_IDX[ts]] for ts in TMAP.values()
+                               if b in MTBL.get(ts, []) and ti["size14"][T_IDX[ts]] >= _INV_SET_EXCESS_DEMAND_MIN)
             if bi["size14"][B_IDX[b]] >= _INV_SET_EXCESS_RATIO_BOT * _demand_sum:
                 excess_bot.add(b)
         # 260815: 구 1.3배 그룹비율 게이트 폐지. tl/bl에 규칙(1)의 미매칭 잔여와 규칙(2)/(3)의
