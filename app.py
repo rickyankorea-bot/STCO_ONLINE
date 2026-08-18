@@ -585,9 +585,14 @@ def yoy_frame(cur, prev, dim, order_list=None, season_rows=False, cy=None, extra
     (2026-08-07 버그수정: 예전엔 실제 선택연도와 무관하게 "25년"/"26년"이 고정으로
     찍혀서, 기준연도를 2025로 조회해도 표 헤더는 항상 26년으로 보이는 문제가 있었음.)
 
-    extra_rows=[(라벨, mask_fn), ...] (2026-08-07 추가)이면 G.TOTAL 바로 아래(시즌 7행보다도 위)에
-    임의 그룹 소계 행을 끼워 넣는다. mask_fn(f)는 cur/prev 각각에 적용되는 불리언 마스크 —
-    예: 유통채널별 표의 '담당자별 TOTAL' 행(mask_fn=담당자 일치 여부).
+    extra_rows=[(라벨, mask_fn), ...] (2026-08-07 추가)이면 **G.TOTAL 바로 아래**에 임의 그룹 소계
+    행을 끼워 넣는다. mask_fn(f)는 cur/prev 각각에 적용되는 불리언 마스크 —
+    예: 유통채널별 표의 '담당자별 TOTAL' 행, 시즌별/연차별 표의 '브랜드별 TOTAL' 행.
+
+    ⚠️ 260818 순서 변경: 예전엔 extra_rows가 **시즌 7행 다음**이었는데, 시즌별/연차별 한눈에 보기에
+    브랜드별 TOTAL을 넣으면서 중태님 지시대로 `G.TOTAL → 브랜드 5행 → 시즌 7행 → 연차행` 순이
+    되도록 **extra_rows를 시즌 7행보다 앞으로** 옮겼다. 기존 사용처(유통채널별 표)는 season_rows를
+    쓰지 않아서 이 순서 변경의 영향을 전혀 받지 않는다(행 구성 동일).
     """
     cur_lbl = f"{cy % 100:02d}년" if cy is not None else "26년"
     prev_lbl = f"{(cy - 1) % 100:02d}년" if cy is not None else "25년"
@@ -623,20 +628,7 @@ def yoy_frame(cur, prev, dim, order_list=None, season_rows=False, cy=None, extra
     rows.append(metrics(tot_c, tot_p, float(c["orig"].sum()), float(p["orig"].sum()),
                         float(c["qty"].sum()), float(p["qty"].sum()), tot_c, tot_p))
     index.append("G.TOTAL")
-    # 시즌 7행 (연차별 성과표 전용) — G.TOTAL 다음, 연차 행들 앞
-    if season_rows:
-        def _ssum(f, sns):
-            if f is None or f.empty or "시즌명" not in f.columns:
-                return 0.0, 0.0, 0.0
-            sub = f[f["시즌명"].astype(str).isin(sns)]
-            return (float(sub["_매출액"].sum()), float(sub["_최초가매출"].sum()),
-                    float(sub["_수량"].sum()))
-        for lbl, sns in SEASON_ROW_DEFS:
-            r26, o26, q26 = _ssum(cur, sns)
-            r25, o25, q25 = _ssum(prev, sns)
-            rows.append(metrics(r26, r25, o26, o25, q26, q25, tot_c, tot_p))
-            index.append(lbl)
-    # 담당자별 TOTAL 등 임의 그룹 소계 (2026-08-07 추가) — G.TOTAL·시즌행 다음, 개별 매장행 앞
+    # 임의 그룹 소계 (담당자별·브랜드별 TOTAL 등) — G.TOTAL 바로 아래(시즌 7행보다 위, 260818 순서 변경)
     if extra_rows:
         def _esum(f, mask_fn):
             if f is None or f.empty:
@@ -649,6 +641,19 @@ def yoy_frame(cur, prev, dim, order_list=None, season_rows=False, cy=None, extra
         for lbl, mask_fn in extra_rows:
             r26, o26, q26 = _esum(cur, mask_fn)
             r25, o25, q25 = _esum(prev, mask_fn)
+            rows.append(metrics(r26, r25, o26, o25, q26, q25, tot_c, tot_p))
+            index.append(lbl)
+    # 시즌 7행 (시즌별/연차별 한눈에 보기 전용) — 그 다음, 연차 행들 앞
+    if season_rows:
+        def _ssum(f, sns):
+            if f is None or f.empty or "시즌명" not in f.columns:
+                return 0.0, 0.0, 0.0
+            sub = f[f["시즌명"].astype(str).isin(sns)]
+            return (float(sub["_매출액"].sum()), float(sub["_최초가매출"].sum()),
+                    float(sub["_수량"].sum()))
+        for lbl, sns in SEASON_ROW_DEFS:
+            r26, o26, q26 = _ssum(cur, sns)
+            r25, o25, q25 = _ssum(prev, sns)
             rows.append(metrics(r26, r25, o26, o25, q26, q25, tot_c, tot_p))
             index.append(lbl)
     for k in keys:
@@ -722,7 +727,8 @@ _XL_SEASON_SUB = {"Z (공통)", "A (봄)", "B (여름)", "C (가을)", "D (겨�
 _XL_DELTA_SUBS = ("증감율", "증감", "편차")
 
 
-def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_labels=None):
+def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_labels=None,
+                       extra_row_fill="D6F0FA"):
     """표시용(포맷 문자열) DataFrame을 화면 서식 그대로 엑셀로 변환 (룰13).
 
     화면과 동일: 헤더 회색+볼드, 구분(인덱스) 연회색, 첫 행 노란 강조(G.TOTAL),
@@ -747,7 +753,8 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_label
         gt_fill = PatternFill("solid", fgColor="FFF2B8")
         sg_fill = PatternFill("solid", fgColor="E3ECF7")
         ss_fill = PatternFill("solid", fgColor="F4F8FC")
-        xr_fill = PatternFill("solid", fgColor="D6F0FA")   # 담당자별 TOTAL 등 extra_rows 하늘색
+        # extra_rows 강조색 — 담당자별 TOTAL은 하늘색, 브랜드별 TOTAL은 분홍(260818, 화면과 동일)
+        xr_fill = PatternFill("solid", fgColor=extra_row_fill)
         _extra_set = set(extra_row_labels or [])
         bcol = (n_idx + first_block_cols + 1) if first_block_cols else None
         subs = [c[-1] if isinstance(c, tuple) else str(c) for c in disp.columns]
@@ -800,11 +807,13 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_label
     return buf.getvalue()
 
 
-def yoy_excel_bytes(D, sheet="분석", first_block_cols=None, extra_row_labels=None):
+def yoy_excel_bytes(D, sheet="분석", first_block_cols=None, extra_row_labels=None,
+                    extra_row_fill="D6F0FA"):
     disp = D.copy()
     for col in disp.columns:
         disp[col] = [_fmt_cell(col, v) for v in disp[col]]
-    return styled_excel_bytes(disp, sheet, first_block_cols, extra_row_labels)   # 룰13: 화면 서식 그대로
+    return styled_excel_bytes(disp, sheet, first_block_cols, extra_row_labels,
+                              extra_row_fill=extra_row_fill)   # 룰13: 화면 서식 그대로
 
 
 # ── 공통(룰11 · 2026-07-31): 모든 조회 표 엑셀 다운로드 기본 제공 ──────────────
@@ -858,16 +867,58 @@ table.erp-tbl tbody tr:first-child th, table.erp-tbl tbody tr:first-child td{
 
 # 시즌 7행 강조 CSS (연차별 성과표 전용 — erp-season 클래스가 붙은 표에만 적용)
 #  2~3행(S/S·F/W TOTAL)=진한 블루그레이+볼드 · 4~8행(개별 시즌)=연한 톤+들여쓰기
-_SEASON_ROW_CSS = """
+def _season_css_class(key):
+    """표마다 고유한 CSS 클래스명 — 같은 화면에 시즌표가 2개 이상 있을 때 서로 간섭하지 않게."""
+    safe = "".join(ch if (ch.isalnum() or ch in "-_") else "-" for ch in str(key))
+    return f"erp-season-{safe}"
+
+
+def _extra_row_css(n, cls, color):
+    """extra_rows(담당자별·브랜드별 TOTAL) n행을 색칠하는 CSS — **맨 왼쪽 라벨 칸(th)까지** 칠한다.
+
+    extra_rows는 항상 G.TOTAL 바로 아래에 붙으므로 위치는 2 ~ (1+n)으로 고정이다.
+    Styler.set_properties로는 값 칸(td)만 칠해지고 인덱스 th가 빠지던 문제(260818 실측)와,
+    시즌행 CSS의 !important에 밀려 색이 안 보이던 문제를 한 번에 해결한다.
+    """
+    if not n:
+        return ""
+    return f"""
 <style>
-table.erp-season tbody tr:nth-child(2) th, table.erp-season tbody tr:nth-child(2) td,
-table.erp-season tbody tr:nth-child(3) th, table.erp-season tbody tr:nth-child(3) td{
-    background:#e5eefb !important;font-weight:700;}
-table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) th,
-table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) td{background:#f4f8fd !important;}
-table.erp-season tbody tr:nth-child(n+4):nth-child(-n+8) th{padding-left:18px;font-weight:500;}
+table.{cls} tbody tr:nth-child(n+2):nth-child(-n+{1 + n}) th,
+table.{cls} tbody tr:nth-child(n+2):nth-child(-n+{1 + n}) td{{
+    background:{color} !important;}}
 </style>
 """
+
+
+def _season_row_css(offset=0, cls="erp-season"):
+    """시즌 7행 강조 CSS. offset = 시즌행 **앞에 끼워 넣은 추가 행 수**(예: 브랜드별 TOTAL 5행).
+
+    260818: 시즌별/연차별 한눈에 보기에 브랜드별 TOTAL 5행이 G.TOTAL 바로 아래로 들어가면서
+    시즌 7행의 위치(nth-child)가 그만큼 밀렸다. 위치를 고정값으로 두면 엉뚱한 행에 색이
+    칠해지므로 offset을 받아 계산한다(offset=0이면 기존과 완전히 동일).
+
+    ⚠️ cls(표별 고유 클래스)를 반드시 넘길 것 — CSS는 클래스 단위라, 예전처럼 공통 `erp-season`에
+    걸면 **같은 화면의 다른 시즌표 CSS가 서로를 덮어써서** 엉뚱한 행에 색이 칠해진다(260818 실측:
+    offset이 다른 표 2개를 나란히 두니 뒤 표의 offset=0 규칙이 앞 표까지 덮어써 브랜드행이
+    시즌색으로 물들었음). 또 이 규칙은 `!important`라 Styler의 인라인 배경색(브랜드행 분홍)보다
+    우선하므로, 범위가 어긋나면 분홍색이 아예 안 보인다.
+    """
+    a, b = 2 + offset, 3 + offset            # S/S TOTAL · F/W TOTAL
+    c, d = 4 + offset, 8 + offset            # 개별 시즌 5행 (Z·A·B·C·D)
+    return f"""
+<style>
+table.{cls} tbody tr:nth-child({a}) th, table.{cls} tbody tr:nth-child({a}) td,
+table.{cls} tbody tr:nth-child({b}) th, table.{cls} tbody tr:nth-child({b}) td{{
+    background:#e5eefb !important;font-weight:700;}}
+table.{cls} tbody tr:nth-child(n+{c}):nth-child(-n+{d}) th,
+table.{cls} tbody tr:nth-child(n+{c}):nth-child(-n+{d}) td{{background:#f4f8fd !important;}}
+table.{cls} tbody tr:nth-child(n+{c}):nth-child(-n+{d}) th{{padding-left:18px;font-weight:500;}}
+</style>
+"""
+
+
+_SEASON_ROW_CSS = _season_row_css()   # 하위 호환용(추가 행이 없을 때의 기본값)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -984,10 +1035,36 @@ def render_styled_table(sty, extra_class="", extra_css=""):
                 unsafe_allow_html=True)
 
 
+_XR_FILL_SKY = "#d6f0fa"     # 담당자별 TOTAL 등 (2026-08-07)
+_XR_FILL_PINK = "#fbe4e8"    # 브랜드별 TOTAL (260818, 중태님 목업의 분홍)
+
+
+def _fs_brand_rows():
+    """시즌별/연차별 한눈에 보기의 '브랜드별 TOTAL' 5행 (260818 신설, 중태님 목업 그대로).
+
+    라벨·구분 기준은 주간보고 브랜드행·드릴다운3 브랜드 필터와 **같은 소스(_BRAND_MASKS)**를 쓴다
+    — 두 화면의 브랜드 숫자가 어긋나지 않게 하려는 것. 특히 **S/D/L = 브랜드 코드 S·D·L 3개
+    (STCO·DIEMS·GENDERLESS) 합산**(SDL_BRANDS)이다.
+
+    함수로 감싼 이유: _BRAND_MASKS가 이 파일 아래쪽(주간보고 섹션)에서 정의돼 있어서, 모듈 상수로
+    만들면 import 시점에 아직 없는 이름을 참조해 NameError가 난다. 호출 시점에 읽으면 안전하다.
+    """
+    return [
+        ("S/D/L",     _BRAND_MASKS["S/D/L"]),
+        ("CODI",      _BRAND_MASKS["CODI GALLERY"]),
+        ("ZERO",      _BRAND_MASKS["ZERO LOUNGE"]),
+        ("Gentlemen", _BRAND_MASKS["GENTLEMENS"]),
+        ("NORATED",   _BRAND_MASKS["NORATED"]),
+    ]
+
+
 def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False,
                month=None, blk_labels=("당월누계", "연간누계"), preview=False, big_title=False,
-               cy=None, extra_rows=None):
+               cy=None, extra_rows=None, extra_row_color=None):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
+
+    extra_row_color(260818 추가): extra_rows 강조 색. 안 주면 기존 하늘색(_XR_FILL_SKY).
+    시즌별/연차별 한눈에 보기의 '브랜드별 TOTAL'은 분홍(_XR_FILL_PINK)을 쓴다.
 
     extra=(컬럼명, {행라벨: 값})이면 표 맨 앞(행이름 바로 옆)에 텍스트 컬럼을 삽입
     — 예: 유통채널별 표의 '담당자'. 엑셀 다운로드에도 그대로 포함된다.
@@ -1029,6 +1106,8 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     # 2026-08-07 추가: extra_rows(담당자별 TOTAL 등)로 끼워 넣은 행은 화면·엑셀 모두 하늘색으로
     # 구분 표시 — 바로 아래 개별 매장행과 헷갈리지 않게. 실제로 D에 남아있는 라벨만 사용.
     _extra_lbls = [lbl for lbl, _ in extra_rows if lbl in D.index] if extra_rows else []
+    _row_color = extra_row_color or _XR_FILL_SKY
+    _row_fill_xl = _row_color.lstrip("#").upper()   # 엑셀용(룰13: 화면 서식 그대로)
     h1, h2 = st.columns([4, 1])
     # 2026-08-06 (중태님 컨펌): 제목↔자기표 간격은 좁히고, 이전표↔제목 간격은 넓혀서
     # "이 제목이 바로 아래 표 것"임을 분명하게 함. big_title=True면 글자도 1.5배.
@@ -1047,20 +1126,30 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
         h1.markdown(f"<div class='perf-title' style='{_tstyle}'>{title}{_NOTE_FLOAT}</div>",
                    unsafe_allow_html=True)
         h2.download_button("⬇ 엑셀", yoy_excel_bytes(D, title[:28], first_block_cols=nblk,
-                                                      extra_row_labels=_extra_lbls),
+                                                      extra_row_labels=_extra_lbls,
+                                                      extra_row_fill=_row_fill_xl),
                            file_name=f"{_safe_name(title)[:24]}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key=f"dl_{key}", use_container_width=True)
     sty = style_yoy(D)
     if nblk:
         sty = block_border(sty, nblk)   # 룰12: 당월/연간 경계 두꺼운 선
+    # 이 표에만 걸리는 고유 클래스 — 같은 화면의 다른 표와 CSS가 서로 간섭하지 않게(260818)
+    _tcls = _season_css_class(key)
+    _css = ""
     if _extra_lbls:
-        # 담당자별 TOTAL 등 extra_rows 행 — 하늘색으로 개별 매장행과 구분(중태님 요청, 2026-08-07)
-        sty = sty.set_properties(subset=pd.IndexSlice[_extra_lbls, :], **{"background-color": "#d6f0fa"})
+        # extra_rows 행 강조 — 담당자별 TOTAL은 하늘색(2026-08-07), 브랜드별 TOTAL은 분홍(260818).
+        # ⚠️ Styler.set_properties는 값 칸(td)만 칠하고 **맨 왼쪽 라벨 칸(인덱스 th)은 못 칠한다**
+        # (260818 실측). 게다가 시즌행 CSS가 !important라 인라인 스타일보다 세다 — 그래서
+        # extra_rows 행도 같은 방식(고유 클래스 + nth-child + !important)으로 칠한다.
+        # extra_rows는 항상 G.TOTAL 바로 다음이라 위치는 2 ~ (1+개수)로 고정.
+        _css += _extra_row_css(len(_extra_lbls), _tcls, _row_color)
     if season_rows:
-        render_styled_table(sty, extra_class="erp-season", extra_css=_SEASON_ROW_CSS)
+        # 시즌 7행 색·들여쓰기 위치는 앞에 끼워 넣은 extra_rows 수만큼 밀어준다(260818)
+        _css += _season_row_css(len(_extra_lbls), _tcls)
+        render_styled_table(sty, extra_class=f"erp-season {_tcls}", extra_css=_css)
     else:
-        render_styled_table(sty)   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
+        render_styled_table(sty, extra_class=_tcls, extra_css=_css)   # 룰3·4 + G.TOTAL 노란강조
 
 
 def _need_search(flag_key, submitted):
@@ -1331,7 +1420,8 @@ def render_flagship(df):
         # 채운 스켈레톤을 만들어서, 실제 51만 건 계산 없이 표 구조만 공짜로 보인다.
         _empty = pd.DataFrame()
         perf_table(_empty, _empty, "연차", None, "시즌별/연차별 한눈에 보기", "fs_preview",
-                   season_rows=True, month=(_empty, _empty), preview=True, cy=cy)
+                   season_rows=True, month=(_empty, _empty), preview=True, cy=cy,
+                   extra_rows=_fs_brand_rows(), extra_row_color=_XR_FILL_PINK)
         return
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
@@ -1378,9 +1468,13 @@ def render_flagship(df):
     age_order = sorted([a for a in base["연차"].dropna().unique()], key=_age_sort_key)
     # 표 이름 변경 (2026-07-31 컨펌): "연차별 성과표" → "시즌별/연차별 한눈에 보기"
     # 시즌 7행 포함 (목업 v3 컨펌): S/S TOTAL · F/W TOTAL + Z·A·B·C·D
+    # 260818(중태님 목업): G.TOTAL 바로 아래에 브랜드별 TOTAL 5행 추가(분홍) — 시즌 7행보다 위
     st.markdown("### 시즌별/연차별 한눈에 보기")
     perf_table(cur, prev, "연차", age_order, "시즌별/연차별 한눈에 보기", "age",
-               season_rows=True, month=(cur_m, prev_m), blk_labels=blk, cy=cy)
+               season_rows=True, month=(cur_m, prev_m), blk_labels=blk, cy=cy,
+               extra_rows=_fs_brand_rows(), extra_row_color=_XR_FILL_PINK)
+    st.caption("※ 분홍색 행 = 브랜드별 TOTAL(비중은 G.TOTAL 대비). **S/D/L은 브랜드 코드 S·D·L "
+               "3개(STCO·DIEMS·GENDERLESS) 합산**이에요. 위 '브랜드' 필터를 걸면 그 조건 안에서만 집계돼요.")
     pn_drilldown(cur, prev, cur_m, prev_m, "연차", age_order,
                  "시즌별/연차별 한눈에 보기", "pn_age", cy)
 
@@ -3377,15 +3471,99 @@ span.wk-pnclick:hover{background:#eaf2ff;border-radius:3px;}
 """
 
 
+# 숨은 버튼을 화면에서만 지우는 CSS(visually-hidden). **display:none을 쓰지 않는다** —
+# display:none이면 렌더 트리에서 빠져 innerText가 빈 문자열이 되는 브라우저가 있어, 라벨로 버튼을
+#찾던 로직이 조용히 실패한다(260818 "클릭해도 팝업이 안 뜬다" 리포트의 유력 원인 중 하나).
+_WK_PN_HIDE_PROPS = ("position:absolute!important;width:1px!important;height:1px!important;"
+                     "margin:-1px!important;padding:0!important;border:0!important;"
+                     "overflow:hidden!important;clip:rect(0 0 0 0)!important;opacity:0!important;")
+
+
+def _copy_shortcut_guard():
+    """표에서 값을 드래그해 **Ctrl+C(맥은 ⌘+C)로 복사할 때 'Clear caches' 창이 뜨는 것**을 막는다.
+
+    원인: Streamlit 자체 단축키에 `C` = Clear caches, `R` = Rerun 이 있는데, 이 핸들러가
+    Ctrl/⌘가 눌린 상태인지 보지 않아서 **복사 단축키까지 자기 단축키로 받아버린다**.
+    입력창 안에서는 무시되지만, 우리 표는 커스텀 HTML이라 입력창이 아니어서 그대로 걸린다
+    (260818 중태님 리포트: 팝업에서 품번을 복사하려니 Clear caches 확인창이 떴음).
+
+    대응: 부모 창의 keydown을 **캡처 단계에서 가장 먼저** 받아, 아래 둘 중 하나면
+    `stopImmediatePropagation()`으로 Streamlit 핸들러에 도달하지 못하게 한다.
+      ① Ctrl/⌘ 가 눌린 채로 C·X·V·A·R  → 복사/잘라내기/붙여넣기/전체선택/새로고침
+      ② **화면에 드래그로 선택된 텍스트가 있는 상태**에서 C·R
+    ②를 넣은 이유: 스트림릿 버전에 따라 Ctrl 감지 자체가 다르게 동작해(로컬 1.61에서는 Ctrl+C가
+    안 걸리는데 배포본에서는 걸렸음) ①만으로는 못 막는 경우가 있고, 한글 IME가 켜져 있으면
+    `e.key`가 'ㅊ'로 와서 글자 비교도 빗나가기 때문. "값을 선택해 둔 상태 = 복사하려는 중"이라는
+    상황 자체로 막는 게 가장 확실하다. 글자 비교도 `e.key`와 **물리 키(`e.code`)를 함께** 본다.
+
+    `preventDefault()`는 **하지 않으므로** 브라우저 기본 동작(복사·붙여넣기·전체선택·새로고침)은
+    그대로 동작한다. 아무것도 선택하지 않은 상태에서 그냥 `C`·`R`을 누르는 원래 Streamlit 단축키도
+    평소처럼 살아있다.
+    """
+    components.html(
+        """
+<script>
+(function(){
+  var w = window.parent;
+  if(!w || w.__wkCopyGuard) return;
+  w.__wkCopyGuard = true;
+  var KEYS  = ['c', 'x', 'v', 'a', 'r'];
+  var CODES = ['KeyC', 'KeyX', 'KeyV', 'KeyA', 'KeyR'];
+  function hasSelection(){
+    try{
+      var s = w.getSelection && w.getSelection();
+      return !!(s && String(s).length > 0);
+    }catch(err){ return false; }
+  }
+  function guard(e){
+    var k = (e.key || '').toLowerCase();
+    var isKey = KEYS.indexOf(k) >= 0 || CODES.indexOf(e.code || '') >= 0;
+    if(!isKey) return;
+    // ① 복사 계열 단축키  ② 텍스트를 선택해 둔 상태(= 복사하려는 중)
+    if((e.ctrlKey || e.metaKey) || hasSelection()){
+      e.stopImmediatePropagation();   // Streamlit 단축키만 차단 (기본 동작은 그대로)
+    }
+  }
+  // keydown 하나만 막으면 안 된다 — Streamlit 버전에 따라 keypress/keyup에서 단축키를 처리하기도
+  // 해서, 실제로 keydown만 막았을 때 창이 그대로 떴다(260818 로컬 실측). 3가지 모두 캡처한다.
+  ['keydown', 'keypress', 'keyup'].forEach(function(t){
+    w.addEventListener(t, guard, true);        // ← 캡처 단계: 다른 핸들러보다 먼저 받는다
+    if(w.document) w.document.addEventListener(t, guard, true);
+  });
+})();
+</script>
+""",
+        height=0,
+    )
+
+
+def _wk_pn_hide_css(ns, n):
+    """숨은 버튼 n개를 CSS로 즉시 감춘다 — st.button(key=...)이 컨테이너에 붙여주는
+    `.st-key-<key>` 클래스를 그대로 쓴다. JS를 기다리지 않아 깜빡임이 없다."""
+    sels = ", ".join(f".st-key-wkpnb_{ns}_{i}" for i in range(n))
+    return f"<style>{sels} {{{_WK_PN_HIDE_PROPS}}}</style>" if n else ""
+
+
 def _wk_pn_click_bridge(ns):
     """숫자 셀(span.wk-pnclick[data-wkpn="ns#i"]) 클릭 → 숨은 st.button 클릭으로 연결.
 
-    · 숨은 버튼은 라벨이 f"{_WK_PN_MARK}{ns}#{i}" 라서 JS가 innerText로 정확히 찾아낼 수 있다.
-    · 찾은 버튼의 컨테이너는 JS가 즉시 숨긴다(display:none) — 화면엔 안 보이지만
-      element.click()은 그대로 먹는다(실측 확인).
-    · 매 rerun마다 components.html이 다시 실행되고, 추가로 setInterval로 재바인딩해서
-      Streamlit이 DOM을 다시 그려도 클릭이 끊기지 않게 한다.
-    · height=0 → 화면 공간을 차지하지 않는다.
+    ⚠️ 260818 2차 수정 — 배포 화면에서 "클릭해도 팝업이 안 뜬다"는 리포트가 있어, 버튼을 찾는
+    방법을 통째로 더 튼튼하게 바꿨다. 되돌리기 전에 아래를 꼭 읽을 것.
+
+    버튼 찾기는 **3단계**로 시도한다(앞이 실패하면 뒤로 넘어감):
+      1순위 `.st-key-wkpnb_<ns>_<i>` — st.button(key=...)이 컨테이너에 자동으로 붙여주는 클래스.
+            보이지 않는 문자·라벨 렌더 방식과 **무관**해서 가장 안전하다(현재 배포 버전에 존재 확인).
+      2순위 라벨의 보이지 않는 표식(U+2063) 매칭 — 구버전 Streamlit(st-key 클래스가 없던 시절) 대비.
+            읽을 때 innerText가 아니라 **textContent**를 쓴다(렌더 여부와 무관하게 항상 값이 나옴).
+      3순위 문서 순서 — 표식이 붙은 버튼들의 순서가 곧 셀 순서(#0, #1, …)라, 라벨을 전혀 못 읽어도
+            i번째 버튼을 누르면 된다.
+
+    숨기기는 파이썬이 내보낸 CSS(_wk_pn_hide_css)가 담당하고, 이 스크립트는 st-key 클래스가 없는
+    구버전을 위해 한 번 더 인라인 스타일로 감춘다(둘 다 display:none이 아님).
+
+    매 rerun마다 다시 실행되고, setInterval + MutationObserver로 재바인딩해서 Streamlit이 DOM을
+    다시 그려도 클릭이 끊기지 않는다. height=0이라 자리도 안 차지한다. 이 스크립트가 통째로
+    막히더라도 표는 그대로 보이고, 표 아래 '숫자 클릭이 안 될 때' 폴백 셀렉트로 같은 팝업을 열 수 있다.
     """
     components.html(
         """
@@ -3394,30 +3572,68 @@ def _wk_pn_click_bridge(ns):
   var doc = window.parent && window.parent.document;
   if(!doc) return;
   var MARK = "\\u2063wkpn\\u2063";
-  function hideAndIndex(){
-    var map = {};
-    doc.querySelectorAll('button').forEach(function(b){
-      var t = (b.innerText || '').trim();
-      if(t.indexOf(MARK) !== 0) return;
-      map[t.slice(MARK.length)] = b;
+  var HIDE = "position:absolute!important;width:1px!important;height:1px!important;" +
+             "margin:-1px!important;padding:0!important;border:0!important;" +
+             "overflow:hidden!important;clip:rect(0 0 0 0)!important;opacity:0!important;";
+
+  // 표식이 붙은 버튼들을 문서 순서대로 모으고(2·3순위용), 구버전 대비로 한 번 더 감춘다.
+  function collect(){
+    var list = [];
+    var btns = doc.querySelectorAll('button');
+    for(var i = 0; i < btns.length; i++){
+      var b = btns[i];
+      var t = (b.textContent || '').trim();          // innerText 아님(빈값 위험)
+      if(t.indexOf(MARK) !== 0) continue;
+      list.push({key: t.slice(MARK.length), el: b});
       var box = b.closest('[data-testid="stElementContainer"]') || b.parentElement;
-      if(box && box.style.display !== 'none'){ box.style.display = 'none'; }
-    });
-    return map;
+      if(box && box.getAttribute('data-wkpnhidden') !== '1'){
+        box.setAttribute('data-wkpnhidden', '1');
+        box.setAttribute('style', (box.getAttribute('style') || '') + HIDE);
+      }
+    }
+    return list;
   }
+
+  function fire(want){
+    if(!want) return false;
+    var at = want.indexOf('#');
+    var ns = at < 0 ? want : want.slice(0, at);
+    var ix = at < 0 ? -1 : parseInt(want.slice(at + 1), 10);
+
+    // 1순위 — st.button(key=...)이 붙여주는 st-key 클래스로 정확히 지목
+    if(ix >= 0){
+      var box = doc.querySelector('.st-key-wkpnb_' + ns + '_' + ix);
+      var b1 = box && box.querySelector('button');
+      if(b1){ b1.click(); return true; }
+    }
+    var list = collect();
+    // 2순위 — 라벨 표식 매칭
+    for(var i = 0; i < list.length; i++){
+      if(list[i].key === want){ list[i].el.click(); return true; }
+    }
+    // 3순위 — 문서 순서
+    if(ix >= 0 && list[ix]){ list[ix].el.click(); return true; }
+    return false;
+  }
+
   function bind(){
-    var map = hideAndIndex();
-    doc.querySelectorAll('span.wk-pnclick').forEach(function(el){
-      if(el.dataset.wkbound === '1') return;
-      el.dataset.wkbound = '1';
-      el.addEventListener('click', function(){
-        var b = hideAndIndex()[el.getAttribute('data-wkpn')];
-        if(b) b.click();
-      });
-    });
+    collect();
+    var spans = doc.querySelectorAll('span.wk-pnclick');
+    for(var i = 0; i < spans.length; i++){
+      (function(el){
+        if(el.getAttribute('data-wkbound') === '1') return;
+        el.setAttribute('data-wkbound', '1');
+        el.addEventListener('click', function(){ fire(el.getAttribute('data-wkpn')); });
+      })(spans[i]);
+    }
   }
+
   bind();
   if(!window.__wkpnTimer){ window.__wkpnTimer = setInterval(bind, 400); }
+  if(!window.__wkpnObs && doc.body){
+    window.__wkpnObs = new MutationObserver(function(){ bind(); });
+    window.__wkpnObs.observe(doc.body, {childList: true, subtree: true});
+  }
 })();
 </script>
 """,
@@ -3447,7 +3663,20 @@ def _wk_pn_top_detail(sub, top_n=3, limit=None):
     if not need.issubset(set(sub.columns)):
         return empty, 0
 
-    g = sub.groupby("품번", observed=True)
+    # 260818 2차 보강: load_db가 메모리 절감을 위해 품번·매장명을 category дtype으로 읽는 경우가 있어,
+    # 그대로 groupby/map 하면 카테고리 정렬·매핑이 예상과 다르게 동작할 수 있다. 여기서 한 번
+    # 문자열·숫자로 정규화한 작업용 프레임을 만들어 쓴다(원본 sub은 건드리지 않음).
+    scol = "매장명" if "매장명" in sub.columns else ("매장코드" if "매장코드" in sub.columns else None)
+    work = pd.DataFrame({
+        "품번": sub["품번"].astype(str).str.strip(),
+        "_수량": pd.to_numeric(sub["_수량"], errors="coerce").fillna(0.0).astype("float64"),
+        "_매출액": pd.to_numeric(sub["_매출액"], errors="coerce").fillna(0.0).astype("float64"),
+        "_최초가매출": pd.to_numeric(sub["_최초가매출"], errors="coerce").fillna(0.0).astype("float64"),
+    })
+    if scol is not None:
+        work[scol] = sub[scol].astype(str).str.strip()
+
+    g = work.groupby("품번", observed=True)
     base = pd.DataFrame({
         "판매수량": g["_수량"].sum(),
         "실판가": g["_매출액"].sum(),
@@ -3468,10 +3697,9 @@ def _wk_pn_top_detail(sub, top_n=3, limit=None):
     base = base.reset_index()
 
     # ── 품번 × 매장 집계 → 품번별 상위 N개 매장 ────────────────────────────────
-    scol = "매장명" if "매장명" in sub.columns else ("매장코드" if "매장코드" in sub.columns else None)
     store_cols = {}
     if scol is not None:
-        keep = sub[sub["품번"].astype(str).isin(set(base["품번"].astype(str)))]
+        keep = work[work["품번"].isin(set(base["품번"]))]
         sg = keep.groupby(["품번", scol], observed=True).agg(
             q=("_수량", "sum"), r=("_매출액", "sum"), o=("_최초가매출", "sum")).reset_index()
         sg = sg.sort_values(["품번", "q", "r"], ascending=[True, False, False])
@@ -3558,36 +3786,53 @@ _WK_PN_SCREEN_LIMIT = 30   # 화면 표시 품번 수(중태님 확정) — 엑�
 
 
 def _wk_pn_popup(sub, title, caption, key_prefix, on_dismiss=None):
-    """품번별 판매현황 + 상위 3개 매장 팝업(첨부 양식). 화면=상위 30개 / 엑셀=전체."""
-    det_screen, total_n = _wk_pn_top_detail(sub, top_n=3, limit=_WK_PN_SCREEN_LIMIT)
-    tot = _wk_pn_total_row(sub)
+    """품번별 판매현황 + 상위 3개 매장 팝업(첨부 양식). 화면=상위 30개 / 엑셀=전체.
+
+    260818 2차: 집계·렌더를 try/except로 감쌌다. 실데이터의 예상 못 한 값(빈 매장명, 이상한
+    dtype 등)으로 예외가 나면 **팝업이 조용히 안 뜨는 대신** 팝업 안에 원인을 보여준다 —
+    "클릭했는데 아무 일도 안 일어난다"가 가장 진단하기 어려운 상태라 일부러 드러낸다.
+    """
+    try:
+        det_screen, total_n = _wk_pn_top_detail(sub, top_n=3, limit=_WK_PN_SCREEN_LIMIT)
+        tot = _wk_pn_total_row(sub)
+        err = None
+    except Exception as e:                                        # noqa: BLE001
+        det_screen, total_n, tot, err = pd.DataFrame(), 0, None, e
 
     @_dialog_or_expander(title, on_dismiss=on_dismiss)
     def _popup():
         st.caption(caption)
+        if err is not None:
+            st.error(f"품번별 상세를 만드는 중 오류가 났어요 — 이 문구를 그대로 전달해 주세요.\n\n"
+                     f"`{type(err).__name__}: {err}`")
+            return
         if det_screen.empty:
             st.info("해당 조건에 판매 데이터가 없어요.")
             return
-        disp = _wk_pn_fmt_table(det_screen, top_n=3, total_row=tot)
-        shown = len(det_screen)
-        h1, h2 = st.columns([5, 1.3])
-        h1.markdown(
-            f"<span style='font-size:0.82rem;color:#555;'>품번 {total_n:,}개 중 실판가 큰 순 "
-            f"{shown:,}개 표시 · 상위 매장은 <b>판매수량</b> 기준 · 맨 윗줄 합계는 전체 "
-            f"{total_n:,}개 기준(클릭한 표 숫자와 같아야 정상)</span>"
-            "<span style='float:right;color:#888;font-size:0.78rem;white-space:nowrap;'>"
-            "[금액: 원 / VAT+]</span>", unsafe_allow_html=True)
-        # 엑셀은 전체 품번 — 화면과 같은 함수·같은 서식(룰13)
-        det_all, _ = _wk_pn_top_detail(sub, top_n=3, limit=None)
-        xls = _wk_pn_fmt_table(det_all, top_n=3, total_row=tot)
-        h2.download_button("⬇ 엑셀(전체)", table_excel_bytes(xls, "품번별 상세", first_block_cols=6),
-                           file_name=f"{_safe_name(title)}_품번별상세.xlsx", mime=XLSX_MIME,
-                           key=f"{key_prefix}_dl", use_container_width=True)
-        sty = block_border(disp.style.set_properties(**{"text-align": "right"}), 6)   # 룰12: 두 블록 경계선
-        render_styled_table(sty)   # 룰6: 첫 행(=합계) 노란 강조 — 다른 표들과 동일한 의미로 맞춤
-        if total_n > shown:
-            st.caption(f"※ 화면엔 상위 {shown:,}개만 보여요 — 나머지 {total_n - shown:,}개까지 전부 보려면 "
-                       "위 '⬇ 엑셀(전체)'를 받아주세요(합계 행은 언제나 전체 기준).")
+        try:
+            disp = _wk_pn_fmt_table(det_screen, top_n=3, total_row=tot)
+            shown = len(det_screen)
+            h1, h2 = st.columns([5, 1.3])
+            h1.markdown(
+                f"<span style='font-size:0.82rem;color:#555;'>품번 {total_n:,}개 중 실판가 큰 순 "
+                f"{shown:,}개 표시 · 상위 매장은 <b>판매수량</b> 기준 · 맨 윗줄 합계는 전체 "
+                f"{total_n:,}개 기준(클릭한 표 숫자와 같아야 정상)</span>"
+                "<span style='float:right;color:#888;font-size:0.78rem;white-space:nowrap;'>"
+                "[금액: 원 / VAT+]</span>", unsafe_allow_html=True)
+            # 엑셀은 전체 품번 — 화면과 같은 함수·같은 서식(룰13)
+            det_all, _ = _wk_pn_top_detail(sub, top_n=3, limit=None)
+            xls = _wk_pn_fmt_table(det_all, top_n=3, total_row=tot)
+            h2.download_button("⬇ 엑셀(전체)", table_excel_bytes(xls, "품번별 상세", first_block_cols=6),
+                               file_name=f"{_safe_name(title)}_품번별상세.xlsx", mime=XLSX_MIME,
+                               key=f"{key_prefix}_dl", use_container_width=True)
+            sty = block_border(disp.style.set_properties(**{"text-align": "right"}), 6)   # 룰12: 경계선
+            render_styled_table(sty)   # 룰6: 첫 행(=합계) 노란 강조 — 다른 표들과 동일한 의미로 맞춤
+            if total_n > shown:
+                st.caption(f"※ 화면엔 상위 {shown:,}개만 보여요 — 나머지 {total_n - shown:,}개까지 전부 "
+                           "보려면 위 '⬇ 엑셀(전체)'를 받아주세요(합계 행은 언제나 전체 기준).")
+        except Exception as e:                                    # noqa: BLE001
+            st.error(f"표를 그리는 중 오류가 났어요 — 이 문구를 그대로 전달해 주세요.\n\n"
+                     f"`{type(e).__name__}: {e}`")
     _popup()
 
 
@@ -3716,7 +3961,8 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
                        file_name=f"{_safe_name(label)}_아이템그룹별상세.xlsx", mime=XLSX_MIME,
                        key=f"wk_dl_item_{label}", use_container_width=True)
     if click_ns:
-        st.markdown(_WK_PN_CSS, unsafe_allow_html=True)
+        # 링크 스타일 + 숨은 버튼 감추기 CSS를 표보다 먼저 내보낸다(버튼이 잠깐 보였다 사라지는 것 방지)
+        st.markdown(_WK_PN_CSS + _wk_pn_hide_css(click_ns, len(rows)), unsafe_allow_html=True)
     render_styled_table(sty)
     if not click_ns:
         return
@@ -3728,6 +3974,17 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
         if st.button(f"{_WK_PN_MARK}{click_ns}#{i}", key=f"wkpnb_{click_ns}_{i}"):
             picked = i
     _wk_pn_click_bridge(click_ns)
+
+    # 260818 2차: JS 브리지가 어떤 이유로든 안 먹는 환경(사내 보안 확장, iframe 차단 등)을 대비한
+    # **항상 동작하는 폴백**. 접힌 상태라 평소엔 눈에 거의 안 띄고, 펴서 아이템을 고르면 숫자 클릭과
+    # 똑같은 팝업이 뜬다. (숫자 클릭이 안 뜬다는 리포트가 있어 신설 — 기능이 조용히 실패하지 않도록)
+    _row_names = [k[1] for k, _ in rows]
+    with st.expander("🔍 숫자 클릭이 안 될 때 — 아이템을 골라서 품번별 상세 보기", expanded=False):
+        fb1, fb2 = st.columns([3, 1])
+        fb_sel = fb1.selectbox("아이템", _row_names, key=f"wkpn_fb_sel_{click_ns}",
+                               label_visibility="collapsed")
+        if fb2.button("상세보기", key=f"wkpn_fb_go_{click_ns}", use_container_width=True):
+            picked = _row_names.index(fb_sel)
 
     # 열려 있는 팝업은 "행 인덱스"가 아니라 **아이템그룹 이름**으로 기억한다 — 위쪽 필터(매장·연차 등)를
     # 바꾸면 표의 행 구성이 달라져서, 인덱스로 기억하면 엉뚱한 아이템의 팝업이 뜰 수 있기 때문.
@@ -7668,6 +7925,7 @@ def main():
     st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
     # 전역 여백 축소 + Apple 스타일 테마(2026-08-05) — 배경/폰트/버튼/사이드바 메뉴
     st.markdown(_APPLE_CSS, unsafe_allow_html=True)
+    _copy_shortcut_guard()   # 260818: 표에서 Ctrl+C로 복사할 때 'Clear caches'가 뜨는 것 차단
     # ── 로그인 게이트 ──────────────────────────────────────────────
     ensure_users_table()
     if not st.session_state.get("auth_user"):
