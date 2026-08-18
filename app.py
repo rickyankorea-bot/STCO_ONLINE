@@ -3285,10 +3285,16 @@ def weekly_excel_bytes(rows, bm, by, asof, cy, py):
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
-def _wk_style_table(bm, by, idx, cy, py):
+def _wk_style_table(bm, by, idx, cy, py, click_ns=None):
     """주간보고 프레임(당월+누계 · 동일 컬럼)으로 (bm,by,idx)를 스타일 표로 변환. 메인표·담당별표 공용.
 
     반환: (Styler, 표시용 DataFrame) — 표시용 DF는 엑셀 다운로드(룰11)에 사용.
+
+    click_ns(2026-08-18 추가): 문자열을 주면 **당월 실적의 '올해 실판가' 컬럼 셀만** 클릭 가능한
+    링크(<span class="wk-pnclick">)로 감싼다. 이 표를 그리는 호출부에서 _wk_pn_click_bridge()로
+    숨은 버튼과 연결해줘야 실제로 팝업이 뜬다(아이템그룹별 상세표 전용 — 다른 표는 기본값 None
+    이라 지금까지와 완전히 동일하게 렌더된다). 엑셀 다운로드에 쓰는 disp는 링크를 씌우기 **전**
+    값을 그대로 돌려주므로 다운로드 파일엔 HTML 태그가 섞이지 않는다.
     """
     MON, YTD = "당월 실적", "연간누계"
     sy, sc = str(py)[-2:], str(cy)[-2:]   # 룰2: 연도 2자리
@@ -3321,12 +3327,268 @@ def _wk_style_table(bm, by, idx, cy, py):
             return ["" for _ in D[col]]
         return ["color:#c62828;font-weight:600" if (pd.notnull(v) and v < 0)
                 else ("color:#1f8a4c;font-weight:600" if (pd.notnull(v) and v > 0) else "") for v in D[col]]
-    sty = disp.style
+
+    # 260818: 클릭 가능 셀(당월 올해 실판가)만 링크로 감싼다 — 엑셀용 disp는 건드리지 않기 위해
+    # style 전용 사본(sdisp)을 따로 만든다. Styler는 셀 값을 그대로(escape 없이) HTML에 넣으므로
+    # <span>이 그대로 살아난다(pandas 2.x·3.x 양쪽에서 확인).
+    sdisp = disp
+    if click_ns:
+        sdisp = disp.copy()
+        _ccol = (MON, f"{sc}실판가")
+        sdisp[_ccol] = [
+            (v if (v is None or str(v) == "–")
+             else f"<span class='wk-pnclick' data-wkpn='{click_ns}#{i}'>{v}</span>")
+            for i, v in enumerate(disp[_ccol])
+        ]
+    sty = sdisp.style
     for col in D.columns:
         if col[1] in ("증감율", "편차"):
             sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
     sty = block_border(sty.set_properties(**{"text-align": "right"}), len(mcols))   # 룰12: 당월/누계 경계선
     return sty, disp
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 260818 신규 — 아이템그룹별 상세표의 "당월 올해 실판가" 숫자 클릭 → 품번별 상세 팝업
+#   (A) 그 조건·그 아이템그룹의 품번별 판매현황
+#   (B) 품번별 "판매수량 기준" 상위 3개 매장(매장명·실판가·판가율)
+#
+# ⚠️ 클릭 방식에 대한 설계 메모 (실측 근거 있음, 바꾸기 전 반드시 읽을 것)
+#   메인 표들은 커스텀 HTML(render_styled_table)로 그려져서 Streamlit이 셀 클릭을 직접
+#   받지 못한다. 후보가 둘이었는데 로컬 Streamlit + Playwright로 직접 실험해 확인했다.
+#     ① <a href="?param=..."> 쿼리파라미터 링크 → 클릭 시 **페이지가 통째로 새로 뜨면서
+#        session_state가 전부 초기화됨**(카운터 3 → 0으로 리셋되는 것 확인). 이 앱은
+#        로그인·조회게이트(_need_search)·각종 필터가 전부 session_state에 있어서 못 쓴다.
+#     ② 숨은 st.button을 만들어 두고, 셀 클릭을 그 버튼 클릭으로 넘기는 브리지(아래 방식)
+#        → **리로드 없음·session_state 그대로 유지**(카운터 3 유지, URL 불변, 연속 클릭도 정상).
+#   그래서 ②를 채택했다. 브리지는 순수 클라이언트(JS)라 파이썬 쪽 메모리·연산 부담이 0이고,
+#   설령 JS가 막히더라도 표는 그대로 보이고 팝업만 안 뜨는 정도로 안전하게 실패한다.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# 숨은 버튼 라벨에 붙이는 보이지 않는 표식(U+2063 INVISIBLE SEPARATOR) — JS가 이 표식으로
+# 버튼을 찾는다. st.container(key=...)의 st-key- 클래스에 의존하지 않으므로 스트림릿 버전을 타지 않음.
+_WK_PN_MARK = "\u2063wkpn\u2063"   # U+2063 INVISIBLE SEPARATOR로 감싼 표식
+
+_WK_PN_CSS = """
+<style>
+span.wk-pnclick{color:#0071e3;cursor:pointer;border-bottom:1px dashed rgba(0,113,227,.55);}
+span.wk-pnclick:hover{background:#eaf2ff;border-radius:3px;}
+</style>
+"""
+
+
+def _wk_pn_click_bridge(ns):
+    """숫자 셀(span.wk-pnclick[data-wkpn="ns#i"]) 클릭 → 숨은 st.button 클릭으로 연결.
+
+    · 숨은 버튼은 라벨이 f"{_WK_PN_MARK}{ns}#{i}" 라서 JS가 innerText로 정확히 찾아낼 수 있다.
+    · 찾은 버튼의 컨테이너는 JS가 즉시 숨긴다(display:none) — 화면엔 안 보이지만
+      element.click()은 그대로 먹는다(실측 확인).
+    · 매 rerun마다 components.html이 다시 실행되고, 추가로 setInterval로 재바인딩해서
+      Streamlit이 DOM을 다시 그려도 클릭이 끊기지 않게 한다.
+    · height=0 → 화면 공간을 차지하지 않는다.
+    """
+    components.html(
+        """
+<script>
+(function(){
+  var doc = window.parent && window.parent.document;
+  if(!doc) return;
+  var MARK = "\\u2063wkpn\\u2063";
+  function hideAndIndex(){
+    var map = {};
+    doc.querySelectorAll('button').forEach(function(b){
+      var t = (b.innerText || '').trim();
+      if(t.indexOf(MARK) !== 0) return;
+      map[t.slice(MARK.length)] = b;
+      var box = b.closest('[data-testid="stElementContainer"]') || b.parentElement;
+      if(box && box.style.display !== 'none'){ box.style.display = 'none'; }
+    });
+    return map;
+  }
+  function bind(){
+    var map = hideAndIndex();
+    doc.querySelectorAll('span.wk-pnclick').forEach(function(el){
+      if(el.dataset.wkbound === '1') return;
+      el.dataset.wkbound = '1';
+      el.addEventListener('click', function(){
+        var b = hideAndIndex()[el.getAttribute('data-wkpn')];
+        if(b) b.click();
+      });
+    });
+  }
+  bind();
+  if(!window.__wkpnTimer){ window.__wkpnTimer = setInterval(bind, 400); }
+})();
+</script>
+""",
+        height=0,
+    )
+
+
+def _wk_pn_top_detail(sub, top_n=3, limit=None):
+    """조건에 맞는 원본 거래행(sub)에서 품번별 판매현황 + 품번별 상위 N개 매장을 한 표로 만든다.
+
+    컬럼(중태님 첨부 양식 그대로):
+      품번 · 판매수량 · 실판가 · 최초판매가 · 평균실판가 · 판가율
+      + 매장명1 · 실판가 · 판가율 / 매장명2 · … / 매장명3 · …
+
+    계산 정의는 앱 전체와 동일하게 맞춤(_agg_detail·_wk_metrics와 같은 원리):
+      · 판매수량 = _수량 합 · 실판가 = _매출액 합
+      · 최초판매가 = _최초가매출 ÷ _수량 (품번 단위 가중평균 단가)
+      · 평균실판가 = _매출액 ÷ _수량      (품번 단위 가중평균 단가)
+      · 판가율   = _매출액 ÷ _최초가매출  (가중 판가율, 룰과 동일)
+    상위 매장은 **판매수량 기준**(중태님 확정, 2026-08-18)이며, 수량이 같으면 실판가가 큰 쪽이
+    앞선다. 정렬은 품번 실판가 큰 순, limit을 주면 화면용으로 상위 N개만 잘라낸다(엑셀은 전체).
+    """
+    empty = pd.DataFrame()
+    if sub is None or sub.empty or "품번" not in sub.columns:
+        return empty, 0
+    need = {"_수량", "_매출액", "_최초가매출"}
+    if not need.issubset(set(sub.columns)):
+        return empty, 0
+
+    g = sub.groupby("품번", observed=True)
+    base = pd.DataFrame({
+        "판매수량": g["_수량"].sum(),
+        "실판가": g["_매출액"].sum(),
+        "_orig": g["_최초가매출"].sum(),
+    })
+    base = base[(base["판매수량"] != 0) | (base["실판가"] != 0)]
+    if base.empty:
+        return empty, 0
+    q = pd.to_numeric(base["판매수량"], errors="coerce").replace(0, np.nan)
+    o = pd.to_numeric(base["_orig"], errors="coerce").replace(0, np.nan)
+    base["최초판매가"] = base["_orig"] / q
+    base["평균실판가"] = base["실판가"] / q
+    base["판가율"] = base["실판가"] / o
+    base = base.sort_values("실판가", ascending=False)
+    total_n = len(base)
+    if limit is not None and total_n > limit:
+        base = base.head(limit)
+    base = base.reset_index()
+
+    # ── 품번 × 매장 집계 → 품번별 상위 N개 매장 ────────────────────────────────
+    scol = "매장명" if "매장명" in sub.columns else ("매장코드" if "매장코드" in sub.columns else None)
+    store_cols = {}
+    if scol is not None:
+        keep = sub[sub["품번"].astype(str).isin(set(base["품번"].astype(str)))]
+        sg = keep.groupby(["품번", scol], observed=True).agg(
+            q=("_수량", "sum"), r=("_매출액", "sum"), o=("_최초가매출", "sum")).reset_index()
+        sg = sg.sort_values(["품번", "q", "r"], ascending=[True, False, False])
+        sg["_rank"] = sg.groupby("품번", observed=True).cumcount()
+        sg = sg[sg["_rank"] < top_n]
+        for i in range(top_n):
+            part = sg[sg["_rank"] == i].set_index("품번")
+            idx = base["품번"]
+            store_cols[f"매장명{i+1}"] = idx.map(part[scol]).values
+            store_cols[f"실판가{i+1}"] = idx.map(part["r"]).values
+            _o = idx.map(part["o"]).replace(0, np.nan).values
+            store_cols[f"판가율{i+1}"] = pd.Series(idx.map(part["r"]).values) / pd.Series(_o)
+    else:
+        for i in range(top_n):
+            store_cols[f"매장명{i+1}"] = np.nan
+            store_cols[f"실판가{i+1}"] = np.nan
+            store_cols[f"판가율{i+1}"] = np.nan
+
+    out = base[["품번", "판매수량", "실판가", "최초판매가", "평균실판가", "판가율"]].copy()
+    for k, v in store_cols.items():
+        out[k] = np.asarray(v)
+    return out, total_n
+
+
+def _wk_pn_total_row(sub):
+    """팝업 맨 위 '합계' 행 — 화면에 몇 개만 보여주든 항상 **그 조건 전체** 기준으로 계산한다.
+
+    이 합계의 '실판가'는 사용자가 클릭한 표 셀(당월 올해 실판가)의 원래 금액과 같아야 한다 —
+    팝업이 그 숫자를 품번으로 쪼갠 것이기 때문. (검증용으로도 쓰라고 일부러 맨 위에 둠)
+    """
+    if sub is None or sub.empty:
+        return None
+    qty = float(pd.to_numeric(sub["_수량"], errors="coerce").fillna(0).sum())
+    rev = float(pd.to_numeric(sub["_매출액"], errors="coerce").fillna(0).sum())
+    org = float(pd.to_numeric(sub["_최초가매출"], errors="coerce").fillna(0).sum())
+    return {
+        "판매수량": qty, "실판가": rev,
+        "최초판매가": (org / qty) if qty else np.nan,
+        "평균실판가": (rev / qty) if qty else np.nan,
+        "판가율": (rev / org) if org else np.nan,
+    }
+
+
+def _wk_pn_fmt_table(det, top_n=3, total_row=None):
+    """_wk_pn_top_detail 결과를 화면·엑셀 공용의 2단 헤더 표시용 DataFrame으로 포맷.
+
+    total_row(dict)를 주면 맨 윗줄에 '합계' 행을 붙인다 — 공통표시룰(룰6)상 표의 첫 행은
+    화면·엑셀 모두 노란색으로 강조되므로, 첫 행이 합계여야 다른 표들과 의미가 일관된다.
+
+    ※ 상위 매장 쪽 '실판가'·'판가율' 헤더는 첨부 양식대로 숫자 없이 그대로 보여야 하는데,
+      pandas 컬럼은 중복되면 다루기 곤란해서 뒤에 보이지 않는 문자(U+200B)를 1~2개 붙여
+      **화면 표기는 동일하게, 내부 키는 유일하게** 만든다.
+    """
+    G1, G2 = "품번별 판매 현황", f"판매 상위 {top_n}개 매장"
+    cols, data = [], {}
+    n = len(det)
+
+    def _num(v, pct=False):
+        if v is None or pd.isna(v):
+            return "–"
+        return f"{v*100:.1f}%" if pct else f"{v:,.0f}"
+
+    def put(grp, name, vals, head=None):
+        key = (grp, name)
+        cols.append(key)
+        data[key] = ([head] if total_row is not None else []) + list(vals)
+
+    put(G1, "품번", [str(v) for v in det["품번"]], head="전체")   # 맨 왼쪽 구분칸이 이미 "합계"
+    for c in ("판매수량", "실판가", "최초판매가", "평균실판가"):
+        put(G1, c, [_num(v) for v in det[c]], head=_num((total_row or {}).get(c)))
+    put(G1, "판가율", [_num(v, pct=True) for v in det["판가율"]],
+        head=_num((total_row or {}).get("판가율"), pct=True))
+    for i in range(1, top_n + 1):
+        pad = "\u200b" * (i - 1)      # 화면엔 안 보이는 중복 방지용 꼬리표(ZERO WIDTH SPACE)
+        put(G2, f"매장명{i}", ["–" if pd.isna(v) else str(v) for v in det[f"매장명{i}"]], head="–")
+        put(G2, f"실판가{pad}", [_num(v) for v in det[f"실판가{i}"]], head="–")
+        put(G2, f"판가율{pad}", [_num(v, pct=True) for v in det[f"판가율{i}"]], head="–")
+    disp = pd.DataFrame(data, columns=pd.MultiIndex.from_tuples(cols))
+    disp.index = (["합계"] if total_row is not None else []) + [str(i) for i in range(1, n + 1)]
+    return disp
+
+
+_WK_PN_SCREEN_LIMIT = 30   # 화면 표시 품번 수(중태님 확정) — 엑셀은 전체
+
+
+def _wk_pn_popup(sub, title, caption, key_prefix, on_dismiss=None):
+    """품번별 판매현황 + 상위 3개 매장 팝업(첨부 양식). 화면=상위 30개 / 엑셀=전체."""
+    det_screen, total_n = _wk_pn_top_detail(sub, top_n=3, limit=_WK_PN_SCREEN_LIMIT)
+    tot = _wk_pn_total_row(sub)
+
+    @_dialog_or_expander(title, on_dismiss=on_dismiss)
+    def _popup():
+        st.caption(caption)
+        if det_screen.empty:
+            st.info("해당 조건에 판매 데이터가 없어요.")
+            return
+        disp = _wk_pn_fmt_table(det_screen, top_n=3, total_row=tot)
+        shown = len(det_screen)
+        h1, h2 = st.columns([5, 1.3])
+        h1.markdown(
+            f"<span style='font-size:0.82rem;color:#555;'>품번 {total_n:,}개 중 실판가 큰 순 "
+            f"{shown:,}개 표시 · 상위 매장은 <b>판매수량</b> 기준 · 맨 윗줄 합계는 전체 "
+            f"{total_n:,}개 기준(클릭한 표 숫자와 같아야 정상)</span>"
+            "<span style='float:right;color:#888;font-size:0.78rem;white-space:nowrap;'>"
+            "[금액: 원 / VAT+]</span>", unsafe_allow_html=True)
+        # 엑셀은 전체 품번 — 화면과 같은 함수·같은 서식(룰13)
+        det_all, _ = _wk_pn_top_detail(sub, top_n=3, limit=None)
+        xls = _wk_pn_fmt_table(det_all, top_n=3, total_row=tot)
+        h2.download_button("⬇ 엑셀(전체)", table_excel_bytes(xls, "품번별 상세", first_block_cols=6),
+                           file_name=f"{_safe_name(title)}_품번별상세.xlsx", mime=XLSX_MIME,
+                           key=f"{key_prefix}_dl", use_container_width=True)
+        sty = block_border(disp.style.set_properties(**{"text-align": "right"}), 6)   # 룰12: 두 블록 경계선
+        render_styled_table(sty)   # 룰6: 첫 행(=합계) 노란 강조 — 다른 표들과 동일한 의미로 맞춤
+        if total_n > shown:
+            st.caption(f"※ 화면엔 상위 {shown:,}개만 보여요 — 나머지 {total_n - shown:,}개까지 전부 보려면 "
+                       "위 '⬇ 엑셀(전체)'를 받아주세요(합계 행은 언제나 전체 기준).")
+    _popup()
 
 
 def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, show_plan=True):
@@ -3421,8 +3683,14 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
     render_styled_table(sty)
 
 
-def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py):
-    """선택한 매장(또는 담당자 전체매장)의 아이템그룹별 상세표 — 주간보고 동일 프레임. 비중=해당 그룹 내."""
+def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, click_ns=None):
+    """선택한 매장(또는 담당자 전체매장)의 아이템그룹별 상세표 — 주간보고 동일 프레임. 비중=해당 그룹 내.
+
+    click_ns(2026-08-18 추가): 표 안의 **당월 올해 실판가** 숫자를 클릭하면 그 행(아이템그룹)의
+    품번별 판매현황 + 품번별 상위 3개 매장을 팝업으로 보여준다. 기간은 당월(cm) 기준이고,
+    유통/브랜드·연차 등 위쪽 필터는 이미 cm에 적용된 상태라 별도 조건 전달이 필요 없다.
+    None(기본값)이면 클릭 기능 없이 지금까지와 완전히 동일하게 렌더된다.
+    """
     cm, pm = cur_m[mask(cur_m)], prev_m[mask(prev_m)]
     cyd, pyd = cur_y[mask(cur_y)], prev_y[mask(prev_y)]
     if cm.empty and cyd.empty and pm.empty and pyd.empty:
@@ -3436,17 +3704,66 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
                      (lambda gg: (lambda x: x["아이템그룹"].astype(str) == gg))(g)))
     bm = _wk_block(cm, pm, rows)
     by = _wk_block(cyd, pyd, rows)
-    sty, disp = _wk_style_table(bm, by, [k for k, _ in rows], cy, py)
+    sty, disp = _wk_style_table(bm, by, [k for k, _ in rows], cy, py, click_ns=click_ns)
     # 룰11: 제목 + 우측 일반 엑셀 다운로드 버튼 (2026-07-31)
     i1, i2 = st.columns([5, 1])
+    _hint = ("· <b>당월 26실판가 숫자를 클릭</b>하면 품번별 상세" if click_ns else "")
     i1.markdown(f"**🔍 {label} · 아이템그룹별 상세**  "
-                f"<span style='color:#888;font-size:0.8rem;'>(비중=해당 그룹 내 · G.TOTAL=선택 전체)</span>"
+                f"<span style='color:#888;font-size:0.8rem;'>(비중=해당 그룹 내 · G.TOTAL=선택 전체 {_hint})</span>"
                 f"{_NOTE_FLOAT}", unsafe_allow_html=True)
     _nm = sum(1 for c in disp.columns if c[0] == "당월 실적")   # 당월 블록 컬럼 수(7)
     i2.download_button("⬇ 엑셀", table_excel_bytes(disp, f"{label} 아이템", first_block_cols=_nm),
                        file_name=f"{_safe_name(label)}_아이템그룹별상세.xlsx", mime=XLSX_MIME,
                        key=f"wk_dl_item_{label}", use_container_width=True)
+    if click_ns:
+        st.markdown(_WK_PN_CSS, unsafe_allow_html=True)
     render_styled_table(sty)
+    if not click_ns:
+        return
+
+    # ── 260818: 숫자 클릭 → 품번별 상세 팝업 ──────────────────────────────────
+    # 숨은 버튼(JS가 대신 눌러줌) — 라벨의 보이지 않는 표식으로 브리지가 찾아낸다.
+    picked = None
+    for i, (key, _m) in enumerate(rows):
+        if st.button(f"{_WK_PN_MARK}{click_ns}#{i}", key=f"wkpnb_{click_ns}_{i}"):
+            picked = i
+    _wk_pn_click_bridge(click_ns)
+
+    # 열려 있는 팝업은 "행 인덱스"가 아니라 **아이템그룹 이름**으로 기억한다 — 위쪽 필터(매장·연차 등)를
+    # 바꾸면 표의 행 구성이 달라져서, 인덱스로 기억하면 엉뚱한 아이템의 팝업이 뜰 수 있기 때문.
+    # 바뀐 조건에 그 아이템그룹이 아예 없어지면 팝업은 조용히 닫힌다.
+    open_key = f"wkpn_open_{click_ns}"
+    # 조회 조건(label)이 바뀌면 이전에 열어둔 팝업은 닫는다 — 매장·필터를 바꿨는데 지난번 팝업이
+    # 혼자 다시 뜨는 걸 막기 위함(팝업 안 숫자는 새 조건 기준이라 더 헷갈림).
+    lbl_key = f"wkpn_lbl_{click_ns}"
+    if st.session_state.get(lbl_key) != label:
+        st.session_state[lbl_key] = label
+        if picked is None:
+            st.session_state.pop(open_key, None)
+    if picked is not None:
+        st.session_state[open_key] = rows[picked][0][1]
+    opened_name = st.session_state.get(open_key)
+    hit = [(k, m) for k, m in rows if k[1] == opened_name]
+    if opened_name is None or not hit:
+        st.session_state.pop(open_key, None)
+        return
+
+    row_key, row_mask = hit[0]
+    grp = row_key[1]                       # "G.TOTAL" 또는 아이템그룹명
+    sub = cm[row_mask(cm)] if len(cm) else cm
+    grp_txt = "전체 아이템" if grp == "G.TOTAL" else grp
+
+    def _close():
+        st.session_state.pop(open_key, None)
+
+    _wk_pn_popup(
+        sub,
+        title=f"{label} · {grp_txt} · 품번별 상세",
+        caption=f"{label} · 아이템: {grp_txt} · 기간: 당월({cy}년) — "
+                f"품번별 판매현황 + 품번별 판매수량 상위 3개 매장",
+        key_prefix=f"wkpn_{click_ns}_{_safe_name(grp)}",
+        on_dismiss=_close,
+    )
 
 
 def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
@@ -3511,7 +3828,8 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
     _all_true = lambda x: pd.Series(True, index=x.index)   # 이미 필터링된 데이터를 그대로 통과시킴
 
     if dim == "아이템":
-        render_weekly_item_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py)
+        # click_ns="cat" → 당월 올해 실판가 숫자 클릭 시 품번별 상세 팝업(260818 신규)
+        render_weekly_item_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, click_ns="cat")
     else:
         render_weekly_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, show_plan=False)
     st.caption("※ 유통/브랜드·연차는 다중선택(선택한 항목 중 하나라도 해당하면 포함, OR 조건) — "
@@ -3657,13 +3975,16 @@ def render_weekly_report(df):
     isel = st.selectbox("담당자(담당 전체매장 기준) 또는 매장을 선택하면 아이템그룹별 지표가 같은 형식으로 펼쳐져요.",
                         iopts, key="wk_item_drill")
     if isel not in (I_NONE, I_HM, I_HS):
+        # 260818: 드릴다운2의 아이템그룹별 상세표에도 동일하게 숫자 클릭 → 품번별 상세 팝업 적용
+        # (click_ns를 "d2"로 따로 줘서 드릴다운3("cat")과 팝업 상태가 서로 섞이지 않게 함)
         if isel in managers:
             imask = (lambda nm: (lambda x: x["_담당자"].astype(str).str.strip() == nm))(isel)
-            render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, f"{isel} (담당 전체매장)", imask, cy, py)
+            render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, f"{isel} (담당 전체매장)", imask,
+                                         cy, py, click_ns="d2")
         else:
             code = code_of[isel]
             imask = (lambda c: (lambda x: x["매장코드"].astype(str).str.strip() == c))(code)
-            render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, isel, imask, cy, py)
+            render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, isel, imask, cy, py, click_ns="d2")
 
 
 # ==============================================================================
@@ -4040,13 +4361,15 @@ def _inv_set_grade(mq, Y, top_stock=None, core=None, small=None, big=None):
 
 # 260816 신규(중태님 지시) — SET 사이즈 컨디션(AE)도 단품(AC)과 동일한 표시 문구 개편.
 # _inv_set_grade()의 내부 판정 로직은 무수정, 반환값만 이 표로 치환한다.
-#   · 구 A-1/A-2 → 신 둘 다 "A-1(핵심2개이상)" 로 통합 표시(중태님 제공 표 그대로) — A-1/A-2를
-#     가르던 "핵심 상의재고 Y 이상 여부"는 이제 문구에 안 드러나지만, 판정 로직 자체(어느 조건일 때
-#     세트가 A급인지)는 그대로 남아있어 필요하면 나중에 다시 분리해 보여줄 수 있음.
+#   · 260818 정정(중태님): 260816에 A-1/A-2를 **둘 다 "A-1(핵심2개이상)"으로 통합** 표시하게
+#     했던 건 실수였음 → **다시 A-1 / A-2로 구분해서 출력**한다. 즉 A-2는 "A-2(핵심2개이상)".
+#     (판정 로직은 260816에도 손댄 적이 없어 이번에도 무수정 — 표시 문구만 되돌림.
+#      A-1/A-2를 가르는 기준은 "핵심 2개 사이즈의 **상의 실재고**가 둘 다 Y 이상이면 A-1,
+#      하나라도 Y 미만이면 A-2" — 세트 가능 수량이 아니라 상의 재고 기준. 260806 5차 참고.)
 #   · 구 C-2 → 신 "C-1(핵심1개만)", 구 C-3 → 신 "C-2(핵심1개만)" — 단품(AC)과 동일한 번호 이동.
 #   · 해당없음(세트 불가·미매칭)은 표에 없는 값이라 원문 그대로 통과.
 _INV_SET_GRADE_LABEL = {
-    "A-1": "A-1(핵심2개이상)", "A-2": "A-1(핵심2개이상)",
+    "A-1": "A-1(핵심2개이상)", "A-2": "A-2(핵심2개이상)",   # 260818: A-2 다시 분리 표기
     "B": "B(핵심2개만)",
     "C-1": "C-1(핵심1개+@)", "C-2": "C-1(핵심1개만)", "C-3": "C-2(핵심1개만)",
     "D": "D(빅&스몰)", "E": "E(빅만)", "F": "F(스몰만)",
