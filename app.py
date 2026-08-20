@@ -1011,8 +1011,9 @@ MENU_INV  = "🏷️ 재고 가공"
 MENU_TRND = "📉 추세분석"
 MENU_RTN  = "🔄 반품률 분석"
 MENU_SET  = "🧩 SET/단품 판매 분석"
+MENU_PRICE = "💰 최저가 관리"   # 260820 신설 — 외부몰 최저가 행사 원장·캘린더·최저가 체크·네이버 체크
 MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX,
-         MENU_INV, MENU_TRND, MENU_RTN, MENU_SET]
+         MENU_INV, MENU_TRND, MENU_RTN, MENU_SET, MENU_PRICE]
 
 
 def block_border(sty, n):
@@ -7860,6 +7861,801 @@ def _render_login():
     st.caption("계정이 필요하면 관리자(팀장)에게 요청하세요.")
 
 
+# ==============================================================================
+# SECTION P. 💰 최저가 관리 — 외부몰 최저가 행사 원장 + 캘린더 + 최저가 체크 + 네이버 체크
+#   (2026-08-20 신설 — "가격관리 메뉴 개발 정의.docx" + 중태님 4메뉴 구조 확정)
+#   좌측 메뉴 "💰 최저가 관리" 안에 4개 메뉴(탭):
+#   · 1️⃣ 외부몰 행사 확정: MD가 확정 행사 폼 업로드 → promo_events 테이블(팀 공동 원장)에 누적
+#   · 2️⃣ 행사 진행 캘린더: 원장을 간트차트로 조회 — 기간 설정 + [브랜드/년도/시즌/아이템] 필터
+#       또는 품번 직접 입력(1개 상품) 조회. 오늘 기준선 표시.
+#   · 3️⃣ 외부몰 행사 최저가 체크: 기획 폼 업로드 → 원장과 [품번 동일 × 기간 겹침] 비교
+#       → 최저가 여부 OK/NO + 겹치는 경쟁 행사 블록(오른쪽 반복)을 채운 엑셀 다운로드
+#   · 4️⃣ 네이버 최저가 체크: 네이버 폼 업로드 → "오늘 진행 중" 외부몰 행사와 비교
+#       → 위반(인상필요) 품번만 + 목표가(외부몰최저가+100원)를 채운 엑셀 다운로드
+#   확정 룰 (중태님, 2026-08-20):
+#   · 실질판매가 = 쿠폰적용가(숫자이고 0 초과)가 있으면 쿠폰적용가, 없으면 행사가
+#   · 최저가 체크: 겹치는 기간에 타 채널 실질판매가 ≤ 내 기획 실질판매가 → NO (동일가도 NO)
+#   · 네이버: 업로드 당일 진행 중인 타 채널 행사만 비교. 네이버가격 ≤ 외부몰최저가 → "인상필요"
+#     (낮거나 같으면 위반 — 동일가 포함). 목표가 = 외부몰최저가 + 100원. 문제 없는 품번은 결과 미표시.
+#   · 겹치는 행사가 여러 개면 결과 엑셀 오른쪽으로 9컬럼 블록을 실질판매가 낮은 순으로 반복
+#   · 테이블은 첫 사용 시 자동 생성(CREATE TABLE IF NOT EXISTS) — Supabase 별도 작업 불필요
+# ==============================================================================
+PROMO_TABLE = "promo_events"
+PROMO_COLS = ["_pkey", "행사시작", "행사종료", "매장코드", "매장명", "품번",
+              "최초가", "행사가", "쿠폰율", "쿠폰적용가", "최종할인율",
+              "실질판매가", "등록자", "등록자명", "등록시각"]
+_PM_FORM_HEADERS = ["행사시작", "행사종료", "매장코드", "매장명", "품번",
+                    "최초가", "행사가", "쿠폰율", "쿠폰적용가", "최종할인율"]
+_PM_NAVER_HEADERS = ["매장코드", "매장명", "품번", "최초가", "네이버가격", "할인율"]
+# 260820 수정2: 결과 블록의 매장명 옆에 담당자 컬럼 추가(매장 마스터 자동 매핑) → 블록 10컬럼
+_PM_BLOCK_CHECK = ["매장코드", "최저가 매장", "담당자", "행사시작", "행사종료",
+                   "최초가", "행사가", "쿠폰율", "쿠폰적용가", "최종할인율"]
+_PM_BLOCK_NAVER = ["매장코드", "동시점 행사 매장", "담당자", "행사시작", "행사종료",
+                   "최초가", "행사가", "쿠폰율", "쿠폰적용가", "최종할인율"]
+
+
+def _pm_num(v):
+    """가격류 숫자 파싱 — 실패·공란은 None."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        if isinstance(v, float) and math.isnan(v):
+            return None
+        return float(v)
+    s = str(v).strip().replace(",", "").replace("원", "")
+    if not s or s.lower() in ("nan", "none", "-"):
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _pm_rate(v):
+    """쿠폰율·할인율 파싱 — '20%'→0.2, 20→0.2, 0.2→0.2. 실패·공란은 None."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    pct = s.endswith("%")
+    n = _pm_num(s[:-1] if pct else s)
+    if n is None:
+        return None
+    if pct:
+        return n / 100.0
+    return n / 100.0 if n > 1 else n
+
+
+def _pm_date(v):
+    """행사시작/종료 파싱 → datetime.date. 260801(YYMMDD)·'26.08.01'·'2026-08-01'·엑셀 날짜셀 지원."""
+    import datetime as _d
+    if v is None:
+        return None
+    if isinstance(v, _d.datetime):
+        return v.date()
+    if isinstance(v, _d.date):
+        return v
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none"):
+        return None
+    if s.endswith(".0"):
+        s = s[:-2]
+    digits = "".join(ch for ch in s if ch.isdigit())
+    try:
+        if len(digits) == 6:      # YYMMDD (예: 260801)
+            return _d.date(2000 + int(digits[:2]), int(digits[2:4]), int(digits[4:6]))
+        if len(digits) == 8:      # YYYYMMDD
+            return _d.date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+    except Exception:
+        return None
+    return None
+
+
+def _pm_yymmdd(iso):
+    """ISO 'YYYY-MM-DD' → 260801(int) — 폼과 동일한 표기로 엑셀에 기입."""
+    try:
+        return int(str(iso)[2:4] + str(iso)[5:7] + str(iso)[8:10])
+    except Exception:
+        return None
+
+
+def _pm_eff_price(hangsa, coupon_applied):
+    """실질판매가 — 쿠폰적용가(0 초과)가 있으면 그 값, 없으면 행사가 (중태님 확정 룰)."""
+    if coupon_applied is not None and coupon_applied > 0:
+        return coupon_applied
+    return hangsa
+
+
+def _pm_cell(v):
+    """엑셀 셀 기입용 정리 — NaN→None, 딱 떨어지는 float→int."""
+    if v is None:
+        return None
+    if isinstance(v, float):
+        if math.isnan(v):
+            return None
+        if v.is_integer():
+            return int(v)
+    return v
+
+
+def _pm_norm(s):
+    return str(s).strip().replace(" ", "") if s is not None else ""
+
+
+def _pm_find_sheet(wb, headers, prefer_kw=None):
+    """헤더(첫 N컬럼)가 일치하는 시트·헤더행을 찾는다. prefer_kw가 시트명에 있으면 우선.
+    (마스터 폼 파일 하나에 3개 양식 시트가 함께 들어 있어도 올바른 시트를 집도록.)"""
+    want = [_pm_norm(h) for h in headers]
+    hits = []
+    for ws in wb.worksheets:
+        for hr in range(1, 6):
+            if ws.max_row < hr:
+                break
+            row = [_pm_norm(c.value) for c in ws[hr][:len(want)]]
+            if row == want:
+                hits.append((ws, hr))
+                break
+    if not hits:
+        return None, None
+    if prefer_kw:
+        for ws, hr in hits:
+            if prefer_kw in _pm_norm(ws.title):
+                return ws, hr
+    return hits[0]
+
+
+def _pm_read_form(uploaded, kind):
+    """업로드 엑셀에서 폼 데이터 파싱. kind: 'confirm'(행사 확정) | 'check'(최저가 체크, 앞 10컬럼만)
+    | 'naver'(6컬럼). return (rows, errors)."""
+    import openpyxl
+    wb = openpyxl.load_workbook(uploaded, data_only=True)
+    if kind == "naver":
+        ws, hr = _pm_find_sheet(wb, _PM_NAVER_HEADERS, prefer_kw="네이버")
+        ncol, want = len(_PM_NAVER_HEADERS), _PM_NAVER_HEADERS
+    else:
+        prefer = "최저가체크" if kind == "check" else "행사확정"
+        ws, hr = _pm_find_sheet(wb, _PM_FORM_HEADERS, prefer_kw=prefer)
+        ncol, want = len(_PM_FORM_HEADERS), _PM_FORM_HEADERS
+    if ws is None:
+        return [], [f"필요한 헤더({' · '.join(want)})로 시작하는 시트를 찾지 못했어요. 폼 양식 그대로 올려주세요."]
+    rows, errors = [], []
+    for i, vals in enumerate(ws.iter_rows(min_row=hr + 1, values_only=True), start=hr + 1):
+        vals = list(vals[:ncol]) + [None] * max(0, ncol - len(vals))
+        if all(v is None or str(v).strip() == "" for v in vals):
+            continue
+        if kind == "naver":
+            code, name, pn, chojo, nprice, drate = vals
+            pn = str(pn).strip() if pn is not None else ""
+            nprice_n = _pm_num(nprice)
+            if not pn or nprice_n is None:
+                errors.append(f"{i}행: 품번 또는 네이버가격이 비어 있어 건너뛰었어요.")
+                continue
+            rows.append({"매장코드": str(code).strip() if code is not None else "",
+                         "매장명": str(name).strip() if name is not None else "",
+                         "품번": pn, "최초가": _pm_num(chojo),
+                         "네이버가격": nprice_n, "할인율": _pm_rate(drate)})
+        else:
+            s, e, code, name, pn, chojo, hangsa, crate, cprice, frate = vals
+            sd, ed = _pm_date(s), _pm_date(e)
+            pn = str(pn).strip() if pn is not None else ""
+            hangsa_n = _pm_num(hangsa)
+            if not pn or sd is None or ed is None or hangsa_n is None:
+                errors.append(f"{i}행: 품번·행사시작·행사종료·행사가 중 비었거나 형식을 읽지 못해 건너뛰었어요.")
+                continue
+            if ed < sd:
+                errors.append(f"{i}행: 행사종료({ed})가 행사시작({sd})보다 빨라 건너뛰었어요.")
+                continue
+            cp = _pm_num(cprice)
+            rows.append({"행사시작": sd.isoformat(), "행사종료": ed.isoformat(),
+                         "매장코드": str(code).strip() if code is not None else "",
+                         "매장명": str(name).strip() if name is not None else "",
+                         "품번": pn, "최초가": _pm_num(chojo), "행사가": hangsa_n,
+                         "쿠폰율": _pm_rate(crate), "쿠폰적용가": cp,
+                         "최종할인율": _pm_rate(frate),
+                         "실질판매가": _pm_eff_price(hangsa_n, cp)})
+    return rows, errors
+
+
+def _pm_ensure_table(conn):
+    q = '"'
+    defs = ", ".join(f'{q}{c}{q} TEXT' for c in PROMO_COLS if c != "_pkey")
+    conn.exec_driver_sql(
+        f'CREATE TABLE IF NOT EXISTS {q}{PROMO_TABLE}{q} ({q}_pkey{q} TEXT PRIMARY KEY, {defs})')
+
+
+def _pm_key(r):
+    base = "|".join(str(r.get(k, "")) for k in ("행사시작", "행사종료", "매장코드", "품번", "행사가", "쿠폰적용가"))
+    return hashlib.md5(base.encode("utf-8")).hexdigest()
+
+
+def promo_insert(rows):
+    """행사 확정 원장 적재 — 동일 행사(기간+매장+품번+가격이 같은 행)는 건너뜀(재업로드 안전)."""
+    if not rows:
+        return {"inserted": 0, "skipped": 0}
+    user = st.session_state.get("auth_user", "") or ""
+    name = st.session_state.get("auth_name", "") or ""
+    ts = now_kst().strftime("%Y-%m-%d %H:%M")
+    eng = get_engine()
+    ins = skip = 0
+    with eng.begin() as conn:
+        _pm_ensure_table(conn)
+        existing = set(r[0] for r in conn.exec_driver_sql(
+            f'SELECT "_pkey" FROM "{PROMO_TABLE}"').fetchall())
+        ph = "%s" if eng.dialect.name == "postgresql" else "?"
+        cols_sql = ", ".join('"' + c + '"' for c in PROMO_COLS)
+        sql = f'INSERT INTO "{PROMO_TABLE}" ({cols_sql}) VALUES ({", ".join([ph] * len(PROMO_COLS))})'
+        seen = set()
+        for r in rows:
+            k = _pm_key(r)
+            if k in existing or k in seen:
+                skip += 1
+                continue
+            seen.add(k)
+            vals = [k] + [("" if r.get(c) is None else str(r.get(c))) for c in PROMO_COLS[1:-3]] \
+                 + [user, name, ts]
+            conn.exec_driver_sql(sql, tuple(vals))
+            ins += 1
+    return {"inserted": ins, "skipped": skip}
+
+
+def promo_load():
+    """원장 전체 로드 → DataFrame(파싱 숫자컬럼 _최초가.._실질판매가 포함). 테이블 없으면 빈 DF.
+    (행사 원장은 수백 행 규모라 캐시 없이 매번 읽어 항상 최신을 보여준다 — 팀 공동 입력 특성.)"""
+    eng = get_engine()
+    try:
+        with eng.begin() as conn:
+            _pm_ensure_table(conn)
+            df = pd.read_sql(f'SELECT * FROM "{PROMO_TABLE}"', conn)
+    except Exception:
+        return pd.DataFrame(columns=PROMO_COLS)
+    if df.empty:
+        return df
+    for c in ("최초가", "행사가", "쿠폰율", "쿠폰적용가", "최종할인율"):
+        df["_" + c] = pd.to_numeric(df[c].map(_pm_num), errors="coerce")
+    # 실질판매가는 항상 재계산(룰이 한 곳에만 살도록): 쿠폰적용가>0 → 쿠폰적용가, 아니면 행사가
+    df["_실질판매가"] = np.where(df["_쿠폰적용가"].fillna(0) > 0, df["_쿠폰적용가"], df["_행사가"])
+    return df
+
+
+def promo_delete(pkeys):
+    if not pkeys:
+        return 0
+    eng = get_engine()
+    n = 0
+    with eng.begin() as conn:
+        _pm_ensure_table(conn)
+        ph = "%s" if eng.dialect.name == "postgresql" else "?"
+        for k in pkeys:
+            res = conn.exec_driver_sql(f'DELETE FROM "{PROMO_TABLE}" WHERE "_pkey" = {ph}', (k,))
+            n += res.rowcount or 0
+    return n
+
+
+def _pm_overlaps(ledger, pn, sd_iso, ed_iso, exclude_code=None):
+    """원장에서 [품번 동일 × 기간 겹침] 행사만 추출 (exclude_code 매장 = 자기 채널은 제외),
+    실질판매가 낮은 순 정렬. ISO 날짜 문자열은 사전순 비교가 곧 날짜 비교라 안전."""
+    if ledger.empty:
+        return ledger
+    m = (ledger["품번"].astype(str).str.strip() == str(pn).strip()) \
+        & (ledger["행사시작"] <= ed_iso) & (ledger["행사종료"] >= sd_iso)
+    if exclude_code:
+        m &= ledger["매장코드"].astype(str).str.strip() != str(exclude_code).strip()
+    return ledger[m].sort_values("_실질판매가", na_position="last")
+
+
+def _pm_check_rows(plans, ledger):
+    """최저가 체크 판정 — NO 조건: 겹치는 타 채널 실질판매가 ≤ 내 기획가 (동일가 NO, 중태님 확정)."""
+    out = []
+    for p in plans:
+        comp = _pm_overlaps(ledger, p["품번"], p["행사시작"], p["행사종료"],
+                            exclude_code=p["매장코드"] or None)
+        lows = comp["_실질판매가"].dropna()
+        lowest = float(lows.min()) if len(lows) else None
+        ok = (lowest is None) or (lowest > p["실질판매가"])
+        out.append({"plan": p, "ok": ok, "lowest": lowest, "comp": comp})
+    return out
+
+
+def _pm_naver_rows(rows, ledger, today_iso):
+    """네이버 금일최저가 판정 — 오늘 진행 중인 타 채널 행사만 비교(중태님 확정).
+    위반 조건: 네이버가격 ≤ 외부몰 최저 실질판매가 (동일가 포함). 목표가 = 외부몰최저가 + 100원."""
+    out = []
+    for r in rows:
+        comp = _pm_overlaps(ledger, r["품번"], today_iso, today_iso,
+                            exclude_code=r["매장코드"] or None)
+        lows = comp["_실질판매가"].dropna()
+        lowest = float(lows.min()) if len(lows) else None
+        if lowest is None:          # 오늘 진행 중인 외부몰 행사 없음 → 문제 없음(결과 미표시)
+            continue
+        if r["네이버가격"] <= lowest:
+            out.append({"row": r, "lowest": lowest, "target": lowest + 100, "comp": comp})
+    return out
+
+
+def _pm_mgr_map():
+    """매장코드 → 담당자 매핑 (매장 마스터 · 유통별 세부 분석과 동일 소스). 마스터 없으면 빈 dict."""
+    m = load_master()
+    if not m.empty and "담당자" in m.columns and "매장코드" in m.columns:
+        return dict(zip(m["매장코드"].astype(str).str.strip(),
+                        m["담당자"].astype(str).str.strip()))
+    return {}
+
+
+def _pm_block_vals(e, mgr):
+    """원장 행(Series) → 결과 블록 10칸 값(폼 표기: 날짜 YYMMDD, 담당자 = 매장 마스터 매핑)."""
+    return [e["매장코드"], e["매장명"], mgr.get(str(e["매장코드"]).strip(), ""),
+            _pm_yymmdd(e["행사시작"]), _pm_yymmdd(e["행사종료"]),
+            _pm_cell(e["_최초가"]), _pm_cell(e["_행사가"]), _pm_cell(e["_쿠폰율"]),
+            _pm_cell(e["_쿠폰적용가"]), _pm_cell(e["_최종할인율"])]
+
+
+def _pm_style_header(ws, heads, n_gray, red_idx, block_from):
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    fill_gray = PatternFill("solid", fgColor="D9D9D9")
+    fill_red = PatternFill("solid", fgColor="C00000")
+    fill_pink = PatternFill("solid", fgColor="F2DCDB")
+    center = Alignment(horizontal="center")
+    for j, h in enumerate(heads, start=1):
+        c = ws.cell(row=1, column=j, value=h)
+        c.alignment = center
+        if j in red_idx:
+            c.fill, c.font = fill_red, Font(bold=True, color="FFFFFF")
+        elif j <= n_gray:
+            c.fill, c.font = fill_gray, Font(bold=True)
+        elif j >= block_from:
+            c.fill, c.font = fill_pink, Font(bold=True)
+    ws.freeze_panes = "A2"
+    for col in range(1, len(heads) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 11.5
+
+
+def _pm_check_excel(results):
+    """최저가 체크 결과 엑셀 — 폼 10컬럼 + 최저가 여부 + 경쟁 행사 10컬럼 블록(실질판매가 낮은 순 반복)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "외부몰 행사 최저가 체크"
+    mgr = _pm_mgr_map()
+    max_blocks = max([len(r["comp"]) for r in results] + [1])
+    heads = list(_PM_FORM_HEADERS) + ["최저가 여부"] + _PM_BLOCK_CHECK * max_blocks
+    _pm_style_header(ws, heads, n_gray=10, red_idx={11}, block_from=12)
+    center = Alignment(horizontal="center")
+    rr = 2
+    for res in results:
+        p = res["plan"]
+        vals = [_pm_yymmdd(p["행사시작"]), _pm_yymmdd(p["행사종료"]), p["매장코드"], p["매장명"],
+                p["품번"], _pm_cell(p["최초가"]), _pm_cell(p["행사가"]), _pm_cell(p["쿠폰율"]),
+                _pm_cell(p["쿠폰적용가"]), _pm_cell(p["최종할인율"]),
+                "OK" if res["ok"] else "NO"]
+        for _, e in res["comp"].iterrows():
+            vals += _pm_block_vals(e, mgr)
+        for j, v in enumerate(vals, start=1):
+            c = ws.cell(row=rr, column=j, value=v)
+            if j in (6, 7, 9):
+                c.number_format = "#,##0"
+            elif j in (8, 10):
+                c.number_format = "0%"
+            elif j == 11:
+                c.font = Font(bold=True, color=("C00000" if v == "NO" else "1F7A33"))
+                c.alignment = center
+            elif j >= 12:
+                k = (j - 12) % 10
+                if k in (5, 6, 8):
+                    c.number_format = "#,##0"
+                elif k in (7, 9):
+                    c.number_format = "0%"
+        rr += 1
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+def _pm_naver_excel(violations, today):
+    """네이버 최저가 체크 결과 엑셀 — 위반(인상필요) 품번만. 폼 6컬럼 + 최저가 위반 여부('인상필요')
+    + 가격인하 필요(=목표가, 외부몰최저가+100원) + 동시점 행사 9컬럼 블록(낮은 순 반복)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "네이버 최저가 체크"
+    mgr = _pm_mgr_map()
+    max_blocks = max([len(v["comp"]) for v in violations] + [1])
+    heads = list(_PM_NAVER_HEADERS) + ["최저가 위반 여부", "가격인하 필요"] + _PM_BLOCK_NAVER * max_blocks
+    _pm_style_header(ws, heads, n_gray=6, red_idx={7, 8}, block_from=9)
+    center = Alignment(horizontal="center")
+    red_bold = Font(bold=True, color="C00000")
+    rr = 2
+    for vv in violations:
+        r = vv["row"]
+        vals = [r["매장코드"], r["매장명"], r["품번"], _pm_cell(r["최초가"]),
+                _pm_cell(r["네이버가격"]), _pm_cell(r["할인율"]),
+                "인상필요", _pm_cell(float(vv["target"]))]
+        for _, e in vv["comp"].iterrows():
+            vals += _pm_block_vals(e, mgr)
+        for j, v in enumerate(vals, start=1):
+            c = ws.cell(row=rr, column=j, value=v)
+            if j in (4, 5, 8):
+                c.number_format = "#,##0"
+            elif j == 6:
+                c.number_format = "0%"
+            elif j >= 9:
+                k = (j - 9) % 10
+                if k in (5, 6, 8):
+                    c.number_format = "#,##0"
+                elif k in (7, 9):
+                    c.number_format = "0%"
+            if j in (7, 8):
+                c.font = red_bold
+                if j == 7:
+                    c.alignment = center
+        rr += 1
+    ws.cell(row=1, column=len(heads) + 2,
+            value=f"기준일: {today} (업로드 당일 진행 중 행사와 비교)")
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+def _pm_fmt_won(v):
+    return "" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{int(round(v)):,}"
+
+
+def _pm_fmt_rate(v):
+    return "" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{v:.0%}"
+
+
+def _pm_status(sd_iso, ed_iso, today_iso):
+    if ed_iso < today_iso:
+        return "종료"
+    if sd_iso > today_iso:
+        return "예정"
+    return "진행중"
+
+
+def _pm_decorate(ledger):
+    """원장에 품번 해독 컬럼(_브랜드/_연도/_시즌/_아이템)을 붙인다 — 캘린더 필터용.
+    해독은 기존 decode_stco(STCO 10자리 품번 규칙) 재사용, 해독 불가 값은 '기타'."""
+    if ledger.empty:
+        return ledger
+    out = ledger.copy()
+    info = {}
+    for pn in out["품번"].astype(str).str.strip().unique():
+        try:
+            info[pn] = decode_stco(pn)
+        except Exception:
+            info[pn] = {}
+    def _g(pn, key):
+        v = info.get(str(pn).strip(), {}).get(key)
+        return str(v) if v not in (None, "", "None") else "기타"
+    out["_브랜드"] = out["품번"].map(lambda p: _g(p, "브랜드명"))
+    out["_연도"] = out["품번"].map(lambda p: _g(p, "연도"))
+    out["_시즌"] = out["품번"].map(lambda p: _g(p, "시즌명"))
+    out["_아이템"] = out["품번"].map(lambda p: _g(p, "중카테고리"))
+    return out
+
+
+def _pm_gantt(view, d_from, d_to, today_iso):
+    """행사 진행 캘린더(간트차트) — 중태님 예시 엑셀 이미지 기준:
+    행 = [아이템코드 · 품번] (같은 품번이 겹치는 기간에 복수 채널이면 품번이 반복되며 아래로 나열),
+    막대 = 행사 기간(채널별 색), 막대 안 글자 = '채널명 실질판매가원', 노란 세로선 = 오늘."""
+    g = view.copy()
+    g["_s"] = pd.to_datetime(g["행사시작"])
+    g["_e"] = pd.to_datetime(g["행사종료"]) + pd.Timedelta(days=1)   # 종료일 '포함'으로 보이게
+    g = g.sort_values(["품번", "_s", "매장명"]).reset_index(drop=True)
+    _item = g["품번"].astype(str).str.strip().str.upper().str[1:3]   # 품번 2~3번째 자리 = 아이템코드
+    g["행라벨"] = _item + " · " + g["품번"].astype(str)
+    # 행 1개 = 행사 1건 — 같은 품번·같은 기간이라도 채널마다 별도 행(아래로 나열)이 되도록 고유 키 부여
+    g["_rowid"] = g["행라벨"] + "|" + g.index.astype(str)
+    g["가격"] = g["_실질판매가"].map(lambda v: "" if pd.isna(v) else f"{int(v):,}원")
+    g["막대표기"] = g["매장명"].astype(str) + " " + g["가격"]
+    g["기간"] = g["행사시작"] + " ~ " + g["행사종료"]
+    fig = px.timeline(
+        g, x_start="_s", x_end="_e", y="_rowid", color="매장명", text="막대표기",
+        hover_data={"품번": True, "매장명": True, "기간": True, "가격": True,
+                    "_s": False, "_e": False, "_rowid": False})
+    fig.update_traces(textposition="inside", insidetextanchor="middle",
+                      marker_line_color="rgba(0,0,0,0.25)", marker_line_width=0.5)
+    fig.update_yaxes(autorange="reversed", title=None, tickmode="array",
+                     tickvals=g["_rowid"].tolist(), ticktext=g["행라벨"].tolist(),
+                     categoryorder="array", categoryarray=g["_rowid"].tolist())
+    fig.update_xaxes(title=None, side="top",
+                     range=[pd.Timestamp(d_from), pd.Timestamp(d_to) + pd.Timedelta(days=1)],
+                     dtick="D1", tickformat="%m/%d", tickfont=dict(size=10), showgrid=True,
+                     gridcolor="rgba(0,0,0,0.06)")
+    # 오늘 기준선 (레퍼런스 이미지의 노란 세로선)
+    t0 = pd.Timestamp(today_iso) + pd.Timedelta(hours=12)
+    fig.add_shape(type="line", x0=t0, x1=t0, y0=0, y1=1, yref="paper",
+                  line=dict(color="#f4d03f", width=3))
+    fig.add_annotation(x=t0, y=1.02, yref="paper", text="오늘", showarrow=False,
+                       font=dict(size=11, color="#b7950b"))
+    fig.update_layout(
+        height=max(340, 34 * len(g) + 150),
+        margin=dict(l=10, r=10, t=60, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.05, title=None),
+        plot_bgcolor="white")
+    return fig
+
+
+def render_price_mgmt():
+    """💰 최저가 관리 메뉴 — 전 팀원 입력 가능(공동 원장), 삭제는 본인 등록분 또는 관리자만."""
+    st.subheader("💰 최저가 관리 — 외부몰 최저가 행사")
+    st.caption("외부 유통 채널의 최저가 보장 행사 예약을 팀 공동 원장에 쌓고, 캘린더로 조회하고, "
+               "새 행사 기획과 네이버 브랜드 스토어 가격이 기존 최저가 약속과 충돌하는지 자동으로 "
+               "체크해요. 모든 비교는 **실질판매가**(쿠폰적용가가 있으면 쿠폰적용가, 없거나 0이면 "
+               "행사가) 기준이에요.")
+    is_admin = st.session_state.get("auth_role") == "admin"
+    me = st.session_state.get("auth_user", "") or ""
+    today = now_kst().date()
+    today_iso = today.isoformat()
+    if st.session_state.pop("pm_flash", None):
+        st.success(st.session_state.pop("pm_flash_msg", "완료됐어요 ✅"))
+    ledger = promo_load()
+    # 담당자 매핑 (매장 마스터 · 매장코드 기준) — 3·4번 메뉴 결과 표시용 (260820 수정2:
+    # 1번 메뉴는 본인이 본인 행사를 올리는 것이라 담당자 표기 불필요, 3·4번 결과에만 표기)
+    _mgr_d = _pm_mgr_map()
+    def _mgr(code):
+        return _mgr_d.get(str(code).strip(), "")
+    n_all = len(ledger)
+    n_act = 0 if ledger.empty else int(((ledger["행사시작"] <= today_iso)
+                                        & (ledger["행사종료"] >= today_iso)).sum())
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["1️⃣ 외부몰 행사 확정", "2️⃣ 행사 진행 캘린더", "3️⃣ 외부몰 행사 최저가 체크", "4️⃣ 네이버 최저가 체크"])
+
+    # ── 메뉴1. 외부몰 행사 확정 — 폼 업로드 → 원장 적재 + 원장 조회·삭제 ─────────────
+    with tab1:
+        st.markdown("##### 1️⃣ 외부몰 행사 확정 등록")
+        st.caption("유통 채널에서 최저가 행사가 확정되면 **'외부몰 행사 확정' 폼**(행사시작·행사종료·"
+                   "매장코드·매장명·품번·최초가·행사가·쿠폰율·쿠폰적용가·최종할인율 10컬럼)을 올리고 "
+                   "등록 버튼을 눌러 주세요. 등록된 행사는 로우데이터(원장)로 쌓여서 '행사 진행 캘린더'와 "
+                   "최저가 체크의 비교 기준이 돼요. 같은 행사(기간+매장+품번+가격 동일)는 다시 올려도 "
+                   "중복으로 쌓이지 않아요.")
+        c_m1, c_m2 = st.columns(2)
+        c_m1.metric("원장 등록 행사", f"{n_all:,} 건")
+        c_m2.metric("오늘 진행 중", f"{n_act:,} 건")
+        up1 = st.file_uploader("① '외부몰 행사 확정' 폼 업로드", type=["xlsx"],
+                               accept_multiple_files=False, key="pm_confirm_up")
+        if up1 is not None:
+            rows1, errs1 = _pm_read_form(up1, "confirm")
+            for msg in errs1:
+                st.warning("⚠️ " + msg)
+            if rows1:
+                prev = pd.DataFrame([{
+                    "행사시작": r["행사시작"], "행사종료": r["행사종료"],
+                    "매장코드": r["매장코드"], "매장명": r["매장명"], "품번": r["품번"],
+                    "최초가": _pm_fmt_won(r["최초가"]), "행사가": _pm_fmt_won(r["행사가"]),
+                    "쿠폰율": _pm_fmt_rate(r["쿠폰율"]), "쿠폰적용가": _pm_fmt_won(r["쿠폰적용가"]),
+                    "실질판매가": _pm_fmt_won(r["실질판매가"]),
+                } for r in rows1])
+                st.caption(f"📄 읽은 행사: **{len(rows1)}건** — 아래 내용 확인 후 등록해 주세요. "
+                           "(실질판매가 = 쿠폰적용가 있으면 쿠폰적용가, 없으면 행사가)")
+                st.dataframe(prev, use_container_width=True, hide_index=True)
+                if st.button("② 원장에 행사 등록", type="primary", use_container_width=True,
+                             key="pm_confirm_btn"):
+                    res = promo_insert(rows1)
+                    st.session_state["pm_flash"] = True
+                    st.session_state["pm_flash_msg"] = (
+                        f"행사 등록 완료 ✅ 신규 {res['inserted']:,}건 · "
+                        f"중복 건너뜀 {res['skipped']:,}건")
+                    st.rerun()
+            elif not errs1:
+                st.info("폼에서 읽을 데이터 행이 없어요 — 회색 영역을 채워서 올려주세요.")
+
+        st.divider()
+        st.markdown("##### 📍 금일 품번별 최저가 현황")
+        st.caption(f"기준일 **{today_iso}** — 오늘 진행 중인 행사만 모아 품번별 최저 실질판매가와 "
+                   "그 채널을 보여줘요. 시점별 최저가를 바로 파악하는 용도예요.")
+        if ledger.empty:
+            st.info("아직 등록된 행사가 없어요 — 위에서 '외부몰 행사 확정' 폼을 올려 시작해 주세요.")
+        else:
+            act = ledger[(ledger["행사시작"] <= today_iso) & (ledger["행사종료"] >= today_iso)]
+            if act.empty:
+                st.info("오늘 진행 중인 행사가 없어요.")
+            else:
+                best = act.loc[act.groupby("품번")["_실질판매가"].idxmin()].sort_values("품번")
+                cnt = act.groupby("품번").size()
+                st.dataframe(pd.DataFrame([{
+                    "품번": b["품번"], "최저가 채널": b["매장명"],
+                    "실질판매가": _pm_fmt_won(b["_실질판매가"]),
+                    "행사가": _pm_fmt_won(b["_행사가"]),
+                    "쿠폰적용가": _pm_fmt_won(b["_쿠폰적용가"]),
+                    "행사기간": f'{b["행사시작"]} ~ {b["행사종료"]}',
+                    "진행 행사 수": int(cnt.get(b["품번"], 1)),
+                } for _, b in best.iterrows()]), use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("##### 🗂️ 행사 원장 조회")
+        if ledger.empty:
+            st.caption("등록된 행사가 없어요.")
+        else:
+            f1, f2, f3 = st.columns([1.2, 1.4, 1])
+            q_pn = f1.text_input("품번 검색(부분 일치)", key="pm_q_pn")
+            stores = sorted(ledger["매장명"].astype(str).str.strip().unique().tolist())
+            q_st = f2.multiselect("매장(채널)", stores, key="pm_q_store")
+            q_stat = f3.selectbox("상태", ["전체", "진행중", "예정", "종료"], key="pm_q_status")
+            view = ledger.copy()
+            view["상태"] = [_pm_status(s, e, today_iso)
+                          for s, e in zip(view["행사시작"], view["행사종료"])]
+            if q_pn.strip():
+                view = view[view["품번"].astype(str).str.contains(q_pn.strip(), case=False, na=False)]
+            if q_st:
+                view = view[view["매장명"].astype(str).str.strip().isin(q_st)]
+            if q_stat != "전체":
+                view = view[view["상태"] == q_stat]
+            view = view.sort_values(["행사시작", "품번"], ascending=[False, True])
+            st.caption(f"조회 결과: **{len(view):,}건**")
+            st.dataframe(pd.DataFrame([{
+                "상태": v["상태"], "행사시작": v["행사시작"], "행사종료": v["행사종료"],
+                "매장코드": v["매장코드"], "매장명": v["매장명"], "품번": v["품번"],
+                "최초가": _pm_fmt_won(v["_최초가"]), "행사가": _pm_fmt_won(v["_행사가"]),
+                "쿠폰율": _pm_fmt_rate(v["_쿠폰율"]), "쿠폰적용가": _pm_fmt_won(v["_쿠폰적용가"]),
+                "실질판매가": _pm_fmt_won(v["_실질판매가"]),
+                "등록자": v["등록자명"] or v["등록자"], "등록시각": v["등록시각"],
+            } for _, v in view.iterrows()]), use_container_width=True, hide_index=True)
+
+            # 삭제 — 본인 등록분만(관리자는 전체). 잘못 등록/취소된 행사 정리용.
+            dele = ledger if is_admin else ledger[ledger["등록자"].astype(str) == me]
+            with st.expander(f"🗑️ 행사 삭제 ({'관리자 — 전체' if is_admin else '내가 등록한 행사만'} "
+                             f"{len(dele):,}건)"):
+                if dele.empty:
+                    st.caption("삭제할 수 있는 행사가 없어요.")
+                else:
+                    opts = {f'{v["품번"]} · {v["매장명"]} · {v["행사시작"]}~{v["행사종료"]} · '
+                            f'{_pm_fmt_won(v["_실질판매가"])}원 · {v["등록자명"] or v["등록자"]}': v["_pkey"]
+                            for _, v in dele.sort_values("행사시작", ascending=False).iterrows()}
+                    sel = st.multiselect("삭제할 행사 선택", list(opts.keys()), key="pm_del_sel")
+                    if sel and st.button(f"선택한 {len(sel)}건 삭제", type="secondary", key="pm_del_btn"):
+                        n = promo_delete([opts[s] for s in sel])
+                        st.session_state["pm_flash"] = True
+                        st.session_state["pm_flash_msg"] = f"행사 삭제 완료 ✅ {n:,}건"
+                        st.rerun()
+
+    # ── 메뉴2. 행사 진행 캘린더 (간트차트) — 기간 설정 + 필터/품번 직접 조회 ─────────
+    with tab2:
+        st.markdown("##### 2️⃣ 행사 진행 캘린더 (간트차트)")
+        st.caption("원장에 등록된 행사를 기간 막대(간트차트)로 보여줘요 — 행 = 품번 · 채널, "
+                   "막대 색 = 채널, 막대 안 숫자 = 실질판매가, 노란 세로선 = 오늘. "
+                   "브랜드/년도/시즌/아이템 필터로 조회하거나, 품번 하나를 직접 입력해 조회할 수 있어요.")
+        if ledger.empty:
+            st.info("아직 등록된 행사가 없어요 — '1️⃣ 외부몰 행사 확정'에서 행사를 먼저 등록해 주세요.")
+        else:
+            deco = _pm_decorate(ledger)
+            c_d1, c_d2 = st.columns(2)
+            d_from = c_d1.date_input("조회 시작일", value=today - timedelta(days=7), key="pm_cal_from")
+            d_to = c_d2.date_input("조회 종료일", value=today + timedelta(days=45), key="pm_cal_to")
+            if d_to < d_from:
+                st.warning("조회 종료일이 시작일보다 빨라요 — 기간을 다시 선택해 주세요.")
+            else:
+                mode = st.radio("조회 방식", ["필터로 조회 (브랜드/년도/시즌/아이템)", "품번 직접 입력 (1개 상품)"],
+                                horizontal=True, key="pm_cal_mode")
+                view = deco[(deco["행사시작"] <= d_to.isoformat())
+                            & (deco["행사종료"] >= d_from.isoformat())].copy()
+                if mode.startswith("품번"):
+                    pn_in = st.text_input("품번 입력 (정확히 일치, 대소문자 무관)", key="pm_cal_pn",
+                                          placeholder="예: SDSVC09STR")
+                    if pn_in.strip():
+                        view = view[view["품번"].astype(str).str.strip().str.upper()
+                                    == pn_in.strip().upper()]
+                        if view.empty:
+                            st.info(f"조회 기간 내 '{pn_in.strip().upper()}' 품번의 행사가 없어요.")
+                    else:
+                        view = view.iloc[0:0]
+                        st.caption("👆 품번을 입력하면 해당 상품의 행사만 캘린더로 보여드려요.")
+                else:
+                    ff1, ff2, ff3, ff4 = st.columns(4)
+                    sel_br = ff1.multiselect("브랜드", sorted(view["_브랜드"].unique().tolist()),
+                                             key="pm_cal_br")
+                    sel_yr = ff2.multiselect("년도", sorted(view["_연도"].unique().tolist()),
+                                             key="pm_cal_yr")
+                    sel_ss = ff3.multiselect("시즌", sorted(view["_시즌"].unique().tolist()),
+                                             key="pm_cal_ss")
+                    sel_it = ff4.multiselect("아이템", sorted(view["_아이템"].unique().tolist()),
+                                             key="pm_cal_it")
+                    if sel_br:
+                        view = view[view["_브랜드"].isin(sel_br)]
+                    if sel_yr:
+                        view = view[view["_연도"].isin(sel_yr)]
+                    if sel_ss:
+                        view = view[view["_시즌"].isin(sel_ss)]
+                    if sel_it:
+                        view = view[view["_아이템"].isin(sel_it)]
+                    st.caption("필터를 비워두면 전체가 보여요 (여러 개 선택 = OR 조건).")
+                if not view.empty:
+                    st.caption(f"조회 결과: **{len(view):,}건** "
+                               f"(품번 {view['품번'].nunique():,}개 · 채널 {view['매장명'].nunique():,}개) · "
+                               f"기간 {d_from.isoformat()} ~ {d_to.isoformat()}")
+                    st.plotly_chart(_pm_gantt(view, d_from, d_to, today_iso),
+                                    use_container_width=True)
+                elif not mode.startswith("품번"):
+                    st.info("조회 조건에 맞는 행사가 없어요.")
+
+    # ── 메뉴3. 외부몰 행사 최저가 체크 — 기획 폼 업로드 → OK/NO 판정 엑셀 ────────────
+    with tab3:
+        st.markdown("##### 3️⃣ 외부몰 행사 최저가 체크")
+        st.caption("행사를 **기획하는 단계**에서 '외부몰 행사 최저가 체크' 폼의 회색 영역(앞 10컬럼)을 "
+                   "채워 올리면, 원장에 등록된 [같은 품번 × 기간이 겹치는] 다른 채널 행사와 비교해서 "
+                   "**최저가 여부(OK/NO)** 와 겹치는 행사 정보를 채운 엑셀을 만들어 드려요. "
+                   "다른 채널 실질판매가가 내 기획가보다 낮거나 **같아도 NO**예요(단독 최저가 기준). "
+                   "겹치는 행사가 여러 개면 실질판매가 낮은 순으로 오른쪽에 계속 붙어요 — "
+                   "NO면 첫 블록이 나를 이긴 행사, OK면 참고용 차순위 행사예요.")
+        if ledger.empty:
+            st.warning("원장에 등록된 행사가 아직 없어요 — 비교 대상이 없어 모든 기획이 OK로 나와요.")
+        up2 = st.file_uploader("'외부몰 행사 최저가 체크' 폼 업로드 (회색 영역 작성)", type=["xlsx"],
+                               accept_multiple_files=False, key="pm_check_up")
+        if up2 is not None:
+            rows2, errs2 = _pm_read_form(up2, "check")
+            for msg in errs2:
+                st.warning("⚠️ " + msg)
+            if rows2:
+                results = _pm_check_rows(rows2, ledger)
+                n_ok = sum(1 for r in results if r["ok"])
+                n_no = len(results) - n_ok
+                (st.success if n_no == 0 else st.error)(
+                    f"판정 완료 — 기획 {len(results)}건 중 ✅ OK {n_ok}건 · ❌ NO {n_no}건"
+                    + ("" if n_no == 0 else " (더 낮거나 같은 가격의 행사가 이미 잡혀 있어요)"))
+                st.dataframe(pd.DataFrame([{
+                    "최저가 여부": "OK" if r["ok"] else "NO",
+                    "품번": r["plan"]["품번"],
+                    "기획 채널": r["plan"]["매장명"],
+                    "기획 기간": f'{r["plan"]["행사시작"]} ~ {r["plan"]["행사종료"]}',
+                    "기획 실질판매가": _pm_fmt_won(r["plan"]["실질판매가"]),
+                    "최저 경쟁 채널": ("" if r["comp"].empty else str(r["comp"].iloc[0]["매장명"])),
+                    "담당자": ("" if r["comp"].empty else _mgr(r["comp"].iloc[0]["매장코드"])),
+                    "경쟁 실질판매가": _pm_fmt_won(r["lowest"]),
+                    "겹치는 행사 수": len(r["comp"]),
+                } for r in results]), use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇ 최저가 체크 결과 엑셀 다운로드",
+                    _pm_check_excel(results),
+                    file_name=f"외부몰행사_최저가체크_{now_kst().strftime('%y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, key="pm_check_dl")
+            elif not errs2:
+                st.info("폼에서 읽을 데이터 행이 없어요 — 회색 영역을 채워서 올려주세요.")
+
+    # ── 메뉴4. 네이버 최저가 체크 — 네이버 폼 업로드 → 인상필요 품번만 엑셀 ─────────────
+    with tab4:
+        st.markdown("##### 4️⃣ 네이버 최저가 체크 (금일최저가맞추기)")
+        st.caption(f"네이버 브랜드 스토어 담당자가 매일 '네이버 최저가 체크' 폼의 회색 영역(매장코드·"
+                   f"매장명·품번·최초가·네이버가격·할인율)을 채워 올리면, **오늘({today_iso}) 진행 중인** "
+                   "외부몰 행사와 비교해서 네이버 가격이 외부몰 최저가보다 **낮거나 같은 품번만** 뽑아 "
+                   "드려요. 외부몰이 최저가 행사를 진행하는 동안에는 네이버 가격이 더 높아야 하니까요. "
+                   "'가격인하 필요' 칸에는 **외부몰최저가 + 100원**으로 맞춘 조정 목표가가 들어가요. "
+                   "문제 없는 품번은 결과에 나오지 않아요.")
+        if ledger.empty:
+            st.warning("원장에 등록된 행사가 아직 없어요 — 비교 대상이 없어 위반이 나올 수 없어요.")
+        up3 = st.file_uploader("'네이버 최저가 체크' 폼 업로드 (회색 영역 작성)", type=["xlsx"],
+                               accept_multiple_files=False, key="pm_naver_up")
+        if up3 is not None:
+            rows3, errs3 = _pm_read_form(up3, "naver")
+            for msg in errs3:
+                st.warning("⚠️ " + msg)
+            if rows3:
+                viols = _pm_naver_rows(rows3, ledger, today_iso)
+                if not viols:
+                    st.success(f"👍 업로드한 {len(rows3)}개 품번 모두 오늘 기준 최저가 위반이 없어요.")
+                else:
+                    st.error(f"업로드 {len(rows3)}개 품번 중 ⚠️ **인상필요 {len(viols)}건** — "
+                             "네이버 가격이 외부몰 행사 최저가보다 낮거나 같아요.")
+                    st.dataframe(pd.DataFrame([{
+                        "품번": v["row"]["품번"],
+                        "네이버가격": _pm_fmt_won(v["row"]["네이버가격"]),
+                        "외부몰 최저가": _pm_fmt_won(v["lowest"]),
+                        "최저가 채널": str(v["comp"].iloc[0]["매장명"]),
+                        "담당자": _mgr(v["comp"].iloc[0]["매장코드"]),
+                        "가격인하 필요(목표가)": _pm_fmt_won(v["target"]),
+                        "동시점 행사 수": len(v["comp"]),
+                    } for v in viols]), use_container_width=True, hide_index=True)
+                    st.download_button(
+                        "⬇ 인상필요 품번 엑셀 다운로드",
+                        _pm_naver_excel(viols, today_iso),
+                        file_name=f"네이버_최저가체크_{now_kst().strftime('%y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True, key="pm_naver_dl")
+            elif not errs3:
+                st.info("폼에서 읽을 데이터 행이 없어요 — 회색 영역을 채워서 올려주세요.")
+
+
 def render_user_admin():
     """관리자용 사용자 관리: 목록/활성토글/삭제 + 추가·비번 재설정."""
     me = st.session_state.get("auth_user")
@@ -8104,8 +8900,11 @@ def main():
     if df.empty:
         st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요."
                 "  (🏷️ 재고 가공은 매출 데이터 없이도 바로 쓸 수 있어요)")
-        # 재고 가공은 매출 DB와 무관하므로 매출 데이터가 없어도 사용 가능하게 유지
-        render_inventory()
+        # 재고 가공·최저가 관리는 매출 DB와 무관하므로 매출 데이터가 없어도 사용 가능하게 유지
+        if menu == MENU_PRICE:
+            render_price_mgmt()
+        else:
+            render_inventory()
         return
 
     # 사이드바에서 고른 메뉴 '1개만' 실행 (탭 방식은 8개가 매번 전부 계산돼 느렸다)
@@ -8127,6 +8926,8 @@ def main():
         render_return_rate(df)
     elif menu == MENU_SET:
         render_suitset(df)
+    elif menu == MENU_PRICE:
+        render_price_mgmt()
     else:
         render_dashboard(df)
 
