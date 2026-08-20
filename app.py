@@ -8439,6 +8439,39 @@ def render_price_mgmt():
     n_all = len(ledger)
     n_act = 0 if ledger.empty else int(((ledger["행사시작"] <= today_iso)
                                         & (ledger["행사종료"] >= today_iso)).sum())
+    # 260820: 4개 탭을 '폴더 탭' 스타일로 — 글씨는 아래 h5(#####) 수준으로 키우고, 탭마다
+    #   색을 달리해 선택 탭은 올라와 보이고 나머지는 흐리게. 이 페이지에만 탭이 있으므로
+    #   stTabs 전역 셀렉터를 써도 다른 메뉴에 영향 없음.
+    st.markdown("""
+<style>
+/* Streamlit 버전별 마크업 차이(button / div[role=tab], baseweb / react-aria) 모두 커버 */
+div[data-testid="stTabs"] [role="tablist"]{
+  gap:6px; border-bottom:3px solid #f2b705; padding:0 4px; align-items:flex-end;
+  overflow-x:auto; overflow-y:visible; margin-top:6px;}
+div[data-testid="stTabs"] [role="tab"]{
+  position:relative; padding:10px 20px 9px 18px; height:auto; border:none; cursor:pointer;
+  border-radius:14px 14px 0 0; clip-path:polygon(0 0, calc(100% - 14px) 0, 100% 100%, 0 100%);
+  color:#fff !important; opacity:.7; filter:saturate(.85); margin-bottom:0;
+  transition:opacity .15s, padding .15s;}
+div[data-testid="stTabs"] [role="tab"] p{
+  font-size:1.1rem !important; font-weight:700 !important; letter-spacing:-0.01em;
+  white-space:nowrap; color:#fff !important;}
+div[data-testid="stTabs"] [role="tab"]:nth-child(1){background:#f2b705;}
+div[data-testid="stTabs"] [role="tab"]:nth-child(2){background:#f36f21;}
+div[data-testid="stTabs"] [role="tab"]:nth-child(3){background:#e8427c;}
+div[data-testid="stTabs"] [role="tab"]:nth-child(4){background:#7b4bd6;}
+div[data-testid="stTabs"] [role="tab"]:hover{opacity:.85;}
+div[data-testid="stTabs"] [role="tab"][aria-selected="true"]{
+  opacity:1; filter:none; padding-top:15px; padding-bottom:12px;}
+div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+div[data-testid="stTabs"] [data-baseweb="tab-border"],
+div[data-testid="stTabs"] .react-aria-SelectionIndicator{display:none !important;}
+div[data-testid="stTabs"] [role="tabpanel"]{padding-top:18px;}
+/* 탭 안 소제목(#####)과 바로 아래 설명글 사이 여백 확보 (260820 요청) */
+div[data-testid="stTabs"] [role="tabpanel"] h5{
+  margin-bottom:14px !important; padding-bottom:0 !important; font-size:1.25rem !important;}
+div[data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"]{line-height:1.6;}
+</style>""", unsafe_allow_html=True)
     tab1, tab2, tab3, tab4 = st.tabs(
         ["1️⃣ 외부몰 행사 확정", "2️⃣ 행사 진행 캘린더", "3️⃣ 외부몰 행사 최저가 체크", "4️⃣ 네이버 최저가 체크"])
 
