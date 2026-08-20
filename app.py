@@ -1003,7 +1003,7 @@ div[data-testid="stHorizontalBlock"]:has(.perf-title){align-items:flex-end;}
 #   ※ 탭 방식은 안 보는 탭까지 매 실행마다 전부 계산돼서 느렸다.
 #      사이드바 메뉴는 '선택된 1개'만 실행되므로 메뉴가 늘어도 속도가 유지된다.
 MENU_DASH = "📊 종합 대시보드"
-MENU_WEEK = "📋 주간회의 보고자료"
+MENU_WEEK = "📋 주간현황 분석"   # 260820 명칭 변경 (구 '주간회의 보고자료')
 MENU_FLAG = "📅 연차·아이템 세부분석"
 MENU_CHAN = "📈 유통별 세부 분석"
 MENU_CATMIX = "🧵 복종별 판매비중 분석"
@@ -1014,6 +1014,46 @@ MENU_SET  = "🧩 SET/단품 판매 분석"
 MENU_PRICE = "💰 최저가 관리"   # 260820 신설 — 외부몰 최저가 행사 원장·캘린더·최저가 체크·네이버 체크
 MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX,
          MENU_INV, MENU_TRND, MENU_RTN, MENU_SET, MENU_PRICE]
+
+# 사이드바 메뉴 3개 카테고리 구분 (2026-08-20, 중태님 확정 이미지 기준)
+#   대시보드는 최상단 단독 → 📁 Analysis / 📁 노가다 금지 / 📁 궁금한 것
+#   그룹별 radio 1개씩 두고, 선택은 세션 "nav_menu" 한 곳에만 보관(디스패치 로직은 기존 그대로).
+MENU_GROUPS = [
+    (None,        [MENU_DASH]),
+    ("Analysis",  [MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX]),
+    ("노가다 금지", [MENU_INV, MENU_PRICE]),
+    ("궁금한 것",  [MENU_TRND, MENU_RTN, MENU_SET]),
+]
+
+
+def _nav_pick(gi):
+    """그룹 gi의 radio가 바뀌면 전역 선택을 갱신하고 다른 그룹 radio는 선택 해제."""
+    val = st.session_state.get(f"nav_g{gi}")
+    if val is None:
+        return
+    st.session_state["nav_menu"] = val
+    for j in range(len(MENU_GROUPS)):
+        if j != gi:
+            st.session_state[f"nav_g{j}"] = None
+
+
+def render_nav_menu():
+    """사이드바 조회 메뉴(3개 카테고리) 렌더 → 현재 선택된 메뉴명 반환."""
+    if st.session_state.get("nav_menu") not in MENUS:
+        st.session_state["nav_menu"] = MENU_DASH
+    cur = st.session_state["nav_menu"]
+    for gi, (title, items) in enumerate(MENU_GROUPS):
+        key = f"nav_g{gi}"
+        if key not in st.session_state:          # 첫 렌더: index 인자 대신 세션값으로 초기화(경고 방지)
+            st.session_state[key] = cur if cur in items else None
+        if title:
+            st.markdown(
+                f"<div style='font-weight:700;font-size:1.05rem;color:#1d1d1f;"
+                f"margin:10px 0 2px;'>📁 {title}</div>",
+                unsafe_allow_html=True)
+        st.radio(title or "대시보드", items, key=key,
+                 label_visibility="collapsed", on_change=_nav_pick, args=(gi,))
+    return st.session_state["nav_menu"]
 
 
 def block_border(sty, n):
@@ -4097,7 +4137,7 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
 
 
 def render_weekly_report(df):
-    st.subheader("📋 주간회의 보고자료 (당월 · 연간누계, 전년 동기간 비교)")
+    st.subheader("📋 주간현황 분석 (당월 · 연간누계, 전년 동기간 비교)")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
         st.info("데이터를 먼저 적재하세요.")
         return
@@ -8775,7 +8815,7 @@ def main():
         # ── 조회 메뉴 (탭 대체) ──────────────────────────────────────
         st.divider()
         st.caption("📂 **조회 메뉴**")
-        menu = st.radio("조회 메뉴", MENUS, key="nav_menu", label_visibility="collapsed")
+        menu = render_nav_menu()   # 260820: 3개 카테고리(Analysis/노가다 금지/궁금한 것) 그룹 radio
 
         if not is_admin:
             st.divider()
