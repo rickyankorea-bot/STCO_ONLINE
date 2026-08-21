@@ -8444,8 +8444,11 @@ def _pm_gantt(view, d_from, d_to, today_iso):
         g, x_start="_s", x_end="_e", y="_rowid", color="매장명", text="막대표기",
         hover_data={"품번": True, "매장명": True, "기간": True, "가격": True,
                     "_s": False, "_e": False, "_rowid": False})
-    fig.update_traces(textposition="inside", insidetextanchor="middle",
+    # 260821 수정: 막대 안 글씨는 항상 동일 크기(13px) — 막대가 짧아 안 들어가면 밖으로 표기
+    fig.update_traces(textposition="auto", insidetextanchor="middle",
+                      textfont=dict(size=13),
                       marker_line_color="rgba(0,0,0,0.25)", marker_line_width=0.5)
+    fig.update_layout(uniformtext=dict(minsize=13, mode="show"))
     fig.update_yaxes(autorange="reversed", title=None, tickmode="array",
                      tickvals=g["_rowid"].tolist(), ticktext=g["행라벨"].tolist(),
                      categoryorder="array", categoryarray=g["_rowid"].tolist())
@@ -8499,8 +8502,11 @@ def _pm_sched_gantt(view, d_from, d_to, today_iso, mgr):
         sched, x_start="_s", x_end="_e", y="_rowid", color="매장명", text="막대표기",
         hover_data={"행사명": True, "기간": True, "품번수": True,
                     "_s": False, "_e": False, "_rowid": False})
-    fig.update_traces(textposition="inside", insidetextanchor="middle",
+    # 260821 수정: 막대 안 글씨는 항상 동일 크기(13px) — 막대가 짧아 안 들어가면 밖으로 표기
+    fig.update_traces(textposition="auto", insidetextanchor="middle",
+                      textfont=dict(size=13),
                       marker_line_color="rgba(0,0,0,0.25)", marker_line_width=0.5)
+    fig.update_layout(uniformtext=dict(minsize=13, mode="show"))
     fig.update_yaxes(autorange="reversed", title=None, tickmode="array",
                      tickvals=sched["_rowid"].tolist(), ticktext=sched["행라벨"].tolist(),
                      categoryorder="array", categoryarray=sched["_rowid"].tolist())
@@ -8514,9 +8520,9 @@ def _pm_sched_gantt(view, d_from, d_to, today_iso, mgr):
     fig.add_annotation(x=t0, y=1.02, yref="paper", text="오늘", showarrow=False,
                        font=dict(size=11, color="#b7950b"))
     fig.update_layout(
-        height=max(320, 34 * len(sched) + 150),
+        height=max(320, 38 * len(sched) + 150),
         margin=dict(l=10, r=10, t=60, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.05, title=None),
+        showlegend=False,   # 260821 수정: 범례 삭제 — 행 라벨에 매장명이 이미 있어 불필요
         plot_bgcolor="white")
     return fig
 
@@ -8634,8 +8640,9 @@ div[data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"]{l
             st.info("아직 등록된 행사가 없어요 — 위에서 '외부몰 행사 확정' 폼을 올려 시작해 주세요.")
         else:
             sc1, sc2 = st.columns(2)
-            sch_from = sc1.date_input("스케쥴 시작일", value=today - timedelta(days=7), key="pm_sch_from")
-            sch_to = sc2.date_input("스케쥴 종료일", value=today + timedelta(days=45), key="pm_sch_to")
+            # 260821 수정: 기본 표시 기간 = 조회일부터 3주 (길게 잡으면 날짜 칸이 좁아져 글씨가 작아짐)
+            sch_from = sc1.date_input("스케쥴 시작일", value=today, key="pm_sch_from")
+            sch_to = sc2.date_input("스케쥴 종료일", value=today + timedelta(days=21), key="pm_sch_to")
             if sch_to < sch_from:
                 st.warning("스케쥴 종료일이 시작일보다 빨라요 — 기간을 다시 선택해 주세요.")
             else:
