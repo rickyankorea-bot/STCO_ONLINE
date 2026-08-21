@@ -7949,7 +7949,10 @@ def _render_login():
 PROMO_TABLE = "promo_events"
 PROMO_COLS = ["_pkey", "행사시작", "행사종료", "매장코드", "매장명", "품번",
               "최초가", "행사가", "쿠폰율", "쿠폰적용가", "최종할인율",
-              "실질판매가", "등록자", "등록자명", "등록시각"]
+              "실질판매가", "행사명", "등록자", "등록자명", "등록시각"]
+# 260821: "행사명" 컬럼 추가 — 확정 폼 업로드 시 "행사명은 무엇입니까?" 1회 입력받아
+# 그 업로드의 전 행에 저장(확정 행사 스케쥴·조회 표기용). 기존 운영 중인 테이블에는
+# _pm_ensure_table()이 자동으로 컬럼을 추가하므로 별도 DB 작업 불필요(기존 행은 공란).
 _PM_FORM_HEADERS = ["행사시작", "행사종료", "매장코드", "매장명", "품번",
                     "최초가", "행사가", "쿠폰율", "쿠폰적용가", "최종할인율"]
 _PM_NAVER_HEADERS = ["매장코드", "매장명", "품번", "최초가", "네이버가격", "할인율"]
@@ -8126,6 +8129,20 @@ def _pm_ensure_table(conn):
     defs = ", ".join(f'{q}{c}{q} TEXT' for c in PROMO_COLS if c != "_pkey")
     conn.exec_driver_sql(
         f'CREATE TABLE IF NOT EXISTS {q}{PROMO_TABLE}{q} ({q}_pkey{q} TEXT PRIMARY KEY, {defs})')
+    # 260821: 이미 운영 중인 테이블에 새 컬럼(행사명 등)이 없으면 자동 추가 — 기존 원장 데이터 보존
+    try:
+        if conn.engine.dialect.name == "postgresql":
+            have = {r[0] for r in conn.exec_driver_sql(
+                "SELECT column_name FROM information_schema.columns WHERE table_name=%s",
+                (PROMO_TABLE,)).fetchall()}
+        else:
+            have = {r[1] for r in conn.exec_driver_sql(
+                f'PRAGMA table_info("{PROMO_TABLE}")').fetchall()}
+        for c in PROMO_COLS:
+            if c not in have:
+                conn.exec_driver_sql(f'ALTER TABLE {q}{PROMO_TABLE}{q} ADD COLUMN {q}{c}{q} TEXT')
+    except Exception:
+        pass
 
 
 def _pm_key(r):
@@ -8133,8 +8150,10 @@ def _pm_key(r):
     return hashlib.md5(base.encode("utf-8")).hexdigest()
 
 
-def promo_insert(rows):
-    """행사 확정 원장 적재 — 동일 행사(기간+매장+품번+가격이 같은 행)는 건너뜀(재업로드 안전)."""
+def promo_insert(rows, event_name=""):
+    """행사 확정 원장 적재 — 동일 행사(기간+매장+품번+가격이 같은 행)는 건너뜀(재업로드 안전).
+    event_name(행사명, 260821): 업로드 시 1회 입력받아 이 업로드의 전 행에 저장.
+    (중복 판정 키에는 행사명이 안 들어가므로, 같은 행사를 다른 이름으로 재업로드해도 원본이 유지됨.)"""
     if not rows:
         return {"inserted": 0, "skipped": 0}
     user = st.session_state.get("auth_user", "") or ""
@@ -8156,6 +8175,8 @@ def promo_insert(rows):
                 skip += 1
                 continue
             seen.add(k)
+            r = dict(r)
+            r["행사명"] = str(r.get("행사명") or event_name or "").strip()
             vals = [k] + [("" if r.get(c) is None else str(r.get(c))) for c in PROMO_COLS[1:-3]] \
                  + [user, name, ts]
             conn.exec_driver_sql(sql, tuple(vals))
@@ -8175,6 +8196,9 @@ def promo_load():
         return pd.DataFrame(columns=PROMO_COLS)
     if df.empty:
         return df
+    if "행사명" not in df.columns:          # 컬럼 신설(260821) 이전에 읽힌 캐시/구 스키마 방어
+        df["행사명"] = ""
+    df["행사명"] = df["행사명"].fillna("").astype(str).replace("None", "")
     for c in ("최초가", "행사가", "쿠폰율", "쿠폰적용가", "최종할인율"):
         df["_" + c] = pd.to_numeric(df[c].map(_pm_num), errors="coerce")
     # 실질판매가는 항상 재계산(룰이 한 곳에만 살도록): 쿠폰적용가>0 → 쿠폰적용가, 아니면 행사가
@@ -8443,6 +8467,60 @@ def _pm_gantt(view, d_from, d_to, today_iso):
     return fig
 
 
+def _pm_sched_gantt(view, d_from, d_to, today_iso, mgr):
+    """📆 확정 행사 스케쥴 간트(메뉴1, 260821 신설 — 중태님 예시 엑셀 이미지 기준):
+    행 = [매장명 | 담당자 | 행사명], 막대 1개 = 행사(같은 매장·행사명·기간 묶음),
+    막대 안 = '최대할인율 XX%, {품번} {가격}원' — 그 행사에서 할인율이 가장 큰 품번과
+    그 품번의 실질판매가(중태님 확정: 최대할인율 품번 기준). 노란 세로선 = 오늘."""
+    g = view.copy()
+    # 할인율 = 최종할인율(있으면), 없으면 1 - 실질판매가/최초가 로 계산
+    alt = 1 - g["_실질판매가"] / g["_최초가"]
+    g["_할인율계"] = g["_최종할인율"].fillna(alt)
+    rows = []
+    for (code, name, ev, s, e), grp in g.groupby(
+            ["매장코드", "매장명", "행사명", "행사시작", "행사종료"], dropna=False):
+        if grp["_할인율계"].notna().any():
+            top = grp.loc[grp["_할인율계"].idxmax()]
+        elif grp["_실질판매가"].notna().any():
+            top = grp.loc[grp["_실질판매가"].idxmin()]
+        else:
+            top = grp.iloc[0]
+        dtxt = f"{top['_할인율계']:.0%}" if pd.notna(top["_할인율계"]) else "-"
+        ptxt = f" {int(top['_실질판매가']):,}원" if pd.notna(top["_실질판매가"]) else ""
+        rows.append({
+            "매장명": str(name), "행사명": (str(ev).strip() or "(행사명 미입력)"),
+            "_s": pd.Timestamp(s), "_e": pd.Timestamp(e) + pd.Timedelta(days=1),
+            "행라벨": f"{name} | {mgr.get(str(code).strip(), '')} | {str(ev).strip() or '(행사명 미입력)'}",
+            "막대표기": f"최대할인율 {dtxt}, {top['품번']}{ptxt}",
+            "기간": f"{s} ~ {e}", "품번수": len(grp)})
+    sched = pd.DataFrame(rows).sort_values(["_s", "매장명", "행사명"]).reset_index(drop=True)
+    sched["_rowid"] = sched["행라벨"] + "|" + sched.index.astype(str)
+    fig = px.timeline(
+        sched, x_start="_s", x_end="_e", y="_rowid", color="매장명", text="막대표기",
+        hover_data={"행사명": True, "기간": True, "품번수": True,
+                    "_s": False, "_e": False, "_rowid": False})
+    fig.update_traces(textposition="inside", insidetextanchor="middle",
+                      marker_line_color="rgba(0,0,0,0.25)", marker_line_width=0.5)
+    fig.update_yaxes(autorange="reversed", title=None, tickmode="array",
+                     tickvals=sched["_rowid"].tolist(), ticktext=sched["행라벨"].tolist(),
+                     categoryorder="array", categoryarray=sched["_rowid"].tolist())
+    fig.update_xaxes(title=None, side="top",
+                     range=[pd.Timestamp(d_from), pd.Timestamp(d_to) + pd.Timedelta(days=1)],
+                     dtick="D1", tickformat="%m/%d", tickfont=dict(size=10), showgrid=True,
+                     gridcolor="rgba(0,0,0,0.06)")
+    t0 = pd.Timestamp(today_iso) + pd.Timedelta(hours=12)
+    fig.add_shape(type="line", x0=t0, x1=t0, y0=0, y1=1, yref="paper",
+                  line=dict(color="#f4d03f", width=3))
+    fig.add_annotation(x=t0, y=1.02, yref="paper", text="오늘", showarrow=False,
+                       font=dict(size=11, color="#b7950b"))
+    fig.update_layout(
+        height=max(320, 34 * len(sched) + 150),
+        margin=dict(l=10, r=10, t=60, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.05, title=None),
+        plot_bgcolor="white")
+    return fig
+
+
 def render_price_mgmt():
     """💰 최저가 관리 메뉴 — 전 팀원 입력 가능(공동 원장), 삭제는 본인 등록분 또는 관리자만."""
     st.subheader("💰 최저가 관리 — 외부몰 최저가 행사")
@@ -8529,9 +8607,15 @@ div[data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"]{l
                 st.caption(f"📄 읽은 행사: **{len(rows1)}건** — 아래 내용 확인 후 등록해 주세요. "
                            "(실질판매가 = 쿠폰적용가 있으면 쿠폰적용가, 없으면 행사가)")
                 st.dataframe(prev, use_container_width=True, hide_index=True)
+                # 260821: 행사명 1회 입력 → 이 업로드의 전 행에 저장(확정 행사 스케쥴·조회 표기용)
+                ev_name = st.text_input("행사명은 무엇입니까?", key="pm_event_name",
+                                        placeholder="예: 무신사 8월 최저가 위크")
+                if not ev_name.strip():
+                    st.info("👆 행사명을 입력하면 등록 버튼이 활성화돼요 — 아래 '확정 행사 스케쥴' "
+                            "간트차트에 이 이름으로 표기돼요.")
                 if st.button("② 원장에 행사 등록", type="primary", use_container_width=True,
-                             key="pm_confirm_btn"):
-                    res = promo_insert(rows1)
+                             key="pm_confirm_btn", disabled=not ev_name.strip()):
+                    res = promo_insert(rows1, ev_name.strip())
                     st.session_state["pm_flash"] = True
                     st.session_state["pm_flash_msg"] = (
                         f"행사 등록 완료 ✅ 신규 {res['inserted']:,}건 · "
@@ -8539,6 +8623,29 @@ div[data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"]{l
                     st.rerun()
             elif not errs1:
                 st.info("폼에서 읽을 데이터 행이 없어요 — 회색 영역을 채워서 올려주세요.")
+
+        st.divider()
+        # ── 📆 확정 행사 스케쥴 (260821 신설 — 금일 최저가 현황 위) ─────────────────
+        st.markdown("##### 📆 확정 행사 스케쥴")
+        st.caption("등록 완료된 행사 계획을 간트차트로 보여줘요 — 행 = **매장명 | 담당자 | 행사명**, "
+                   "막대 안 = 그 행사의 **최대할인율**과 최대할인 품번·실질판매가, 노란 세로선 = 오늘. "
+                   "같은 매장·행사명·기간으로 등록된 품번들은 막대 1개로 묶여요(품번 수는 마우스 오버로 확인).")
+        if ledger.empty:
+            st.info("아직 등록된 행사가 없어요 — 위에서 '외부몰 행사 확정' 폼을 올려 시작해 주세요.")
+        else:
+            sc1, sc2 = st.columns(2)
+            sch_from = sc1.date_input("스케쥴 시작일", value=today - timedelta(days=7), key="pm_sch_from")
+            sch_to = sc2.date_input("스케쥴 종료일", value=today + timedelta(days=45), key="pm_sch_to")
+            if sch_to < sch_from:
+                st.warning("스케쥴 종료일이 시작일보다 빨라요 — 기간을 다시 선택해 주세요.")
+            else:
+                sub = ledger[(ledger["행사시작"] <= sch_to.isoformat())
+                             & (ledger["행사종료"] >= sch_from.isoformat())]
+                if sub.empty:
+                    st.info("선택한 기간에 걸치는 행사가 없어요.")
+                else:
+                    st.plotly_chart(_pm_sched_gantt(sub, sch_from, sch_to, today_iso, _mgr_d),
+                                    use_container_width=True)
 
         st.divider()
         st.markdown("##### 📍 금일 품번별 최저가 현황")
@@ -8585,7 +8692,8 @@ div[data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"]{l
             st.caption(f"조회 결과: **{len(view):,}건**")
             st.dataframe(pd.DataFrame([{
                 "상태": v["상태"], "행사시작": v["행사시작"], "행사종료": v["행사종료"],
-                "매장코드": v["매장코드"], "매장명": v["매장명"], "품번": v["품번"],
+                "매장코드": v["매장코드"], "매장명": v["매장명"],
+                "행사명": v["행사명"], "품번": v["품번"],
                 "최초가": _pm_fmt_won(v["_최초가"]), "행사가": _pm_fmt_won(v["_행사가"]),
                 "쿠폰율": _pm_fmt_rate(v["_쿠폰율"]), "쿠폰적용가": _pm_fmt_won(v["_쿠폰적용가"]),
                 "실질판매가": _pm_fmt_won(v["_실질판매가"]),
@@ -8599,7 +8707,7 @@ div[data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"]{l
                 if dele.empty:
                     st.caption("삭제할 수 있는 행사가 없어요.")
                 else:
-                    opts = {f'{v["품번"]} · {v["매장명"]} · {v["행사시작"]}~{v["행사종료"]} · '
+                    opts = {f'{(v["행사명"] or "행사명없음")} · {v["품번"]} · {v["매장명"]} · {v["행사시작"]}~{v["행사종료"]} · '
                             f'{_pm_fmt_won(v["_실질판매가"])}원 · {v["등록자명"] or v["등록자"]}': v["_pkey"]
                             for _, v in dele.sort_values("행사시작", ascending=False).iterrows()}
                     sel = st.multiselect("삭제할 행사 선택", list(opts.keys()), key="pm_del_sel")
