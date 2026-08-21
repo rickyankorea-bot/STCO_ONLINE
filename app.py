@@ -1776,7 +1776,7 @@ def _league_board_html(lg_name, icon, hcolor, subtitle, entries, show_n=11):
 def render_dashboard(df):
     """종합 대시보드 (2026-07-31 전면 개편 · 목업 컨펌) — 전체 그림 + 자동 인사이트.
 
-    ① KPI 5장: 누계 매출 전년비 · 연간 진도율(vs 시간진도) · 당월 매출 전년비 · 당월 진도율 · 누계 판가율
+    ① KPI 6장: 누계 매출 전년비 · 연간 진도율(vs 시간진도) · 당월 매출 전년비 · 당월 진도율 · 누계 판가율 · S/D/L 신상매출(항목22)
     ② 월별 매출(올해 vs 전년 vs 사업계획 점선) ③ 자동 인사이트(성장/부진 채널·아이템·신상 비중·판가율)
     ④ 아이템그룹 증감액 + 연차 구성 변화 ⑤ 채널 TOP10(색=전년비).
     필터 없음 = 회사 전체 기준(사업계획 진도율 정합성). 금액 백만원(룰1)·연도 2자리(룰2).
@@ -1813,8 +1813,11 @@ def render_dashboard(df):
     pg26 = (ry / oy) if oy else None
     pg25 = (rpy / opy) if opy else None
 
-    # ── ① KPI 5장 ──
-    k1, k2, k3, k4, k5 = st.columns(5)
+    # ── ① KPI 6장 (항목22 · 260821: S/D/L 신상매출 카드 추가) ──
+    _sdl_new = lambda x: x[x["브랜드명"].isin(SDL_BRANDS) & x["연차"].isin(["신상", "내년신상"])]
+    sdl_y = float(_sdl_new(cur_y)["_매출액"].sum())
+    sdl_py = float(_sdl_new(prev_y)["_매출액"].sum())
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
     k1.metric(f"{sc}년 누계 매출(백만)", f"{_mm(ry):,.0f}",
               f"{(ry-rpy)/rpy*100:+.1f}% vs 전년 {_mm(rpy):,.0f}" if rpy else None)
     tprog_y = float(asof.dayofyear) / (366.0 if asof.is_leap_year else 365.0)
@@ -1842,6 +1845,9 @@ def render_dashboard(df):
     k5.metric("누계 판가율", f"{pg26*100:.1f}%" if pg26 is not None else "–",
               f"{(pg26-pg25)*100:+.1f}%p vs 전년 {pg25*100:.1f}%"
               if (pg26 is not None and pg25 is not None) else None)
+    k6.metric("S/D/L 신상매출(백만)", f"{_mm(sdl_y):,.0f}",
+              f"{(sdl_y-sdl_py)/sdl_py*100:+.1f}% vs 전년 {_mm(sdl_py):,.0f}" if sdl_py else None)
+    k6.caption(f"{sc}년 누계 · STCO/DIEMS/GENDERLESS · 연차 신상+내년신상")
 
     # ── ② 월별 매출: 올해 vs 전년 vs 사업계획 ──
     st.markdown(f"### 월별 매출 — {sc}년 vs {sy}년 vs 사업계획")
@@ -1862,6 +1868,70 @@ def render_dashboard(df):
                       legend=dict(orientation="h", y=1.1), yaxis_title="백만원")
     st.plotly_chart(fig, use_container_width=True)
     st.caption("※ 남은 달은 계획 점선만 보여요 — 앞으로 채울 목표. 막대에 마우스를 올리면 값이 떠요.")
+
+    # ── ④ 자동 인사이트 (항목23 · 260821: 카테고리별 매장 랭킹 위로 이동 · 부진채널=1·2부리그 한정) ──
+    def _render_insights():
+        """자동 인사이트 렌더 — 아이템그룹 증감표(ig)를 반환(아래 ④ 차트에서 재사용)."""
+        def _topdiff(cur, prev, col):
+            a = cur.groupby(col, observed=True)["_매출액"].sum()
+            b = prev.groupby(col, observed=True)["_매출액"].sum()
+            m = pd.concat([a, b], axis=1, keys=["c", "p"]).fillna(0.0)
+            m = m[(m["c"] != 0) | (m["p"] != 0)]
+            m["d"] = m["c"] - m["p"]
+            return m.sort_values("d", ascending=False)
+
+        def _ent(name, r):
+            pct = f" ({r['d']/r['p']*100:+.1f}%)" if r["p"] else " (신규)"
+            color = "#1f8a4c" if r["d"] >= 0 else "#c62828"
+            return f"<b>{name}</b> <span style='color:{color};font-weight:700'>{r['d']/1e6:+,.1f}</span>{pct}"
+
+        lines = []
+        if chan and not prev_y.empty:
+            # 채널 인사이트도 쿠팡토탈·네이버토탈 통합 기준으로 계산
+            chdf = pd.DataFrame([(k, e["c"], e["p"], e.get("lg")) for k, e in chan.items()],
+                                columns=["k", "c", "p", "lg"]).set_index("k")
+            chdf = chdf[(chdf["c"] != 0) | (chdf["p"] != 0)]
+            chdf["d"] = chdf["c"] - chdf["p"]
+            ch = chdf.sort_values("d", ascending=False)
+            ups = ch[ch["d"] > 0].head(2)
+            # 부진 채널(항목23 · 260821): 1부리그·2부리그 매장만 대상 — 꿈나무리그·리그 미지정 제외
+            _has_lg = ch["lg"].notna().any()
+            ch_dn = ch[ch["lg"].isin(["1부리그", "2부리그"])] if _has_lg else ch
+            dns = ch_dn[ch_dn["d"] < 0].tail(2).iloc[::-1]
+            if not ups.empty:
+                lines.append("<b>성장 견인 채널</b>: " + " · ".join(_ent(str(i), r) for i, r in ups.iterrows()))
+            if not dns.empty:
+                lines.append("<b>부진 채널</b>" + ("(1·2부리그)" if _has_lg else "") + ": "
+                             + " · ".join(_ent(str(i), r) for i, r in dns.iterrows()))
+        ig = _topdiff(cur_y, prev_y, "아이템그룹") if (not prev_y.empty and "아이템그룹" in d.columns) else pd.DataFrame()
+        if not ig.empty:
+            top, bot = ig.iloc[0], ig.iloc[-1]
+            seg = "<b>아이템</b>: " + _ent(str(ig.index[0]), top) + " 성장 1위"
+            if bot["d"] < 0:
+                seg += " / " + _ent(str(ig.index[-1]), bot) + " 부진 1위"
+            lines.append(seg)
+        if "연차" in d.columns and ry and rpy:
+            s26 = float(cur_y[cur_y["연차"].isin(["신상", "내년신상"])]["_매출액"].sum()) / ry
+            s25 = float(prev_y[prev_y["연차"].isin(["신상", "내년신상"])]["_매출액"].sum()) / rpy
+            lines.append(f"<b>연차 구성</b>: 신상 비중 <b>{s26*100:.1f}%</b> "
+                         f"(전년 {s25*100:.1f}%, {(s26-s25)*100:+.1f}%p)")
+        if pg26 is not None and pg25 is not None:
+            dv = (pg26 - pg25) * 100
+            if dv <= -1:
+                lines.append(f"<b>주의</b>: 누계 판가율 <span style='color:#c62828;font-weight:700'>{dv:+.1f}%p</span>"
+                             " — 매출 대비 할인 폭이 커지는 추세")
+            else:
+                lines.append(f"<b>판가율</b>: 전년비 {dv:+.1f}%p")
+        if lines:
+            st.markdown("### 📌 자동 인사이트")
+            body = "<br>".join(f"{i+1}. {t}" for i, t in enumerate(lines))
+            st.markdown("<div style='background:#f7f9fc;border:1px solid #dde6f0;border-radius:8px;"
+                        f"padding:12px 16px;font-size:0.9rem;line-height:1.9;'>{body}</div>",
+                        unsafe_allow_html=True)
+
+        return ig
+
+    _ins_done = False
 
     # ── ③ 채널 랭킹 (2026-07-31 목업 v3 컨펌 + 수정: 연간/월간 토글 · '26년 미운영' 제외) ──
     #    쿠팡토탈(SD185+SD184)·네이버토탈(SD165+SD174) 합산 = 대시보드 채널 공통 기준(인사이트 포함)
@@ -1918,8 +1988,8 @@ def render_dashboard(df):
 
         t1, t2 = st.columns([3, 2])
         t1.markdown("### 🏟️ 채널 랭킹")
-        mode = t2.radio("랭킹 기준", ["연간랭킹", "월간랭킹"], horizontal=True,
-                        label_visibility="collapsed", key="dash_rank_mode")
+        mode = t2.radio("랭킹 기준", ["연간랭킹", "월간랭킹"], index=1, horizontal=True,
+                        label_visibility="collapsed", key="dash_rank_mode")   # 기본=월간랭킹(항목23 · 260821)
         fcur, fprev = (cur_y, prev_y) if mode == "연간랭킹" else (cur_m, prev_m)
         rng_txt = (f"연간누계 {y_start.date()} → {asof.date()}" if mode == "연간랭킹"
                    else f"당월 {m_start.date()} → {asof.date()}")
@@ -1947,6 +2017,8 @@ def render_dashboard(df):
                 note += f" · 리그 미지정 {n_un}개 채널은 랭킹 미포함(마스터에 리그구분 입력 시 반영)"
             st.caption(note)
 
+        ig = _render_insights(); _ins_done = True   # 자동 인사이트 → 카테고리별 매장 랭킹 위쪽에 표시
+
         # ── ③-2 카테고리별 매장 랭킹 (2026-08-03 추가): 채널 랭킹과 동일한 토글(연간/월간)·기간에 연동 ──
         #    슈트류(중카테고리) · 온라인셔츠(브랜드 J 전체) · FW+NT+BE(신발+넥타이+벨트) — 각각 매출 많은 매장 TOP10.
         #    순위 기준=실판매금액. 채널 랭킹과 동일하게 쿠팡토탈·네이버토탈 합산, '26년 미운영' 매장 제외.
@@ -1962,59 +2034,8 @@ def render_dashboard(df):
                        "매출 상위 10개 매장만 노출 · 막대=보드 내 상대 크기 · "
                        "쿠팡토탈=SD185+SD184 · 네이버토탈=SD165+SD174 합산 · '26년 미운영' 매장 제외.")
 
-    # ── ④ 자동 인사이트 ──
-    def _topdiff(cur, prev, col):
-        a = cur.groupby(col, observed=True)["_매출액"].sum()
-        b = prev.groupby(col, observed=True)["_매출액"].sum()
-        m = pd.concat([a, b], axis=1, keys=["c", "p"]).fillna(0.0)
-        m = m[(m["c"] != 0) | (m["p"] != 0)]
-        m["d"] = m["c"] - m["p"]
-        return m.sort_values("d", ascending=False)
-
-    def _ent(name, r):
-        pct = f" ({r['d']/r['p']*100:+.1f}%)" if r["p"] else " (신규)"
-        color = "#1f8a4c" if r["d"] >= 0 else "#c62828"
-        return f"<b>{name}</b> <span style='color:{color};font-weight:700'>{r['d']/1e6:+,.1f}</span>{pct}"
-
-    lines = []
-    if chan and not prev_y.empty:
-        # 채널 인사이트도 쿠팡토탈·네이버토탈 통합 기준으로 계산
-        chdf = pd.DataFrame([(k, e["c"], e["p"]) for k, e in chan.items()],
-                            columns=["k", "c", "p"]).set_index("k")
-        chdf = chdf[(chdf["c"] != 0) | (chdf["p"] != 0)]
-        chdf["d"] = chdf["c"] - chdf["p"]
-        ch = chdf.sort_values("d", ascending=False)
-        ups = ch[ch["d"] > 0].head(2)
-        dns = ch[ch["d"] < 0].tail(2).iloc[::-1]
-        if not ups.empty:
-            lines.append("<b>성장 견인 채널</b>: " + " · ".join(_ent(str(i), r) for i, r in ups.iterrows()))
-        if not dns.empty:
-            lines.append("<b>부진 채널</b>: " + " · ".join(_ent(str(i), r) for i, r in dns.iterrows()))
-    ig = _topdiff(cur_y, prev_y, "아이템그룹") if (not prev_y.empty and "아이템그룹" in d.columns) else pd.DataFrame()
-    if not ig.empty:
-        top, bot = ig.iloc[0], ig.iloc[-1]
-        seg = "<b>아이템</b>: " + _ent(str(ig.index[0]), top) + " 성장 1위"
-        if bot["d"] < 0:
-            seg += " / " + _ent(str(ig.index[-1]), bot) + " 부진 1위"
-        lines.append(seg)
-    if "연차" in d.columns and ry and rpy:
-        s26 = float(cur_y[cur_y["연차"].isin(["신상", "내년신상"])]["_매출액"].sum()) / ry
-        s25 = float(prev_y[prev_y["연차"].isin(["신상", "내년신상"])]["_매출액"].sum()) / rpy
-        lines.append(f"<b>연차 구성</b>: 신상 비중 <b>{s26*100:.1f}%</b> "
-                     f"(전년 {s25*100:.1f}%, {(s26-s25)*100:+.1f}%p)")
-    if pg26 is not None and pg25 is not None:
-        dv = (pg26 - pg25) * 100
-        if dv <= -1:
-            lines.append(f"<b>주의</b>: 누계 판가율 <span style='color:#c62828;font-weight:700'>{dv:+.1f}%p</span>"
-                         " — 매출 대비 할인 폭이 커지는 추세")
-        else:
-            lines.append(f"<b>판가율</b>: 전년비 {dv:+.1f}%p")
-    if lines:
-        st.markdown("### 📌 자동 인사이트")
-        body = "<br>".join(f"{i+1}. {t}" for i, t in enumerate(lines))
-        st.markdown("<div style='background:#f7f9fc;border:1px solid #dde6f0;border-radius:8px;"
-                    f"padding:12px 16px;font-size:0.9rem;line-height:1.9;'>{body}</div>",
-                    unsafe_allow_html=True)
+    if not _ins_done:
+        ig = _render_insights()
 
     # ── ④ 아이템그룹 증감액 + 연차 구성 변화 ──
     c1, c2 = st.columns(2)
@@ -4082,10 +4103,12 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
 
     group_opts = list(_CHANNEL_MASKS.keys()) + list(_BRAND_MASKS.keys())
     age_opts = [lbl for lbl, _ in _AGE_BUCKET_DEFS]
+    season_opts = sorted(pool["시즌명"].dropna().astype(str).unique()) if "시즌명" in pool.columns else []
     with st.form("wk_cat_form"):
-        wc0, wc1, wc2 = st.columns([1.6, 1, 1])
+        wc0, wc1, wc3, wc2 = st.columns([1.6, 1, 1, 1])   # 시즌 필터 추가(항목24 · 260821)
         selg = wc0.multiselect("유통/브랜드 선택", group_opts, default=[], placeholder="전체", key="wk_cat_grp")
         sela = wc1.multiselect("연차", age_opts, default=[], placeholder="전체", key="wk_cat_age")
+        sels = wc3.multiselect("시즌", season_opts, default=[], placeholder="전체", key="wk_cat_season")
         dim = wc2.radio("아이템 or 매장", WK_DIM_OPTS, horizontal=True, key="wk_cat_dim")
         run = st.form_submit_button("🔍 상세보기", type="primary")
     if _need_search("wk_cat_go", run):
@@ -4113,6 +4136,8 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
                 bucket = dict(_AGE_BUCKET_DEFS)[lbl]
                 age_vals |= set(bucket) if bucket is not None else rest_ages
             out = out[out["연차"].astype(str).isin(age_vals)]
+        if sels and "시즌명" in out.columns:
+            out = out[out["시즌명"].astype(str).isin(sels)]
         return out
 
     fcm, fpm, fcy, fpy = _apply(cur_m), _apply(prev_m), _apply(cur_y), _apply(prev_y)
@@ -4122,7 +4147,8 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
 
     _selg_txt = "·".join(selg) if selg else "전체"
     _sela_txt = "·".join(sela) if sela else "전체"
-    label = f"유통/브랜드: {_selg_txt} · 연차: {_sela_txt}"
+    _sels_txt = "·".join(sels) if sels else "전체"
+    label = f"유통/브랜드: {_selg_txt} · 연차: {_sela_txt} · 시즌: {_sels_txt}"
     _all_true = lambda x: pd.Series(True, index=x.index)   # 이미 필터링된 데이터를 그대로 통과시킴
 
     if dim == "아이템":
@@ -4130,7 +4156,7 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
         render_weekly_item_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, click_ns="cat")
     else:
         render_weekly_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, show_plan=False)
-    st.caption("※ 유통/브랜드·연차는 다중선택(선택한 항목 중 하나라도 해당하면 포함, OR 조건) — "
+    st.caption("※ 유통/브랜드·연차·시즌은 다중선택(선택한 항목 중 하나라도 해당하면 포함, OR 조건) — "
                "빈칸이면 전체. '아이템'은 중카테고리(아이템그룹) 기준 breakdown, '매장별'은 위 필터에 "
                "해당하는 매장 목록을 보여줘요. 비중=선택 조건 내 비중, 필터가 걸린 상태라 사업계획·진도율은 "
                "'–'로 표시돼요.")
