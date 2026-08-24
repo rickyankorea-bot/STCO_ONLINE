@@ -1099,9 +1099,47 @@ def _fs_brand_rows():
     ]
 
 
+def _sort_perf_rows(D, sort_spec, extra_rows, two_blk, cy=None):
+    """260824(중태님 요청): 표 행 재정렬 — A. 유통채널별 표 정렬 필터용.
+
+    sort_spec=(블록라벨, 지표그룹, 하위항목, 오름차순여부).
+    하위항목 "CUR"는 기준연도 라벨("26년" 등)로 자동 치환 — cy에 따라 연도 라벨이 동적이라
+    호출부에서 미리 못 박을 수 없어서 여기서 치환한다(yoy_frame의 cur_lbl 계산과 동일 규칙).
+
+    행 재정렬 규칙:
+    - G.TOTAL은 항상 맨 위 고정.
+    - extra_rows(담당자별 TOTAL 등) 블록은 G.TOTAL 바로 아래 '블록 위치'를 유지한 채,
+      블록 안에서만 같은 기준으로 재정렬 — perf_table의 extra_rows 강조 CSS가
+      "항상 2 ~ (1+개수) 행" 위치를 전제하므로(nth-child) 블록 위치를 흩으면 안 된다.
+    - 나머지 개별 행(매장 등)도 같은 기준으로 재정렬.
+    - 값이 없는 칸("–", 예: 전년 매출 0이라 증감율 없음)은 오름/내림 무관하게 항상 맨 아래.
+    """
+    blk, top, sub, ascending = sort_spec
+    if sub == "CUR":
+        sub = f"{cy % 100:02d}년" if cy is not None else "26년"
+    col = (blk, top, sub) if two_blk else (top, sub)
+    if col not in D.columns:
+        return D                      # 방어: 라벨 불일치 시 기존 순서 그대로(크래시 금지)
+    extra_set = {lbl for lbl, _ in extra_rows} if extra_rows else set()
+    mids = [k for k in D.index if k in extra_set and k != "G.TOTAL"]
+    rest = [k for k in D.index if k != "G.TOTAL" and k not in extra_set]
+
+    def _key(k):
+        v = D.at[k, col]
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            v = None
+        if v is None or pd.isna(v):
+            return (1, 0.0)
+        return (0, v if ascending else -v)
+    head = ["G.TOTAL"] if "G.TOTAL" in D.index else []
+    return D.reindex(head + sorted(mids, key=_key) + sorted(rest, key=_key))
+
+
 def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False,
                month=None, blk_labels=("당월누계", "연간누계"), preview=False, big_title=False,
-               cy=None, extra_rows=None, extra_row_color=None):
+               cy=None, extra_rows=None, extra_row_color=None, sort_spec=None):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
 
     extra_row_color(260818 추가): extra_rows 강조 색. 안 주면 기존 하늘색(_XR_FILL_SKY).
@@ -1125,6 +1163,9 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     것인지" 헷갈리지 않게 한다(가운데 컨펌 캡처 기준).
     cy=기준연도를 넘기면 표 안의 연도 컬럼 라벨("25년"/"26년" 등)이 그 연도 기준으로
     동적 계산된다 — 안 넘기면 과거 하드코딩 기본값 유지(2026-08-07 버그수정).
+    sort_spec=(블록라벨, 지표그룹, 하위항목, 오름차순여부) (260824 추가, 중태님 요청)이면
+    기본 정렬(연간누계 실판매금액 내림차순) 대신 그 기준으로 행을 재정렬한다 —
+    _sort_perf_rows 참고. 현재 사용처: 유통별 세부 분석 A. 유통채널별 표.
     """
     if month is not None:
         cur_m, prev_m = month
@@ -1132,6 +1173,10 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
                        season_rows=season_rows, blk_labels=blk_labels, cy=cy, extra_rows=extra_rows)
     else:
         D = yoy_frame(cur, prev, dim, order_list, season_rows=season_rows, cy=cy, extra_rows=extra_rows)
+    # 260824(중태님 요청): 정렬 필터 — 선택한 (기간블록×지표×방향)으로 행 재정렬.
+    # 미리보기(preview)는 스켈레톤이라 정렬 의미가 없어 건너뜀(전부 0이라 순서 변화도 없음).
+    if sort_spec and not preview:
+        D = _sort_perf_rows(D, sort_spec, extra_rows, month is not None, cy=cy)
     if extra:
         _name, _map = extra
         # 2026-08-07: D.columns가 2단(단일블록)/3단(month 2블록) 어느 쪽이든 삽입 키의
@@ -2174,7 +2219,20 @@ def render_channel_brand(df):
     if not tot_p:
         st.warning("전년 동기간 데이터가 없어요. 기간을 조정하거나 전년 로우데이터를 적재하세요.")
 
-    st.markdown("### A. 유통채널별 (매출 순)")
+    # ── 260824(중태님 요청): A표 정렬 필터 — 기간(연간누계/조회기간) × 지표(실판매금액/
+    #    매출 증감율/판가율) × 방향(내림/오름). 조회 폼 밖·표 바로 위에 두어 🔍 조회를 다시
+    #    누르지 않아도 바꾸는 즉시 재정렬된다(행 순서만 바뀌고 숫자·집계는 그대로).
+    #    기본값(연간누계·실판매금액·내림차순)은 기존 표와 100% 동일한 순서.
+    _CB_SORT_METRICS = {"실판매금액": ("실판매금액(백만)", "CUR"),
+                        "매출 증감율": ("실판매금액(백만)", "증감율"),
+                        "판가율": ("판가율", "CUR")}
+    sc1, sc2, sc3, _sc_sp = st.columns([1.1, 1.1, 1.1, 2.2])
+    _s_blk = sc1.selectbox("정렬 기준 기간", ("연간누계", "조회기간"), key="cb_sort_blk")
+    _s_met = sc2.selectbox("정렬 지표", list(_CB_SORT_METRICS), key="cb_sort_met")
+    _s_dir = sc3.selectbox("정렬 방향", ("내림차순 ↓", "오름차순 ↑"), key="cb_sort_dir")
+    _s_asc = _s_dir.startswith("오름")
+    _cb_sort_spec = (_s_blk, *_CB_SORT_METRICS[_s_met], _s_asc)
+    st.markdown(f"### A. 유통채널별 ({_s_blk} {_s_met} {'오름차순 ↑' if _s_asc else '내림차순 ↓'})")
     # 매장명(행) → 담당자 매핑: 표 맨 앞 '담당자' 컬럼으로 표시
     _cm = d[["_채널", "_담당자"]].astype(str).drop_duplicates(subset=["_채널"])
     # 260805: pandas 3.x에서는 astype(str) 후에도 결측이 float(nan)으로 남아 .strip()이 터진다.
@@ -2199,9 +2257,10 @@ def render_channel_brand(df):
         for m in _ch_mans]
     perf_table(cur_y, prev_y, "_채널", None, "유통채널별 매출현황", "cb_ch",
                extra=("담당자", chan_mgr), month=(cur, prev), blk_labels=("조회기간", "연간누계"),
-               extra_rows=mgr_extra_rows, cy=cy_cb)
+               extra_rows=mgr_extra_rows, cy=cy_cb, sort_spec=_cb_sort_spec)
     st.caption("※ 채널을 자사몰/외부몰 등 그룹으로 묶으려면 '채널 기준정보(매핑)'가 필요해요 — 준비되면 그룹 집계도 추가해드릴게요. "
-               "G.TOTAL 아래 담당자별 TOTAL(연간누계 매출 큰 순) → 개별 매장 순으로 표시돼요. "
+               "G.TOTAL 아래 담당자별 TOTAL → 개별 매장 순으로, 두 구간 모두 위에서 고른 정렬 기준을 따라요 "
+               "(값이 없는 행(–)은 항상 맨 아래). 정렬은 바꾸는 즉시 반영 — 🔍 조회를 다시 누를 필요 없어요. "
                "담당자 미지정 매장은 담당자별 TOTAL 어디에도 안 잡히지만 G.TOTAL엔 포함돼요.")
 
     st.markdown("### B. 브랜드별")
