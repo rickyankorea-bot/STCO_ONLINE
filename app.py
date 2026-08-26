@@ -4371,7 +4371,7 @@ def render_weekly_report(df):
 
 
 # ==============================================================================
-# 재고 모니터링 1차 가공  ─ 260731 확정 기준 · v3.3 113열 (2026-08-02 ERP 이식, 260811 사이즈구분 컬럼 + 가격시뮬 반영)
+# 재고 모니터링 1차 가공  ─ 260731 확정 기준 · v3.5 123열 (2026-08-02 ERP 이식, 260811 사이즈구분 컬럼 + 가격시뮬 + 260826 SET가격 9컬럼 + 260826-2 물량등급 반영)
 # ==============================================================================
 # 원본: '쇼핑몰재고 모니터링 자료 1차 가공' 프로젝트 process_260731.py (판정 로직 1:1 이식)
 #  · 선판정: 수정일='오프라인' → AA·AB·AF '오프라인' / 온라인창고<20 → AA·AF '재고20미만'(AB 미적용)
@@ -4439,6 +4439,7 @@ INV_RAW_COLS = 94          # 로우데이터 총 열 수 (구 93 → 94, '사이
 INV_RAW_MOLGA_COL = 9      # raw 0-index — 몰가격(J열)
 INV_RAW_GIJUN_COL = 27     # raw 0-index — 기준판매가(AB열)
 INV_RAW_CHOJOGA_COL = 7    # raw 0-index — 최초가(H열). 260814: 기준판매가가 공란일 때의 대체 캡핑 기준.
+INV_RAW_HYUNPAN_COL = 8    # raw 0-index — 현판가(I열). 260826: SET 가격 합산에 사용.
 # 260811(가격시뮬): 몰가격(22) 바로 뒤에 ① 기준판매가 복제 1컬럼(녹색) → ② 신규 가격 5컬럼(노란색)
 # 순서로 삽입 — 결과물 107 → 112 → 113열(v3.3)로 확장.
 INV_GIJUN_COPY_COL = 23    # 기준판매가 복제 컬럼 위치(몰가격 바로 다음, 원본 기준판매가는 뒤쪽 그대로 유지)
@@ -4446,8 +4447,25 @@ INV_PRICE_SIM_COL = 24     # 신규 가격 5컬럼 시작 위치(기준판매가
 INV_PRICE_SIM_N = 5
 INV_PRICE_SIM_HEADERS = ["(네이버) 상시가", "(쿠폰진행) 상시가", "(쿠폰진행) 행사가",
                          "(쿠폰X/무배) 상시가", "(쿠폰X/무배) 행사가"]
-INV_TOTAL_COLS = 113       # 결과물 총 열 수 (구 106→107→112→113)
-INV_SIZECODE_COL = 98      # 결과물에서 '사이즈구분' 컬럼 위치 (구 92 + 가격시뮬 5칸 + 기준판매가 복제 1칸)
+# 260826(SET가격 9컬럼, 중태님 지시 — 수기 샘플 엑셀 "단품가격에 SET 가격 추가.xlsx"와 동일 규격):
+# 단품가격 블록(20~28: 최초가·현판가·몰가격·기준판매가·가격시뮬5) 바로 뒤에 "SET 가격" 9컬럼
+# (29~37, 같은 구성)을 신설 — 결과물 113 → 122열(v3.4)로 확장. SET품번으로 짝지어진 상의+하의의
+# 단품가격 9칸을 각각 합산해(엑셀 수기 수식 =T상의행+T하의행 방식 그대로) 짝 양쪽 행에 동일하게
+# 기입한다. 사이즈 매칭 성패(SET구성실패 포함)와 무관하게 상/하 데이터가 다 있으면 계산하고,
+# 단품아이템·짝 없는 세트상품 행은 9칸 전부 공란. 구 113열 템플릿은 자동으로 9컬럼을 삽입해
+# 122열로 보정한다(구 106·107·108·112 템플릿도 기존 체인을 거쳐 113→122까지 순차 보정).
+INV_SET_PRICE_COL = 29     # SET 가격 9컬럼 시작 위치(단품 (쿠폰X/무배) 행사가 바로 다음)
+INV_SET_PRICE_N = 9
+INV_SET_PRICE_HEADERS = ["최초가", "현판가", "몰가격", "기준판매가"] + INV_PRICE_SIM_HEADERS
+# 260826-2(물량등급, 중태님 지시): 최초출고일(40)과 기간판매수량분석 사이(41번째)에 "물량등급"
+# 1컬럼 신설 — 결과물 122 → 123열(v3.5). 온라인창고 재고(재고20미만 판정과 같은 소스, raw 40번째
+# 열) 숫자를 기준으로 A/B/C/D 4등급: A ≥ vol_a / B ≥ vol_b / C ≥ vol_c / D = vol_c 미만.
+# 기준 숫자 3개(vol_a > vol_b > vol_c)는 재고가공 화면에서 변수 X·Y 아랫줄에 직접 입력
+# (기본값 500/300/100), D등급 칸은 "C기준-1장 이하"로 자동 표기만 된다. 구 122열 템플릿은
+# 자동으로 1컬럼을 삽입해 123열로 보정한다(구 106~113 템플릿도 기존 체인을 거쳐 순차 보정).
+INV_VOL_GRADE_COL = 41     # 물량등급 컬럼 위치(최초출고일 바로 다음, 판매진도 그룹의 첫 칸)
+INV_TOTAL_COLS = 123       # 결과물 총 열 수 (구 106→107→112→113→122→123)
+INV_SIZECODE_COL = 108     # 결과물에서 '사이즈구분' 컬럼 위치 (구 107 + 물량등급 1칸)
 _INV_KNOWN_SIZE_CODES = {"A16", "A17", "A09", "A05", "A06", "A18"}
 
 # 260806: 아이템 마스터에도 폴백에도 없는 아이템 코드의 표기값. 예전엔 이런 코드를 만나면 가공을
@@ -4617,13 +4635,19 @@ def _inv_set_side(rec):
 # 기준판매가 복제 컬럼(23, 초록색) + 신규 가격5컬럼(24~28, 전부 노란색) +
 # AA,AB,AF,AG,AH,AI(구 27,28,32,33,34,35 → +6 = 33,34,38,39,40,41 → 260811 '수정일' 재배치로
 # AA~변경후할인율 블록이 한 칸씩 앞당겨져 최종 32,33,37,38,39,40).
+# 260826(SET가격 9컬럼): SET 가격 블록(29~37)이 끼어들면서 구 29번째 이후 컬럼이 전부 +9 밀림.
+# SET 블록 안의 색은 단품가격 블록과 동일 규칙 — 몰가격·기준판매가(31,32)=초록, 가격시뮬 5칸(33~37)=노랑,
+# 최초가·현판가(29,30)=무채색(템플릿 서식 그대로).
+# 260826-2(물량등급): 신규 물량등급(41, 노랑 — 판매진도 그룹의 첫 칸)이 끼어들면서 구 41 이후가 +1 밀림.
 _INV_YELLOW_COLS = ({3, 11, 12, 13} | set(range(INV_PRICE_SIM_COL, INV_PRICE_SIM_COL + INV_PRICE_SIM_N))
-                    | {32, 33, 34, 38, 39, 40})
+                    | set(range(INV_SET_PRICE_COL + 4, INV_SET_PRICE_COL + INV_SET_PRICE_N))
+                    | {INV_VOL_GRADE_COL, 42, 43, 44, 48, 49, 50})
 # 260815(헤더 개편): AC·AD·AE(단품 사이즈 컨디션·SET 가능여부·SET 사이즈 컨디션) 3컬럼 = 연분홍,
-# 수정일 = 회색. AI제안방향(AF)이 34번째로 앞당겨지며 노란색 그룹에 합류하고, AC/AD/AE는 35~37로 밀림.
-_INV_PINK_COLS = {35, 36, 37}
-_INV_GRAY_COLS = {41}
-_INV_GREEN_COLS = {INV_GIJUN_COPY_COL, 59, 65, 66, 67}        # 기준판매가 복제(23) + BA,BG,BH,BI(구 53,59,60,61 → +6)
+# 수정일 = 회색. AI제안방향(AF)이 노란색 그룹에 합류. (260826 SET가격 +9 · 260826-2 물량등급 +1 밀림)
+_INV_PINK_COLS = {45, 46, 47}
+_INV_GRAY_COLS = {51}
+_INV_GREEN_COLS = {INV_GIJUN_COPY_COL, INV_SET_PRICE_COL + 2, INV_SET_PRICE_COL + 3,
+                   69, 75, 76, 77}        # 기준판매가 복제(23) + SET 몰가격·기준판매가(31,32) + BA,BG,BH,BI(구 68,74,75,76 → +1)
 # 260816 개정(중태님 지시, "결과물파일 셀 숨기기 기준자료.xlsx" 첨부) — 구 BK~CM(69~97) 일괄
 # 숨김을 폐지하고, 팀장님이 실제 결과 파일에서 직접 지정한 개별 숨김열 18개로 전면 교체한다.
 # 첨부 파일을 openpyxl로 열어 column_dimensions.hidden을 직접 읽어 그대로 옮겨온 값 — 헤더 위치
@@ -4632,7 +4656,9 @@ _INV_GREEN_COLS = {INV_GIJUN_COPY_COL, 59, 65, 66, 67}        # 기준판매가 
 # BI(온라인반품창고)·BJ(원가금액)·BM(기간판매수량 — 매장기간판매수량 그룹과 별개, 65번째 칸)·
 # BP(판매비중, 68번째 칸)에 해당. 구 BK~CM(69~97, 매장별 기간판매수량/금액/비교/소진예상기간
 # 반복블록)은 이번 기준자료에서 전부 숨김 해제(가시화)됨 — 그대로 반영.
-_INV_HIDE_COLS = {6, 7, 10, 14, 16, 21, 29, 30, 31, 42, 51, 53, 54, 60, 61, 62, 65, 68}
+# (260826 SET가격 9컬럼: 구 29 이상 숨김열 +9 밀림 · 260826-2 물량등급: 구 41 이상 +1 추가 밀림 —
+#  논리적으로 같은 컬럼들이 그대로 숨겨진다. 신규 SET 가격 9컬럼(29~37)·물량등급(41)은 숨김 대상 아님.)
+_INV_HIDE_COLS = {6, 7, 10, 14, 16, 21, 38, 39, 40, 52, 61, 63, 64, 70, 71, 72, 75, 78}
 
 
 def _inv_grade_one(s14, sd, X, Y):
@@ -5116,9 +5142,11 @@ def _inv_peek_years(raw_file):
 
 
 def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
-                      season_group_map=None, year_group_map=None, cat_level="중카테고리"):
-    """재고 모니터링 로우데이터(94열, '사이즈구분' 컬럼 포함) → 113열 v3.3 가공 엑셀
+                      season_group_map=None, year_group_map=None, cat_level="중카테고리",
+                      vol_a=500, vol_b=300, vol_c=100):
+    """재고 모니터링 로우데이터(94열, '사이즈구분' 컬럼 포함) → 123열 v3.5 가공 엑셀
     (process_260731 main() 1:1 이식 + 260811 사이즈코드 판정 소스 전환 + 가격 시뮬레이션 5컬럼 +
+    260826 SET 가격 9컬럼 + 260826-2 물량등급 +
     기준판매가 비교컬럼 반영).
 
     raw_file=업로드 파일 객체, master=dict{품번:사이즈코드}(260811부터 판정에는 미사용, 참고 보고 전용),
@@ -5131,6 +5159,8 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     cat_level(INV_CAT_LEVELS 중 하나, 기본 "중카테고리")은 모집단의 카테고리 축과 C열 표기 기준을
     "중카테고리"/"소카테고리"/"아이템코드" 중 어느 세분화 레벨로 쓸지 정한다. C열 헤더 텍스트도
     이 선택에 맞춰 동적으로 바뀐다.
+    vol_a/vol_b/vol_c(260826-2 물량등급): 온라인창고 재고 기준 A/B/C 등급 문턱(장, 이상 기준 —
+    vol_a > vol_b > vol_c 이어야 함). D = vol_c 미만.
     반환: (엑셀 bytes, 리포트 dict). 규칙 위반·형식 오류는 ValueError로 중단.
     """
     import re
@@ -5145,6 +5175,11 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # 260815(헤더 개편): 단품 사이즈 컨디션·SET 가능여부·SET 사이즈 컨디션 3컬럼 = 연분홍, 수정일 = 회색.
     fill_pink = PatternFill(start_color="FFF2DCDB", end_color="FFF2DCDB", fill_type="solid")
     fill_gray = PatternFill(start_color="FFE9E9E9", end_color="FFE9E9E9", fill_type="solid")
+
+    # 260826-2(물량등급): 기준 검증 — UI에서도 막지만 함수 단독 호출 대비 이중 방어.
+    if not (vol_a > vol_b > vol_c > 0):
+        raise ValueError(f"물량등급 기준이 A > B > C 순이 아니에요 (A={vol_a}, B={vol_b}, C={vol_c}) — "
+                         f"숫자를 확인해 주세요.")
 
     try:
         raw_file.seek(0)
@@ -5230,6 +5265,16 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             unk_rows += 1
             if rec["cat_level_val"] in (None, ""):
                 rec["cat_level_val"] = _INV_UNMAPPED
+
+    # 260826-3(소카테고리 반영 확인, 중태님 문의): 선택한 카테고리 기준이 모집단에 실제로 몇 종의
+    # 값으로 반영됐는지 + 소카테고리 선택 시 아이템 마스터에 소카테고리가 비어 있어 중카테고리로
+    # 폴백된 아이템코드 목록을 리포트로 노출한다 — "소카테고리를 골라도 결과가 그대로"가
+    # (a) 마스터의 소카테고리 공란/중카테고리와 동일값 때문인지 (b) 진짜 버그인지 화면에서 바로
+    # 판별할 수 있게. (등급 모집단 키는 위 rec["cat_level_val"] — 선택 기준이 그대로 쓰인다.)
+    cat_values = sorted({str(r["cat_level_val"]) for r in recs if not r["unmapped"]})
+    cat_small_fallback = sorted({r["item"] for r in recs if not r["unmapped"]
+                                 and not (_item_master.get(r["item"]) or {}).get("small")}) \
+        if cat_level == "소카테고리" else []
 
     # K/L/M (세트 키)
     for rec in recs:
@@ -5321,6 +5366,14 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         else:
             r["AC"] = "해당없음"
 
+    # 260826-2 물량등급 — 온라인창고 재고(rec["stock"], 재고20미만 판정과 동일 소스) 숫자만으로
+    # A/B/C/D 4등급. 모집단·카테고리와 무관한 단순 문턱 분류라 오프라인·미분류 행도 똑같이 매긴다.
+    # 표기는 "물량A"~"물량D" — 옆의 기간판매·소진예상 등급(맨 A~E)과 필터·눈으로 바로 구분되게
+    # (중태님 지시: A/B/C/D가 물량 등급임을 알 수 있게 표기).
+    for r in recs:
+        s = r["stock"]
+        r["VOL"] = "물량" + ("A" if s >= vol_a else "B" if s >= vol_b else "C" if s >= vol_c else "D")
+
     # AD/AE SET 판정
     # 260814(중태님 지시): 기존 "해당없음" 하나였던 표기를 2가지로 세분화.
     #   · "단품아이템" — SET품번(L) 자체가 없는 상품. rec["L"]은 아이템코드가 SJ·SL·EJ·EP일 때만
@@ -5340,6 +5393,17 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         if r["L"]:
             bysets[r["L"]].append(r)
     pairs = nopair = 0
+
+    # 260826(SET가격 9컬럼, 중태님 지시): 한 행의 단품가격 9칸(최초가·현판가·몰가격·기준판매가·
+    # 가격시뮬5)을 계산해 리스트로 돌려주는 헬퍼 — 출력 루프의 20~28번째 칸과 정확히 같은 값.
+    def _inv_row_price9(r_):
+        raw_ = r_["raw"]
+        _m = _inv_num(raw_[INV_RAW_MOLGA_COL])
+        _g = _inv_num(raw_[INV_RAW_GIJUN_COL])
+        _c = _inv_num(raw_[INV_RAW_CHOJOGA_COL])
+        _h = _inv_num(raw_[INV_RAW_HYUNPAN_COL])
+        return [_c, _h, _m, _g] + _inv_price_sim(_m, _g, _c)
+
     for g in bysets.values():
         # 260806: 상/하 판별을 사이즈코드(A16/A17)가 아니라 아이템 코드로 한다 — A09↔A09 세트업을
         #         잡으려면 필수. 지원 조합은 A16↔A17(숫자 정사이즈) · A09↔A09(문자) · A09↔A17(신규,
@@ -5353,6 +5417,18 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         if not tops or not bots:
             nopair += 1; continue
         ti, bi = tops[0], bots[0]
+        # 260826(SET가격 9컬럼): 상/하 데이터가 둘 다 있는 그룹은 상의+하의 단품가격 9칸을 각각
+        # 합산한 "SET 가격"을 그룹의 모든 행에 심는다(수기 샘플의 =T상의행+T하의행 수식과 동일).
+        # 가격은 사이즈와 무관하므로 사이즈 매칭 성패·미지원 조합(아래 continue들)보다 먼저 처리 —
+        # SET구성실패·아동복 행에도 SET 가격은 채워진다. 짝은 품번 끝 3자리(라인·패턴·색상)가 같은
+        # 반대편 행을 우선 매칭하고, 없으면 반대편 첫 행으로 폴백(기존 ti/bi 관례와 동일). 한쪽
+        # 값이 공란이면 엑셀 수식과 같게 0으로 보고 더하되, 양쪽 다 공란인 칸은 공란으로 둔다.
+        for r in g:
+            _pool = bots if _inv_set_side(r) == "top" else tops
+            _mate = next((p for p in _pool if p["pn"][7:] == r["pn"][7:]), _pool[0])
+            _a9, _b9 = _inv_row_price9(r), _inv_row_price9(_mate)
+            r["SETP"] = [None if (a is None and b is None) else (a or 0) + (b or 0)
+                         for a, b in zip(_a9, _b9)]
         sys_key = (ti["scode"], bi["scode"])
         # 260815 신규(중태님 지시): A18↔A18(아동)은 다른 미지원 조합과 묶어 "SET구성실패"로 뭉뚱그리지
         # 않고, 아동복이라는 실제 성격을 그대로 드러내는 "아동복"으로 별도 표기한다. SET품번은 있으나
@@ -5476,7 +5552,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         for r in g:
             r["AD"] = stt; r["AE"] = sg
 
-    # ── 출력: 템플릿(v3.3 113열) 복제 후 데이터 교체 (상단 메타 6행 + 데이터 9행~) ──
+    # ── 출력: 템플릿(v3 계열, 최종 122열로 자동 보정) 복제 후 데이터 교체 (상단 메타 6행 + 데이터 9행~) ──
     if not os.path.exists(template_path):
         raise ValueError("서식 템플릿(inventory_template.xlsx)이 저장소에 없어요 — "
                          "최신 v3.3 결과물을 inventory_template.xlsx로 GitHub에 올려주세요.")
@@ -5525,8 +5601,17 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         # 260811(가격시뮬 2차): 이미 가격5컬럼(구 23~27)까지만 반영된 112열 템플릿(직전 배포본)이면,
         # 몰가격 바로 뒤에 기준판매가 복제 컬럼 1개만 추가로 삽입 — 기존 가격5컬럼은 24~28로 밀림.
         _upgrade_insert(INV_GIJUN_COPY_COL, 1, INV_GIJUN_COPY_COL - 1)
+    if tws.max_column == 113:
+        # 260826(SET가격): 단품가격 블록 끝(28) 바로 뒤에 SET 가격 9컬럼 삽입 — 113→122.
+        # 서식은 단품 최초가 칸(20번째)을 복제(헤더 회색·데이터 무채색·#,##0) — 초록(31,32)·
+        # 노랑(33~37) 강제 지정은 아래 _INV_GREEN_COLS/_INV_YELLOW_COLS 루프가 처리한다.
+        _upgrade_insert(INV_SET_PRICE_COL, INV_SET_PRICE_N, 20)
+    if tws.max_column == 122:
+        # 260826-2(물량등급): 최초출고일(40) 바로 뒤에 물량등급 1컬럼 삽입 — 122→123.
+        # 서식은 삽입 후 오른쪽 이웃이 되는 기간판매수량분석 칸(구 41)을 복제(노란색·General).
+        _upgrade_insert(INV_VOL_GRADE_COL, 1, INV_VOL_GRADE_COL + 1)
     if tws.max_column != INV_TOTAL_COLS:
-        raise ValueError(f"템플릿 열 수 {tws.max_column} ≠ {INV_TOTAL_COLS}(또는 구버전 106·107·108·112) — "
+        raise ValueError(f"템플릿 열 수 {tws.max_column} ≠ {INV_TOTAL_COLS}(또는 구버전 106·107·108·112·113·122) — "
                          f"v3 계열 결과물을 템플릿으로 지정하세요.")
     names_row = next((r for r in range(1, 12) if tws.cell(r, 10).value == "품번"), None)
     if names_row is None:
@@ -5563,6 +5648,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         f"변수 Y= {Y}장 (동일등급내에서 추가로 등급 나눌때 기준 수량)",
         f"작업일: {workdate}",
         f"가공기준: 260731 확정판 + 260811 사이즈구분 로우컬럼 직접반영 + 가격 시뮬레이션 5컬럼 "
+        f"+ 260826 SET 가격 9컬럼 + 물량등급(A≥{vol_a}/B≥{vol_b}/C≥{vol_c}/D≤{vol_c - 1}장 · 온라인창고 재고) "
         f"(5등급 A~E · 재고20미만 · 오프라인 제외 · 모집단 {cat_level}×년도×시즌)",
         f"비교 대상군(등급 모집단 묶음) — 시즌: {season_group_summary} / 년도: {year_group_summary}",
     ]
@@ -5591,6 +5677,9 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # 260811(가격시뮬): 신규 가격 5컬럼 헤더명 기입 (그룹행은 비워둠 — 사이즈구분과 동일 방식).
     for _k, _h in enumerate(INV_PRICE_SIM_HEADERS):
         tws.cell(NAMES_R, INV_PRICE_SIM_COL + _k).value = _h
+    # 260826(SET가격): SET 가격 9컬럼 헤더명 기입 (그룹행 "SET 가격" 병합은 아래 그룹헤더 재구성부에서).
+    for _k, _h in enumerate(INV_SET_PRICE_HEADERS):
+        tws.cell(NAMES_R, INV_SET_PRICE_COL + _k).value = _h
     # 260811 추가 개정(2): 몰가격 바로 옆에 '기준판매가' 복제 컬럼 헤더명 기입 (그룹행은 비워둠 —
     # 사이즈구분과 동일 방식). 원본 기준판매가 컬럼(뒤쪽 패스스루 구간)은 헤더/값 모두 그대로 유지된다.
     tws.cell(NAMES_R, INV_GIJUN_COPY_COL).value = "기준판매가"
@@ -5600,12 +5689,15 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # 새 순서에 맞게 코드로 다시 써준다(안 그러면 헤더 텍스트와 실제 값이 어긋난다).
     # 260815(헤더 개편, 중태님 확정): 컬럼명 3개 변경(사이즈 등급→단품 사이즈 컨디션 / SET 상태 구분→
     # SET 가능여부 / SET 등급→SET 사이즈 컨디션) + AI제안방향을 사이즈/세트 3컬럼 앞(34번째)으로 이동.
-    _INV_COL32_42_HEADERS = ["기간판매수량분석", "소진예상기간분석", "AI제안방향",
+    # 260826-2(물량등급): 블록 맨 앞에 신규 "물량등급" 헤더 추가(41번째부터 기입).
+    _INV_COL32_42_HEADERS = ["물량등급",
+                             "기간판매수량분석", "소진예상기간분석", "AI제안방향",
                              "단품\n사이즈 컨디션", "SET\n가능여부", "SET\n사이즈 컨디션",
                              "휴먼의사결정", "변동가격", "변경후할인율",
                              "수정일", "이관구분"]
+    # 260826(SET가격): 이 블록의 시작 위치가 32 → 41로 +9 밀림.
     for _k, _h in enumerate(_INV_COL32_42_HEADERS):
-        tws.cell(NAMES_R, 32 + _k).value = _h
+        tws.cell(NAMES_R, INV_VOL_GRADE_COL + _k).value = _h
 
     # 260815(헤더 개편): 위 재배치에 맞춰 GROUP_R(7행) 상위 그룹 병합 범위도 조정.
     #   · '기본사항' 그룹 14~31 (변경 없음)
@@ -5630,17 +5722,24 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         if new_max > new_min:
             tws.merge_cells(start_row=GROUP_R, start_column=new_min, end_row=GROUP_R, end_column=new_max)
 
-    _inv_unmerge_group(14, 32)
-    _inv_set_group(14, 31, "기본사항")
-    # 260815(헤더 개편): 구 '분석·의사결정' 단일 그룹(33~41 → 재배치 전 기준)을 먼저 통째로 해제한 뒤,
-    # 3개 그룹으로 나눠 다시 병합한다(먼저 만든 그룹의 셀이 다음 그룹 생성 시 읽기전용 MergedCell이
-    # 되지 않도록, 해제를 한 번만 하고 그 다음부터는 독립 셀에 바로 병합을 건다).
-    _inv_unmerge_group(33, 41)
-    _inv_set_group(32, 34, "판매진도에 따른 가격 변화 결정")
-    _inv_set_group(35, 37, "사이즈가 정상 인지? 세트가 되는지?")
-    _inv_set_group(38, 40, "사람이 최종 의사 결정")
-    tws.cell(GROUP_R, 41).value = None   # 수정일 — 그룹헤더 없음(단일 컬럼)
-    for _gc in (32, 35, 38):
+    # 260826(SET가격)·260826-2(물량등급): 그룹헤더 재구성 — 어떤 세대 템플릿이 들어와도(업그레이드
+    # 직후의 광폭 병합, 구 레이아웃의 14~32/33~41 병합, 신 123열 결과물의 완성 병합 모두)
+    # 14~51 구간의 GROUP_R 병합을 전부 해제·초기화한 뒤 새 레이아웃으로 다시 병합한다:
+    #   14~19 기본사항 · 20~28 단품가격(검정 바탕) · 29~37 SET 가격(진파랑 바탕) ·
+    #   38~40 그룹없음(할인율·최초입고일·최초출고일) · 41~44 판매진도(물량등급 포함, 260826-2로
+    #   3→4칸 확장) / 45~47 / 48~50 (기존 3그룹) · 51 수정일(그룹없음)
+    for m in list(tws.merged_cells.ranges):
+        if m.min_row <= GROUP_R <= m.max_row and m.max_col >= 14 and m.min_col <= 51:
+            tws.unmerge_cells(str(m))
+    for _gc in range(14, 52):
+        tws.cell(GROUP_R, _gc).value = None
+    _inv_set_group(14, 19, "기본사항")
+    _inv_set_group(20, 28, "단품가격")
+    _inv_set_group(29, 37, "SET 가격")
+    _inv_set_group(41, 44, "판매진도에 따른 가격 변화 결정")
+    _inv_set_group(45, 47, "사이즈가 정상 인지? 세트가 되는지?")
+    _inv_set_group(48, 50, "사람이 최종 의사 결정")
+    for _gc in (14, 20, 29, 41, 45, 48):
         tws.cell(GROUP_R, _gc).alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
 
     # 260803 확정: 위 초록(GREEN) 컬럼들의 상위 그룹 헤더(GROUP_R, 병합 셀)도 같은 초록으로.
@@ -5655,9 +5754,17 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         tws.cell(GROUP_R, _group_header_fill_col(c)).fill = fill_green
     # 260815(헤더 개편): 새로 분할된 3그룹의 그룹헤더도 각각 노랑·연분홍·노랑으로 강제 지정
     # (템플릿 상속에 의존하지 않고 GREEN과 동일하게 항상 명시적으로 칠한다).
-    tws.cell(GROUP_R, 32).fill = fill_yellow
-    tws.cell(GROUP_R, 35).fill = fill_pink
-    tws.cell(GROUP_R, 38).fill = fill_yellow
+    tws.cell(GROUP_R, 41).fill = fill_yellow
+    tws.cell(GROUP_R, 45).fill = fill_pink
+    tws.cell(GROUP_R, 48).fill = fill_yellow
+    # 260826(SET가격): 새 그룹헤더 강제 지정 — 기본사항은 초록(구 레이아웃에서 초록이던 톤 유지),
+    # 단품가격은 검정 바탕·흰 글씨, SET 가격은 진파랑 바탕·흰 글씨(중태님 수기 샘플 파일과 동일).
+    tws.cell(GROUP_R, 14).fill = fill_green
+    _fill_black = PatternFill(start_color="FF000000", end_color="FF000000", fill_type="solid")
+    _fill_navy = PatternFill(start_color="FF2F5597", end_color="FF2F5597", fill_type="solid")
+    _font_white = Font(name="맑은 고딕", size=11, bold=True, color="FFFFFFFF")
+    tws.cell(GROUP_R, 20).fill = _fill_black; tws.cell(GROUP_R, 20).font = _font_white
+    tws.cell(GROUP_R, 29).fill = _fill_navy; tws.cell(GROUP_R, 29).font = _font_white
     dstyle = {c: (copy(tws.cell(DATA_R, c).font), copy(tws.cell(DATA_R, c).border),
                   copy(tws.cell(DATA_R, c).alignment), tws.cell(DATA_R, c).number_format,
                   copy(tws.cell(DATA_R, c).fill)) for c in range(1, INV_TOTAL_COLS + 1)}
@@ -5665,12 +5772,14 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         tws.delete_rows(DATA_R, tws.max_row - DATA_R + 1)
 
     # 260811(가격시뮬 + 기준판매가 복제): 구 range(19,24)·range(37,...) → 가격5컬럼(24~28) +
-    # 기준판매가 복제(23) 포함해 +6 밀림.
-    NUM_COLS = set(range(19, 30)) | set(range(43, INV_TOTAL_COLS + 1))
-    # '변동가격' 칸(39번째, = AM열) 참조. 260815 헤더 개편은 32~37(AA/AB/AF ↔ AC/AD/AE 순서)만
-    # 재배치하고 38~40(휴먼의사결정·변동가격·변경후할인율)은 그대로 두므로 39는 항상 불변 — 계산식 대신
-    # 고정값으로 명시한다.
-    _INV_AH_COL_LETTER = get_column_letter(39)
+    # 기준판매가 복제(23) 포함해 +6 밀림. 260826(SET가격): SET 가격 9컬럼(29~37)도 숫자 —
+    # 가격 구간이 19~37로 늘고 할인율(38)까지 숫자. 260826-2(물량등급): 물량등급(41)은 문자 —
+    # 패스스루 숫자 구간이 +1 더 밀려 53부터.
+    NUM_COLS = set(range(19, 39)) | set(range(53, INV_TOTAL_COLS + 1))
+    # '변동가격' 칸(49번째, = AW열) 참조. 260815 헤더 개편은 순서 재배치뿐이라 휴먼의사결정·변동가격·
+    # 변경후할인율 상대 위치는 불변 — 계산식 대신 고정값으로 명시한다. (260826 SET가격 +9 ·
+    # 260826-2 물량등급 +1로 39 → 49)
+    _INV_AH_COL_LETTER = get_column_letter(49)
 
     def to_num(v):
         if v is None or v == "":
@@ -5700,21 +5809,27 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         # 260811(가격시뮬): 그 다음에 신규 가격 5컬럼(24~28) 삽입 — 이후 컬럼은 전부 +6(가격시뮬5 + 기준판매가복제1).
         for _k, _v in enumerate(_inv_price_sim(_mol, _gijun, _chojo)):
             vals[INV_PRICE_SIM_COL + _k] = _v
-        vals[29], vals[30], vals[31] = raw[10], raw[11], raw[12]   # 할인율·최초입고일·최초출고일(구23~25)
+        # 260826(SET가격): SET 가격 9컬럼(29~37) — 위 SET 판정 루프에서 상+하 합산해 심어둔 값.
+        # 단품아이템·짝 없는 세트상품 행은 rec에 SETP가 없어 9칸 전부 공란.
+        for _k, _v in enumerate(rec.get("SETP") or [None] * INV_SET_PRICE_N):
+            vals[INV_SET_PRICE_COL + _k] = _v
+        vals[38], vals[39], vals[40] = raw[10], raw[11], raw[12]   # 할인율·최초입고일·최초출고일(구29~31 → +9)
         # 260811: '수정일'을 이 자리(구26)에서 빼서 로우데이터 원래 순서대로 '이관구분' 바로 왼쪽
         # (41번째 칸)으로 옮긴다 — 아래 AA~변경후할인율 블록이 그만큼 한 칸씩 앞으로 당겨진다.
         # 260815(헤더 개편): AI제안방향(AF)을 34번째로 앞당기고, 단품 사이즈 컨디션·SET 가능여부·
         # SET 사이즈 컨디션(AC·AD·AE)을 35~37로 밀어 하나로 묶는다.
-        vals[32], vals[33], vals[34] = rec["AA"], rec["AB"], rec["AF"]
-        vals[35], vals[36], vals[37] = rec["AC"], rec["AD"], rec["AE"]
-        vals[38] = vals[39] = None                                  # 구33,34
-        vals[40] = f"={_INV_AH_COL_LETTER}{rr}/T{rr}"                # 구35 (AH→새 위치로 셀참조 갱신)
-        vals[41] = raw[21]                                          # 수정일(구26, 이관구분 바로 왼쪽으로 이동)
-        vals[42] = raw[22]                                          # 이관구분(구36)
+        vals[INV_VOL_GRADE_COL] = rec["VOL"]                        # 260826-2: 물량등급(41)
+        vals[42], vals[43], vals[44] = rec["AA"], rec["AB"], rec["AF"]
+        vals[45], vals[46], vals[47] = rec["AC"], rec["AD"], rec["AE"]
+        vals[48] = vals[49] = None
+        vals[50] = f"={_INV_AH_COL_LETTER}{rr}/T{rr}"                # 변경후할인율 = 변동가격(AW)÷최초가(T)
+        vals[51] = raw[21]                                          # 수정일(이관구분 바로 왼쪽)
+        vals[52] = raw[22]                                          # 이관구분
         # 260811: 패스스루 구간이 raw24~93(70열) → raw24~94(71열)로 1열 확장. 신규 '사이즈구분'이
-        # raw79 자리에 자연스럽게 끼어 있어 이 구간 안에서 함께 넘어간다(출력 98번째 칸에 그대로 안착).
+        # raw79 자리에 자연스럽게 끼어 있어 이 구간 안에서 함께 넘어간다(출력 108번째 칸에 그대로 안착).
+        # 260826(SET가격) +9 · 260826-2(물량등급) +1: 시작 위치 43 → 53.
         for j in range(71):
-            vals[43 + j] = raw[23 + j]                              # 구 37+j → +6
+            vals[53 + j] = raw[23 + j]
         for c in range(1, INV_TOTAL_COLS + 1):
             v = vals.get(c)
             if v == "":
@@ -5763,6 +5878,10 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     report = {
         "rows": len(recs), "skipped": skipped, "X": X, "Y": Y,
         "AA": dist("AA"), "AB": dist("AB"), "AF": dist("AF"), "AC": dist("AC"),
+        "VOL": dist("VOL"), "vol_thr": (vol_a, vol_b, vol_c),      # 260826-2 물량등급 분포·기준
+        "cat_values_n": len(cat_values),                            # 260826-3 모집단 카테고리 값 종수
+        "cat_small_fallback": cat_small_fallback,                   # 260826-3 소카테고리 공란 폴백 코드
+
         "SET": dict(Counter(r["AD"] for r in recs if r["L"])),
         "pairs": pairs, "nopair": nopair, "af_bad": af_bad,
         "unmatched": unmatched,
@@ -5815,17 +5934,24 @@ def _inv_group_ui(codes, key_prefix):
 
 
 def render_inventory():
-    """🏷️ 재고 가공 메뉴 — 로우데이터 업로드 → 가공 → v3.3 엑셀 다운로드 (전 팀원 사용 가능)."""
-    st.subheader("🏷️ 쇼핑몰 재고 가공 · 1차 (260731 확정 기준 · 가격 시뮬레이션 5컬럼 + 기준판매가 비교컬럼 추가)")
+    """🏷️ 재고 가공 메뉴 — 로우데이터 업로드 → 가공 → v3.5 엑셀 다운로드 (전 팀원 사용 가능)."""
+    # 260826-2(중태님 지시): 제목 옆에 붙던 "1차 (260731 확정 기준 · …)" 버전 꼬리표는 더 이상
+    # 노출하지 않는다 — 상세 기준은 아래 캡션에만 남긴다.
+    st.subheader("🏷️ 쇼핑몰 재고 가공")
     st.caption("재고모니터링 로우데이터(94열, '사이즈구분' 컬럼 포함)를 올리면 AA·AB 5등급, AF(AI제안방향), "
-               "단품 사이즈 컨디션(AC), SET 가능여부·SET 사이즈 컨디션(AD·AE), 기준판매가 비교컬럼, 가격 시뮬레이션 5컬럼을 부여한 113열 v3.3 엑셀을 만들어 드려요. "
+               "단품 사이즈 컨디션(AC), SET 가능여부·SET 사이즈 컨디션(AD·AE), 기준판매가 비교컬럼, 가격 시뮬레이션 5컬럼, "
+               "SET 가격 9컬럼, 물량등급(온라인창고 재고 기준 물량A~물량D — 기준 숫자는 아래에서 직접 입력)을 부여한 "
+               "123열 v3.5 엑셀을 만들어 드려요. "
                "재고 데이터는 DB에 저장하지 않아요(가공 → 다운로드만). "
                "260811부터 사이즈코드는 로우데이터의 '사이즈구분' 컬럼값을 그대로 사용해요(마스터 조회 안 함). "
                "몰가격 바로 뒤에 기준판매가를 그대로 복제한 컬럼이 초록색으로 1개 추가되고(원본 기준판매가 컬럼은 "
                "뒤쪽 그대로 유지, 비교하기 편하도록 옆에 나란히 표시), 그 뒤로 (네이버)상시가·(쿠폰진행)상시가·(쿠폰진행)행사가·"
                "(쿠폰X/무배)상시가·(쿠폰X/무배)행사가 5컬럼이 노란색으로 추가돼요"
                "(끝 3자리 기준 000→그대로·001~500→500·501~999→900 스냅, 기준판매가 넘으면 자동 캡핑 "
-               "— 기준판매가가 공란이면 대신 최초가를 넘지 않도록 캡핑).")
+               "— 기준판매가가 공란이면 대신 최초가를 넘지 않도록 캡핑). "
+               "단품가격 블록 바로 뒤 'SET 가격' 9컬럼(진파랑 그룹헤더)에는 SET품번으로 짝지어진 상의+하의의 "
+               "최초가·현판가·몰가격·기준판매가·가격시뮬 5컬럼을 각각 합산한 세트 가격이 짝 양쪽 행에 "
+               "동일하게 들어가요(단품아이템·짝이 없는 세트상품은 공란).")
 
     master = load_size_master()
     n_master = len(master)
@@ -5855,6 +5981,25 @@ def render_inventory():
     # 실제 한국 시간보다 9시간 늦게 표시되는 버그가 있었음 → now_kst()로 교체.
     workdate = o3.text_input("작업일", value=now_kst().strftime("%y.%m.%d %H:%M"), key="inv_workdate")
     period = o4.text_input("기간판매 조회 기준", placeholder="예: 26.07.20~26.07.31", key="inv_period")
+
+    # ── 260826-2 물량등급 기준 (중태님 지시) — 온라인창고 재고 숫자로 A/B/C/D 구분.
+    #    A/B/C 문턱(이상 기준)만 직접 입력하고, D는 C 기준이 정해지면 "C-1장 이하"로 자동 표기.
+    v1, v2, v3, v4 = st.columns(4)
+    vol_a = v1.number_input("물량등급 A — (장) 이상", min_value=1, max_value=999999, value=500,
+                            key="inv_vol_a")
+    vol_b = v2.number_input("물량등급 B — (장) 이상", min_value=1, max_value=999999, value=300,
+                            key="inv_vol_b")
+    vol_c = v3.number_input("물량등급 C — (장) 이상", min_value=1, max_value=999999, value=100,
+                            key="inv_vol_c")
+    # D 칸은 입력이 아니라 자동 표기 전용 — key를 주지 않아 C 값이 바뀌면 즉시 따라 바뀐다.
+    v4.text_input("물량등급 D — 자동 지정", value=f"{int(vol_c) - 1}장 이하", disabled=True)
+    _vol_ok = int(vol_a) > int(vol_b) > int(vol_c)
+    if _vol_ok:
+        st.caption(f"📦 물량등급 기준(온라인창고 재고): **A** {int(vol_a):,}장 이상 · "
+                   f"**B** {int(vol_b):,}장 이상 · **C** {int(vol_c):,}장 이상 · "
+                   f"**D** {int(vol_c) - 1:,}장 이하(자동) — 결과물엔 물량A~물량D로 표기돼요.")
+    else:
+        st.error("물량등급 기준은 A > B > C 순으로 커야 해요 — 숫자를 확인해 주세요.")
 
     # ── 카테고리 기준 설정 — AA·AB 등급 모집단·C열 표기에 쓸 카테고리 세분화 레벨을 고른다.
     #    기본=중카테고리(기존과 동일). C열 헤더 텍스트도 이 선택을 그대로 따라간다.
@@ -5919,6 +6064,8 @@ def render_inventory():
         if st.button("⚙️ 1차 가공 실행", type="primary", use_container_width=True, key="inv_run"):
             if not period.strip():
                 st.error("'기간판매 조회 기준'을 입력해 주세요 (결과물 상단 메타에 들어가요).")
+            elif not _vol_ok:
+                st.error("물량등급 기준(A > B > C)을 먼저 맞춰 주세요.")
             else:
                 try:
                     with st.spinner("가공 중… (등급 판정 → 세트 매칭 → 서식 적용)"):
@@ -5926,7 +6073,9 @@ def render_inventory():
                                                      period.strip(), workdate.strip(),
                                                      season_group_map=season_group_map,
                                                      year_group_map=year_group_map,
-                                                     cat_level=cat_level)
+                                                     cat_level=cat_level,
+                                                     vol_a=int(vol_a), vol_b=int(vol_b),
+                                                     vol_c=int(vol_c))
                     st.session_state["inv_result"] = {
                         "bytes": xls, "report": rep,
                         "fname": f"재고가공_{_safe_name(workdate.strip() or 'result')}.xlsx"}
@@ -5947,10 +6096,24 @@ def render_inventory():
         if rep.get("tail_col_ignored"):
             st.caption("ℹ️ 로우데이터 맨 끝에 빈 95번째 열이 딸려있어서 자동으로 무시하고 94열로 처리했어요"
                       "(엑셀 병합헤더 잔재로 보여요 — 값이 있었다면 에러로 중단됐을 거예요).")
+        if rep.get("VOL"):
+            _va, _vb, _vc = rep.get("vol_thr", ("?", "?", "?"))
+            _vtxt = " · ".join(f"{k} {rep['VOL'].get(k, 0):,}행"
+                               for k in ("물량A", "물량B", "물량C", "물량D"))
+            st.caption(f"📦 물량등급 분포 — {_vtxt} (기준 A≥{_va}장 / B≥{_vb}장 / C≥{_vc}장 · 온라인창고 재고)")
         if rep.get("season_group_summary") or rep.get("year_group_summary") or rep.get("cat_level"):
-            st.caption(f"🧩 적용된 비교 대상군 — 카테고리 기준: **{rep.get('cat_level', '중카테고리')}** · "
+            _catn = f" (모집단 카테고리 값 {rep['cat_values_n']}종)" if rep.get("cat_values_n") else ""
+            st.caption(f"🧩 적용된 비교 대상군 — 카테고리 기준: **{rep.get('cat_level', '중카테고리')}**{_catn} · "
                        f"시즌: **{rep.get('season_group_summary', '–')}** · "
                        f"년도: **{rep.get('year_group_summary', '–')}**")
+        # 260826-3(중태님 문의): 소카테고리를 골랐는데 마스터에 소카테고리가 비어 있는 코드는
+        # 중카테고리 값으로 폴백돼 결과가 중카테고리 기준과 같아 보일 수 있다 — 그 사실을 명시.
+        if rep.get("cat_small_fallback"):
+            _fb = rep["cat_small_fallback"]
+            st.warning(f"⚠️ 소카테고리 기준을 선택했지만, 아이템 마스터에 소카테고리가 비어 있어 "
+                       f"**중카테고리 값으로 대체된 아이템코드 {len(_fb)}종**: {', '.join(_fb)} — "
+                       f"이 코드들은 소카테고리를 골라도 중카테고리 기준과 같은 모집단으로 계산돼요. "
+                       f"아이템 마스터의 '소카테고리' 칸을 채워 다시 업로드하면 반영됩니다.")
         if rep["af_bad"]:
             st.warning(f"⚠️ AF 매트릭스 미커버 {rep['af_bad']}건 — '검증필요'로 표시했어요. 규칙 점검이 필요해요.")
         if rep["unmatched"]:
