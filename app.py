@@ -4145,7 +4145,9 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
 
 
 def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
-    """🔍 (드릴다운 3) 유통/브랜드 · 연차 · 아이템/매장별 상세 보기 — 2026-08-10 신규.
+    """🔍 (드릴다운 1) 유통/브랜드 · 연차 · 아이템/매장별 상세 보기 — 2026-08-10 신규.
+    (260828 번호 재정렬: 화면 표기가 드릴다운 1로 바뀜. 코드 내부 주석·키의 "드릴다운3"(click_ns "cat" 등)
+     명칭은 세션키 호환을 위해 그대로 두었다 — 내부 드릴다운3 = 화면 드릴다운 1, 내부 1·2 = 화면 2·3.)
 
     드릴다운1(유통 또는 담당자 '하나')·드릴다운2(매장 또는 담당자 '하나')와 달리, 유통·브랜드
     (다중선택·OR)와 연차(다중선택·OR)로 데이터 자체를 자유롭게 좁힌 뒤, 그 결과를 "아이템"
@@ -4154,7 +4156,7 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
     그대로 넘겨 재사용 — 헤더(당월실적·연간누계)·엑셀 다운로드·비중 계산 방식이 메인 표·드릴다운1·2와
     완전히 동일하다(중복 로직 없음).
     """
-    st.markdown("##### 🔍 유통/브랜드 · 연차 · 아이템/매장별 상세 보기")
+    st.markdown("##### 🔍 (드릴다운 1) 유통/브랜드 · 연차 · 아이템/매장별 상세 보기")   # 260828: 드릴다운 번호 재정렬(화면 순서 기준)
     pool = pd.concat([cur_m, prev_m, cur_y, prev_y])
     if pool.empty:
         st.info("표시할 데이터가 없어요.")
@@ -4330,7 +4332,7 @@ def render_weekly_report(df):
         st.caption("※ 담당별 = 매장 마스터의 담당자 기준. 담당 미지정 매장은 담당 행엔 미포함(G.TOTAL엔 포함). 비중=행÷전체.")
 
     st.divider()
-    st.markdown("##### 🔍 (드릴다운 1) 유통별/담당별 매장 상세 보기")
+    st.markdown("##### 🔍 (드릴다운 2) 유통별/담당별 매장 상세 보기")   # 260828: 드릴다운 번호 재정렬(구 드릴다운1)
     NONE, HEAD_C, HEAD_M = "(선택 안 함)", "─ 유통별 ─", "─ 담당별 ─"
     opts = [NONE, HEAD_C] + list(_CHANNEL_MASKS.keys())
     if managers:
@@ -4345,7 +4347,7 @@ def render_weekly_report(df):
         render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, _mask, cy, py, show_plan=not _filtered)
 
     st.divider()
-    st.markdown("##### 🔍 (드릴다운 2) 매장별/담당별 아이템분석")
+    st.markdown("##### 🔍 (드릴다운 3) 매장별/담당별 아이템분석")   # 260828: 드릴다운 번호 재정렬(구 드릴다운2)
     sv = cur_y.assign(_c=cur_y["매장코드"].astype(str).str.strip()).groupby("_c")["_매출액"].sum().sort_values(ascending=False)
     nmap = dict(zip(d["매장코드"].astype(str).str.strip(), d["매장명"].astype(str)))
     labels = [f"{nmap.get(c, c)} ({c})" for c in sv.index]
