@@ -8742,7 +8742,7 @@ div[data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"]{l
         st.markdown("##### 2️⃣ 행사 진행 캘린더 (간트차트)")
         st.caption("원장에 등록된 행사를 기간 막대(간트차트)로 보여줘요 — 행 = 품번 · 채널, "
                    "막대 색 = 채널, 막대 안 숫자 = 실질판매가, 노란 세로선 = 오늘. "
-                   "브랜드/년도/시즌/아이템 필터로 조회하거나, 품번 하나를 직접 입력해 조회할 수 있어요.")
+                   "브랜드/년도/시즌/아이템 필터로 조회하거나, 품번을 직접 입력(쉼표로 복수 가능)해 조회할 수 있어요.")
         if ledger.empty:
             st.info("아직 등록된 행사가 없어요 — '1️⃣ 외부몰 행사 확정'에서 행사를 먼저 등록해 주세요.")
         else:
@@ -8753,21 +8753,34 @@ div[data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"]{l
             if d_to < d_from:
                 st.warning("조회 종료일이 시작일보다 빨라요 — 기간을 다시 선택해 주세요.")
             else:
-                mode = st.radio("조회 방식", ["필터로 조회 (브랜드/년도/시즌/아이템)", "품번 직접 입력 (1개 상품)"],
+                mode = st.radio("조회 방식", ["필터로 조회 (브랜드/년도/시즌/아이템)", "품번 직접 입력 (쉼표로 복수 가능)"],
                                 horizontal=True, key="pm_cal_mode")
                 view = deco[(deco["행사시작"] <= d_to.isoformat())
                             & (deco["행사종료"] >= d_from.isoformat())].copy()
                 if mode.startswith("품번"):
-                    pn_in = st.text_input("품번 입력 (정확히 일치, 대소문자 무관)", key="pm_cal_pn",
-                                          placeholder="예: SDSVC09STR")
+                    # 260821: 3번 메뉴 '품번 빠른 체크'와 동일하게 쉼표로 복수 품번 입력 지원
+                    pn_in = st.text_input("품번 입력 (쉼표로 복수 입력 가능, 대소문자 무관)", key="pm_cal_pn",
+                                          placeholder="예: JDSXZ38CSL, JDSXZ40OTP, JDSXZ41OSW")
                     if pn_in.strip():
-                        view = view[view["품번"].astype(str).str.strip().str.upper()
-                                    == pn_in.strip().upper()]
+                        _seen = set()
+                        pns = []
+                        for p in pn_in.replace("\n", ",").replace(" ", ",").split(","):
+                            p = p.strip().upper()
+                            if p and p not in _seen:
+                                _seen.add(p)
+                                pns.append(p)
+                        view = view[view["품번"].astype(str).str.strip().str.upper().isin(pns)]
                         if view.empty:
-                            st.info(f"조회 기간 내 '{pn_in.strip().upper()}' 품번의 행사가 없어요.")
+                            st.info(f"조회 기간 내 입력한 품번({len(pns)}개)의 행사가 없어요.")
+                        else:
+                            _found = set(view["품번"].astype(str).str.strip().str.upper())
+                            _miss = [p for p in pns if p not in _found]
+                            if _miss:
+                                st.caption("⚠️ 조회 기간 내 행사가 없는 품번: " + ", ".join(_miss))
                     else:
                         view = view.iloc[0:0]
-                        st.caption("👆 품번을 입력하면 해당 상품의 행사만 캘린더로 보여드려요.")
+                        st.caption("👆 품번을 입력하면 해당 상품의 행사만 캘린더로 보여드려요 — "
+                                   "쉼표(,)로 여러 품번을 한 번에 볼 수 있어요.")
                 else:
                     ff1, ff2, ff3, ff4 = st.columns(4)
                     sel_br = ff1.multiselect("브랜드", sorted(view["_브랜드"].unique().tolist()),
