@@ -1835,13 +1835,17 @@ def render_priority_banner():
         cats = list(dict.fromkeys(sub["category"]))
         items = {c: sub[sub["category"] == c].sort_values("no") for c in cats}
         nrow = max((len(v) for v in items.values()), default=0)
+        # 260830 3차: 번호 컬럼을 <colgroup>으로 딱 숫자 폭(34px)만큼 고정 — table-layout:fixed에서
+        # 첫 행이 colspan 헤더라 td width가 안 먹고 4컬럼 균등분배되던 문제 해결. 넓어진 내용 칸에
+        # 맞춰 글자도 0.82rem → 0.95rem으로 키움(중태님 지시: 번호 칸 축소 + 글씨 확대).
         th = ("padding:6px 10px;background:#f5f5f7;border:1px solid #e3e6ea;"
-              "font-weight:700;text-align:center;font-size:0.82rem;color:#1d1d1f;")
-        td = ("padding:5px 10px;border:1px solid #e3e6ea;font-size:0.82rem;"
-              "text-align:left;color:#1d1d1f;line-height:1.45;")
-        tdn = td + "text-align:center;color:#888;width:26px;"
+              "font-weight:700;text-align:center;font-size:0.9rem;color:#1d1d1f;")
+        td = ("padding:6px 12px;border:1px solid #e3e6ea;font-size:0.95rem;"
+              "text-align:left;color:#1d1d1f;line-height:1.5;")
+        tdn = td + "text-align:center;color:#888;padding:6px 4px;"
         h = (f"<div style='font-weight:700;font-size:0.95rem;margin:8px 0 6px;'>{title}</div>"
              "<table style='border-collapse:collapse;width:100%;table-layout:fixed;'>")
+        h += "<colgroup>" + "<col style='width:34px'><col>" * len(cats) + "</colgroup>"
         h += "<tr>" + "".join(f"<th style='{th}' colspan='2'>{c}</th>" for c in cats) + "</tr>"
         for i in range(nrow):
             h += "<tr>"
