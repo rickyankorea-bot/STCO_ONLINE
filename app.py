@@ -1840,7 +1840,7 @@ def render_priority_banner():
         td = ("padding:5px 10px;border:1px solid #e3e6ea;font-size:0.82rem;"
               "text-align:left;color:#1d1d1f;line-height:1.45;")
         tdn = td + "text-align:center;color:#888;width:26px;"
-        h = (f"<div style='font-weight:700;font-size:0.95rem;margin:2px 0 6px;'>{title}</div>"
+        h = (f"<div style='font-weight:700;font-size:0.95rem;margin:8px 0 6px;'>{title}</div>"
              "<table style='border-collapse:collapse;width:100%;table-layout:fixed;'>")
         h += "<tr>" + "".join(f"<th style='{th}' colspan='2'>{c}</th>" for c in cats) + "</tr>"
         for i in range(nrow):
@@ -1856,11 +1856,12 @@ def render_priority_banner():
         return h + "</table>"
 
     st.markdown("### 온라인팀 우선순위")
-    c1, c2 = st.columns(2)
-    for col, sec, icon in ((c1, "당월", "🗓️"), (c2, "금주", "📌")):
+    # 260830 2차: 좌우 2컬럼 → 상하 배치(당월 위·금주 아래)로 변경 — 칸이 가로로 넓어져
+    # 내용이 한 줄에 들어가므로 결과적으로 세로 길이도 크게 안 늘어남(중태님 지시).
+    for sec, icon in (("당월", "🗓️"), ("금주", "📌")):
         sub = pri[pri["section"] == sec]
         if not sub.empty:
-            col.markdown(_sec_html(f"{icon} {sec} 우선순위", sub), unsafe_allow_html=True)
+            st.markdown(_sec_html(f"{icon} {sec} 우선순위", sub), unsafe_allow_html=True)
     st.caption("※ 사이드바 **온라인팀 우선순위 업로드**로 교체할 수 있어요 — "
                "주간현황 분석 '⬇ 엑셀'의 당월·금주 우선순위 칸에도 같은 내용이 채워져요.")
     st.divider()
