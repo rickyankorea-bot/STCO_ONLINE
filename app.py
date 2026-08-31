@@ -2237,8 +2237,9 @@ def render_dashboard(df):
 #   (2) 전년동기대비 신장율 추세 — 구간별 신장율(정확히 1년 전 같은 날짜범위 대비 %)의
 #       후반부 평균 − 전반부 평균(+%p면 좋아지는 중 = 개선). 전년이 0인 구간은 "–"로 두고
 #       평균에서 제외 — 전·후반 어느 한쪽에 유효 구간이 하나도 없으면 그 매장은 (2)에서 제외.
-# 판정 방식(AskUserQuestion 확정, 260831): 전반부 vs 후반부 평균 — X구간을 반씩(h=X//2)
-# 나눠 앞 h개·뒤 h개 평균을 비교(X가 홀수면 가운데 1구간은 판정에서 빠지고 표에는 표시).
+# 판정 방식(AskUserQuestion 확정, 260831): 전반부 vs 후반부 평균 비교.
+#   후반부 = 뒤 k개 구간(k = "후반부 구간 수" 위젯, 260831 후속 — 디폴트 X//2, 1까지 좁혀
+#   "가장 최근 흐름"만 볼 수 있음) / 전반부 = 후반부를 뺀 앞쪽 전체(X−k개).
 # 출력(확정): 분석별 '개선 TOP N'·'악화 TOP N' 두 표(변화 0인 매장은 어느 쪽에도 안 나옴).
 # 엑셀(룰11·13)은 TOP 잘라내기 전 '전체 대상 매장' 추세표(개선폭 내림차순)를 내려준다.
 # 위젯은 조회 폼 밖 → 바꾸는 즉시 반영(A표 정렬·금액 필터와 동일 패턴). 기준 종료일 =
@@ -2288,8 +2289,17 @@ def _trend_matrices(base, buckets):
     return cur, prev
 
 
-def _trend_split(labels):
-    """전반부/후반부 라벨 분할 — h=len//2, 앞 h개 vs 뒤 h개(홀수면 가운데 1개 제외)."""
+def _trend_split(labels, back_n=None):
+    """전반부/후반부 라벨 분할.
+
+    back_n(후반부 구간 수, 260831 후속 — 중태님 요청) 지정 시: 뒤 back_n개가 후반부,
+    나머지 앞 전체가 전반부 — "최근 1~2구간으로 좁혀서" 최신 흐름만 따로 보는 용도.
+    (범위 밖 값은 1 ~ len-1로 클램프.)
+    미지정(None) 시: 반반(h=len//2) — 앞 h개 vs 뒤 h개(홀수면 가운데 1개 제외).
+    """
+    if back_n:
+        k = max(1, min(int(back_n), len(labels) - 1))
+        return list(labels[:len(labels) - k]), list(labels[len(labels) - k:])
     h = max(1, len(labels) // 2)
     return list(labels[:h]), list(labels[-h:])
 
@@ -2324,7 +2334,7 @@ table.{cls} tbody tr:first-child td{{background:#fff !important;font-weight:400;
 def _render_channel_trend(base, e, chan_mgr):
     """B. 채널별 추세 분석 본체 — 위 블록 주석 참고. base=필터 적용된 데이터, e=조회 종료일."""
     st.markdown("### B. 채널별 추세 분석 (전반부 vs 후반부 평균 비교)")
-    tc1, tc2, tc3, tc4, _tsp = st.columns([1.1, 1.1, 1.1, 1.1, 1.1])
+    tc1, tc2, tc3, tc4, tc5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.1])
     _unit = tc1.selectbox("기간 단위", ("주간", "월간"), key="cb_tr_unit",
                           help="주간=조회 종료일로 끝나는 7일 단위, 월간=달력월"
                                "(마지막 달은 조회 종료일까지 진행분).")
@@ -2337,17 +2347,34 @@ def _render_channel_trend(base, e, chan_mgr):
     else:
         _n = tc2.number_input("최근 구간 수(개월)", min_value=2, max_value=12, value=3,
                               step=1, key="cb_tr_n_mo")
-    _topn = tc3.number_input("TOP 매장 수", min_value=3, max_value=30, value=10,
+    _n = int(_n)
+    # 260831 후속(중태님 요청): 후반부 구간 수 필터 — 후반부를 항상 반(X//2)으로 두지 않고,
+    # 최근 1~2구간 등 원하는 만큼 좁혀서 "가장 최신 흐름"만 따로 비교할 수 있게.
+    # 후반부 = 뒤 k개 구간, 전반부 = 나머지 앞 전체(X−k개). 디폴트 k=X//2(기존과 동일 감각).
+    # 구간 수(X)를 줄여 기존에 기억된 k가 범위(1~X−1)를 벗어나면 위젯 생성 전에 클램프
+    # (안 하면 Streamlit이 value out of range 에러를 낸다).
+    _bk_key = "cb_tr_back_n"
+    if _bk_key in st.session_state:
+        try:
+            st.session_state[_bk_key] = max(1, min(int(st.session_state[_bk_key]), _n - 1))
+        except Exception:
+            del st.session_state[_bk_key]
+    _back_n = tc3.number_input("후반부 구간 수", min_value=1, max_value=_n - 1,
+                               value=max(1, _n // 2), step=1, key=_bk_key,
+                               help="후반부(최근 쪽)로 묶을 구간 수예요. 1이면 가장 최근 "
+                                    "1구간만, 2면 최근 2구간 평균을 후반부로 봐요. "
+                                    "전반부는 후반부를 뺀 앞쪽 전체 구간의 평균.")
+    _back_n = int(_back_n)
+    _topn = tc4.number_input("TOP 매장 수", min_value=3, max_value=30, value=10,
                              step=1, key="cb_tr_topn")
-    _thr = tc4.number_input("대상 최소금액(만원)", min_value=0, step=100, value=100,
+    _thr = tc5.number_input("대상 최소금액(만원)", min_value=0, step=100, value=100,
                             key="cb_tr_min_amt",
                             help="최근 X구간 실판매금액 합계가 이 금액(만원) 미만인 매장은 "
                                  "추세 분석 대상에서 제외해요(소액 매장의 순위 노이즈 방지). "
                                  "0을 넣으면 매출 있는 전체 매장이 대상.")
-    _n = int(_n)
     buckets = _trend_buckets(e, _unit, _n)
     labels = [b[0] for b in buckets]
-    front, back = _trend_split(labels)
+    front, back = _trend_split(labels, _back_n)
     cur, prev = _trend_matrices(base, buckets)
     if cur.empty:
         st.info("현재 조회조건에서 추세를 계산할 매출 데이터가 없어요.")
@@ -2360,12 +2387,11 @@ def _render_channel_trend(base, e, chan_mgr):
     if len(cur_u) < 2:
         st.info("추세 분석 대상 매장이 2개 미만이에요 — 최소금액 문턱을 낮추거나 기간을 조정해 보세요.")
         return
-    _mid_note = f" · 가운데 {_n - 2 * (_n // 2)}구간은 판정 제외(홀수 구간)" if _n % 2 else ""
     st.caption(f"대상 {len(cur_u)}개 매장(최근 {_n}{'주' if _unit == '주간' else '개월'} 합계 "
                f"{_thr:,}만원 이상{', 0=전체' if not _thr else ''}) · "
-               f"전반부 {len(front)}구간 vs 후반부 {len(back)}구간 평균 비교{_mid_note} · "
+               f"전반부 {len(front)}구간(앞) vs 후반부 {len(back)}구간(최근) 평균 비교 · "
                f"기준 종료일 = 조회기간 종료일({pd.to_datetime(e):%m/%d}) · "
-               "단위·구간 수·TOP·문턱은 바꾸는 즉시 반영 — 🔍 조회를 다시 누를 필요 없어요.")
+               "단위·구간 수·후반부·TOP·문턱은 바꾸는 즉시 반영 — 🔍 조회를 다시 누를 필요 없어요.")
 
     def _mgr(ch):
         return chan_mgr.get(str(ch), "")
