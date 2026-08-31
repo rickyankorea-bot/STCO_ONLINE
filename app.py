@@ -724,7 +724,7 @@ def style_yoy(D):
 # ── 룰13 (2026-07-31): 엑셀 다운로드 = 화면에 보이는 컬러·셀서식 그대로 ──────
 _XL_SEASON_BOLD = {"S/S TOTAL", "F/W TOTAL"}
 _XL_SEASON_SUB = {"Z (공통)", "A (봄)", "B (여름)", "C (가을)", "D (겨울)"}
-_XL_DELTA_SUBS = ("증감율", "증감", "편차", "전체 기울기", "최근 기울기")   # 뒤 2개: 채널별 추세 분석(260831)
+_XL_DELTA_SUBS = ("증감율", "증감", "편차", "추세 기울기", "최근 기울기")   # 뒤 2개: 채널별 추세 분석(260831)
 
 
 def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_labels=None,
@@ -2234,10 +2234,11 @@ def render_dashboard(df):
 # 흐름으로 "추세가 좋은 매장 / 나쁜 매장"을 두 가지 잣대로 나눠 보여준다:
 #   (1) 매출 순위 변동 — 구간마다 대상 매장끼리 실판매금액 순위(1위=최대)를 매기고,
 #       전반부 평균순위 − 후반부 평균순위(+면 순위가 올라가는 중 = 개선).
-#   (2) 매출 추세 기울기 — 매출을 2구간 이동평균으로 스무딩한 곡선의 회귀 기울기를
-#       매장 평균 매출로 나눈 %/구간 기준(+면 상승 추세). 260831 후속3에서 전년동기
-#       신장율 방식(후속2)을 이 방식으로 교체 — 신규 매장 제외·% 노이즈 문제, 함수 안
-#       주석 참고. 전년 데이터 불필요 → 신규 매장 포함. TOP 표 아래 이동평균 라인차트.
+#   (2) 매출 추세 기울기 — 매출을 2구간 이동평균으로 스무딩한 곡선의 **최근 가중** 회귀
+#       기울기(가장 오래된 점 1배 ~ 최근 점 m배 선형 가중, 후속5)를 매장 평균 매출로 나눈
+#       %/구간 기준(+면 상승 추세). 260831 후속3에서 전년동기 신장율 방식(후속2)을 이
+#       방식으로 교체(신규 매장 제외·% 노이즈 문제), 후속5에서 가중 회귀로 정밀화 —
+#       함수 안 주석 참고. 전년 데이터 불필요 → 신규 매장 포함. TOP 표 아래 라인차트.
 # 판정 방식(AskUserQuestion 확정, 260831): 전반부 vs 후반부 평균 비교.
 #   후반부 = 뒤 k개 구간(k = "후반부 구간 수" 위젯, 260831 후속 — 디폴트 X//2, 1까지 좁혀
 #   "가장 최근 흐름"만 볼 수 있음) / 전반부 = 후반부를 뺀 앞쪽 전체(X−k개).
@@ -2327,7 +2328,7 @@ def _trend_render_table(disp, key, empty_msg):
     if "담당자" in disp.columns:
         sty = sty.set_properties(subset=pd.IndexSlice[:, ["담당자"]],
                                  **{"text-align": "left"})
-    for _dc in ("증감", "전체 기울기", "최근 기울기"):
+    for _dc in ("증감", "추세 기울기", "최근 기울기"):
         if _dc in disp.columns:
             # 260831 버그수정: subset에 람다 안에서만 유효한 c를 쓰다 NameError(라이브 크래시)
             # — 함수 스코프 변수 _dc로 통일.
@@ -2379,7 +2380,7 @@ def _render_channel_trend(base, e, chan_mgr):
     _back_n = int(_back_n)
     _topn = tc4.number_input("TOP 매장 수", min_value=3, max_value=30, value=10,
                              step=1, key="cb_tr_topn")
-    _thr = tc5.number_input("대상 최소금액(만원)", min_value=0, step=100, value=100,
+    _thr = tc5.number_input("대상 최소금액(만원)", min_value=0, step=100, value=300,
                             key="cb_tr_min_amt",
                             help="최근 X구간 실판매금액 합계가 이 금액(만원) 미만인 매장은 "
                                  "추세 분석 대상에서 제외해요(소액 매장의 순위 노이즈 방지). "
@@ -2474,14 +2475,35 @@ def _render_channel_trend(base, e, chan_mgr):
     if len(ma_lbls) < 2:
         st.info("이동평균 기울기를 계산하려면 최근 구간 수를 3 이상으로 해주세요.")
         return
+    # 260831 후속5(중태님 "기준을 생각해서 알려줘" — 세션 제안·채택): 판정 기울기를
+    # 단순(비가중) 회귀에서 **최근 가중 회귀**로 교체. 비가중은 초반에만 오르고 최근
+    # 내려오는 매장이 상승 TOP에, 내내 빠지다 마지막 한 주 반등한 매장의 "최근 기울기 +"가
+    # 하락 TOP에 섞여 보여 납득이 어려웠음(실화면 확인). 최근 구간일수록 선형 가중
+    # (가장 오래된 점 1 → 가장 최근 점 m)을 주면: 초반 반짝 상승은 상승으로 안 잡히고,
+    # 마지막 한 점 반등만으로는 하락 판정이 안 뒤집히되 3~4구간 연속 반등이면 뒤집힘 —
+    # "전체 vs 최근"을 고르는 대신 하나의 기울기에 최근을 더 반영. 표는 상승/하락 2개 유지.
     _m = len(ma_lbls)
-    _tc = np.arange(_m) - (_m - 1) / 2.0             # 시점 중심화 → 회귀 기울기 벡터 계산
-    slope_abs = ma.mul(_tc, axis=1).sum(axis=1) / float((_tc ** 2).sum())   # 원/구간
+    _tw = np.arange(_m, dtype=float)                 # 시점 0..m-1
+    _w = np.arange(1, _m + 1, dtype=float)           # 선형 가중 1..m (최근일수록 큼)
+    _tbar = float((_w * _tw).sum() / _w.sum())       # 가중 평균 시점
+    # 가중 최소제곱 기울기 = Σ w(t−t̄w)·y ÷ Σ w(t−t̄w)²  (Σ w(t−t̄w)=0이라 ȳ항 소거)
+    slope_abs = (ma.mul(_w * (_tw - _tbar), axis=1).sum(axis=1)
+                 / float((_w * (_tw - _tbar) ** 2).sum()))       # 원/구간
     _lv = cur_u.mean(axis=1)
     _lv = _lv.where(_lv > 0)                         # 평균 매출 ≤ 0 → 판정 불가
-    slope = slope_abs / _lv * 100.0                  # 전체 기울기 (%/구간)
-    recent = (ma[ma_lbls[-1]] - ma[ma_lbls[-2]]) / _lv * 100.0   # 최근 기울기 (%/구간)
+    slope = slope_abs / _lv * 100.0                  # 추세 기울기 (%/구간, 최근 가중)
+    recent = (ma[ma_lbls[-1]] - ma[ma_lbls[-2]]) / _lv * 100.0   # 최근 기울기 (%/구간, 참고)
     _s_valid = slope.notna()
+
+    def _s_type(ch):
+        s, r = slope[ch], recent[ch]
+        if pd.isna(s):
+            return "–"
+        if abs(s) < 1e-9:
+            return "보합"
+        if s > 0:
+            return "상승·최근 꺾임" if (pd.notna(r) and r < 0) else "상승"
+        return "하락·최근 반등" if (pd.notna(r) and r > 0) else "하락"
 
     def _fmt_s(v):
         return "–" if pd.isna(v) else _fmt_d(v, "%")
@@ -2492,8 +2514,9 @@ def _render_channel_trend(base, e, chan_mgr):
             row = {"담당자": _mgr(ch)}
             for lbl in ma_lbls:
                 row[lbl] = f"{_mm(ma.at[ch, lbl]):,.1f}"
-            row["전체 기울기"] = _fmt_s(slope[ch])
+            row["추세 기울기"] = _fmt_s(slope[ch])
             row["최근 기울기"] = _fmt_s(recent[ch])
+            row["추세 유형"] = _s_type(ch)
             rows.append(row)
         return pd.DataFrame(rows, index=pd.Index(idx, name="매장"))
 
@@ -2538,9 +2561,12 @@ def _render_channel_trend(base, e, chan_mgr):
         if _sdn_idx:
             _slope_chart(_sdn_idx[:_topn], "하락 추세 TOP — 이동평균 곡선", "ch_cb_tr_sl_dn")
     st.caption("표 숫자 = 연속 2구간 이동평균 매출(백만원, 각 라벨은 뒤쪽 구간 기준) · "
-               "전체 기울기 = 이동평균 곡선 전체 추세선의 기울기 ÷ 그 매장 평균 매출(%/구간 — "
-               "매장 크기와 무관하게 가파름 비교, 정렬 기준) · 최근 기울기 = 마지막 두 점 차이 "
-               "기준 최신 모멘텀(참고용) · 기울기 0인 매장은 어느 표에도 안 나와요 · "
+               "추세 기울기(판정·정렬 기준) = **최근에 무게를 둔** 추세선의 기울기 ÷ 그 매장 "
+               "평균 매출(%/구간 — 가장 오래된 점 1배 ~ 가장 최근 점 X−1배 가중이라, 초반에만 "
+               "오른 매장은 상승으로 안 잡히고 마지막 한 구간 반등만으로는 하락 판정이 안 "
+               "뒤집혀요; 매장 크기와 무관하게 가파름 비교) · 최근 기울기 = 마지막 두 점 차이"
+               "(참고용) · 추세 유형 = 두 기울기의 방향 조합(상승·최근 꺾임 / 하락·최근 반등은 "
+               "방향 전환 조짐이 있는 매장) · 기울기 0인 매장은 어느 표에도 안 나와요 · "
                "※ 시즌 흐름으로 전 매장이 같이 오르내리는 것도 '추세'로 잡혀요 — 전년 대비 "
                "관점은 A표 증감율로 확인하세요.")
 
