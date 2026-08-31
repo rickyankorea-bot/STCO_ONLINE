@@ -1137,9 +1137,37 @@ def _sort_perf_rows(D, sort_spec, extra_rows, two_blk, cy=None):
     return D.reindex(head + sorted(mids, key=_key) + sorted(rest, key=_key))
 
 
+def _min_amount_perf_rows(D, blk, thr_mm, extra_rows, two_blk, cy=None):
+    """260831(중태님 요청): 금액 필터 — 선택한 기간 블록의 실판매금액(기준연도)이 문턱(백만 단위)
+    미만인 '개별 매장 행'만 표에서 숨긴다. A. 유통채널별 표 전용.
+
+    - G.TOTAL·extra_rows(담당자별 TOTAL 등 집계 행)는 항상 유지 — 행을 '숨길' 뿐 집계에서
+      빼는 게 아니므로 합계 숫자는 필터 전과 완전히 동일하다.
+    - 값이 없는 칸("–", 전년만 매출 있는 매장 등)은 0으로 간주 → 문턱>0이면 숨겨진다.
+    - 문턱이 0 이하면 아무것도 안 함(필터 해제). 컬럼 라벨 불일치 시 기존 그대로 반환(방어).
+    """
+    if not thr_mm or thr_mm <= 0:
+        return D
+    sub = f"{cy % 100:02d}년" if cy is not None else "26년"
+    col = (blk, "실판매금액(백만)", sub) if two_blk else ("실판매금액(백만)", sub)
+    if col not in D.columns:
+        return D                      # 방어: 라벨 불일치 시 필터 없이 그대로(크래시 금지)
+    extra_set = {lbl for lbl, _ in extra_rows} if extra_rows else set()
+
+    def _val(k):
+        try:
+            v = float(D.at[k, col])
+        except (TypeError, ValueError):
+            return 0.0
+        return 0.0 if pd.isna(v) else v
+    keep = [k for k in D.index
+            if k == "G.TOTAL" or k in extra_set or _val(k) >= thr_mm]
+    return D.reindex(keep)
+
+
 def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=False,
                month=None, blk_labels=("당월누계", "연간누계"), preview=False, big_title=False,
-               cy=None, extra_rows=None, extra_row_color=None, sort_spec=None):
+               cy=None, extra_rows=None, extra_row_color=None, sort_spec=None, min_spec=None):
     """제목 + 우측 엑셀버튼 + 전년비교 표 렌더.
 
     extra_row_color(260818 추가): extra_rows 강조 색. 안 주면 기존 하늘색(_XR_FILL_SKY).
@@ -1166,6 +1194,8 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     sort_spec=(블록라벨, 지표그룹, 하위항목, 오름차순여부) (260824 추가, 중태님 요청)이면
     기본 정렬(연간누계 실판매금액 내림차순) 대신 그 기준으로 행을 재정렬한다 —
     _sort_perf_rows 참고. 현재 사용처: 유통별 세부 분석 A. 유통채널별 표.
+    min_spec=(블록라벨, 문턱_백만) (260831 추가, 중태님 요청)이면 그 블록의 실판매금액이
+    문턱 미만인 개별 매장 행을 숨긴다(집계 행·합계 숫자는 불변) — _min_amount_perf_rows 참고.
     """
     if month is not None:
         cur_m, prev_m = month
@@ -1177,6 +1207,12 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
     # 미리보기(preview)는 스켈레톤이라 정렬 의미가 없어 건너뜀(전부 0이라 순서 변화도 없음).
     if sort_spec and not preview:
         D = _sort_perf_rows(D, sort_spec, extra_rows, month is not None, cy=cy)
+    # 260831(중태님 요청): 금액 필터 — min_spec=(블록라벨, 문턱_백만)이면 그 블록 실판매금액이
+    # 문턱 미만인 개별 매장 행을 숨긴다(G.TOTAL·extra_rows 집계 행은 유지, 합계 숫자 불변).
+    # preview(스켈레톤)는 전부 0이라 필터하면 표가 통째로 비므로 건너뜀.
+    if min_spec and not preview:
+        D = _min_amount_perf_rows(D, min_spec[0], min_spec[1], extra_rows,
+                                  month is not None, cy=cy)
     if extra:
         _name, _map = extra
         # 2026-08-07: D.columns가 2단(단일블록)/3단(month 2블록) 어느 쪽이든 삽입 키의
@@ -2282,13 +2318,27 @@ def render_channel_brand(df):
     _CB_SORT_METRICS = {"실판매금액": ("실판매금액(백만)", "CUR"),
                         "매출 증감율": ("실판매금액(백만)", "증감율"),
                         "판가율": ("판가율", "CUR")}
-    sc1, sc2, sc3, _sc_sp = st.columns([1.1, 1.1, 1.1, 2.2])
+    sc1, sc_amt, sc2, sc3, _sc_sp = st.columns([1.1, 1.1, 1.1, 1.1, 1.1])
     _s_blk = sc1.selectbox("정렬 기준 기간", ("연간누계", "조회기간"), key="cb_sort_blk")
+    # 260831(중태님 요청): 금액 필터 — 정렬 기준 기간의 실판매금액이 이 값(만원) 미만인 개별
+    # 매장 행은 숨김(G.TOTAL·담당자별 TOTAL 등 집계 행과 합계 숫자는 그대로).
+    # 디폴트: 연간누계 1,000만원 / 조회기간 100만원. 위젯 key를 기간별로 분리해서, 기간을
+    # 전환하면 그 기간의 디폴트로 시작하되 각 기간에서 직접 고친 값은 세션 안에서 따로
+    # 기억된다(전환한다고 수정값이 날아가지 않음). 0을 넣으면 필터 해제(전체 표시).
+    _s_amt = sc_amt.number_input(
+        "금액 필터(만원 이상만 보기)", min_value=0, step=100,
+        value=1000 if _s_blk == "연간누계" else 100,
+        key=f"cb_min_amt_{'yr' if _s_blk == '연간누계' else 'per'}",
+        help="정렬 기준 기간의 실판매금액이 이 금액(만원) 이상인 매장만 표시해요. "
+             "0을 넣으면 전체 표시. G.TOTAL·담당자별 TOTAL과 합계 숫자는 그대로예요.")
     _s_met = sc2.selectbox("정렬 지표", list(_CB_SORT_METRICS), key="cb_sort_met")
     _s_dir = sc3.selectbox("정렬 방향", ("내림차순 ↓", "오름차순 ↑"), key="cb_sort_dir")
     _s_asc = _s_dir.startswith("오름")
     _cb_sort_spec = (_s_blk, *_CB_SORT_METRICS[_s_met], _s_asc)
-    st.markdown(f"### A. 유통채널별 ({_s_blk} {_s_met} {'오름차순 ↑' if _s_asc else '내림차순 ↓'})")
+    _cb_min_spec = (_s_blk, _s_amt / 100.0)   # 만원 → 백만 (표 내부 단위)
+    _amt_tag = f" · {_s_blk} {_s_amt:,}만원 이상" if _s_amt else ""
+    st.markdown(f"### A. 유통채널별 ({_s_blk} {_s_met} "
+                f"{'오름차순 ↑' if _s_asc else '내림차순 ↓'}{_amt_tag})")
     # 매장명(행) → 담당자 매핑: 표 맨 앞 '담당자' 컬럼으로 표시
     _cm = d[["_채널", "_담당자"]].astype(str).drop_duplicates(subset=["_채널"])
     # 260805: pandas 3.x에서는 astype(str) 후에도 결측이 float(nan)으로 남아 .strip()이 터진다.
@@ -2313,10 +2363,12 @@ def render_channel_brand(df):
         for m in _ch_mans]
     perf_table(cur_y, prev_y, "_채널", None, "유통채널별 매출현황", "cb_ch",
                extra=("담당자", chan_mgr), month=(cur, prev), blk_labels=("조회기간", "연간누계"),
-               extra_rows=mgr_extra_rows, cy=cy_cb, sort_spec=_cb_sort_spec)
+               extra_rows=mgr_extra_rows, cy=cy_cb, sort_spec=_cb_sort_spec,
+               min_spec=_cb_min_spec)
     st.caption("※ 채널을 자사몰/외부몰 등 그룹으로 묶으려면 '채널 기준정보(매핑)'가 필요해요 — 준비되면 그룹 집계도 추가해드릴게요. "
                "G.TOTAL 아래 담당자별 TOTAL → 개별 매장 순으로, 두 구간 모두 위에서 고른 정렬 기준을 따라요 "
-               "(값이 없는 행(–)은 항상 맨 아래). 정렬은 바꾸는 즉시 반영 — 🔍 조회를 다시 누를 필요 없어요. "
+               "(값이 없는 행(–)은 항상 맨 아래). 정렬·금액 필터는 바꾸는 즉시 반영 — 🔍 조회를 다시 누를 필요 없어요. "
+               "금액 필터에 걸러진 매장도 G.TOTAL·담당자별 TOTAL 합계엔 그대로 포함돼요(표시만 숨김). "
                "담당자 미지정 매장은 담당자별 TOTAL 어디에도 안 잡히지만 G.TOTAL엔 포함돼요.")
 
     st.markdown("### B. 브랜드별")
