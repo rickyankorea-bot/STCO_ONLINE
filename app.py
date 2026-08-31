@@ -728,7 +728,7 @@ _XL_DELTA_SUBS = ("증감율", "증감", "편차")
 
 
 def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_labels=None,
-                       extra_row_fill="D6F0FA"):
+                       extra_row_fill="D6F0FA", first_row_total=True):
     """표시용(포맷 문자열) DataFrame을 화면 서식 그대로 엑셀로 변환 (룰13).
 
     화면과 동일: 헤더 회색+볼드, 구분(인덱스) 연회색, 첫 행 노란 강조(G.TOTAL),
@@ -736,6 +736,8 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_label
     전셀 얇은 테두리. first_block_cols=첫 기간블록 컬럼 수 → 경계 두꺼운 세로선(룰12).
     extra_row_labels(2026-08-07 추가)=[라벨, ...]이면 그 행들을 하늘색으로 채움
     (예: 유통채널별 표의 '담당자별 TOTAL' 행 — 화면(perf_table)과 동일 색).
+    first_row_total(260831 추가)=False면 첫 행 노란 강조(룰6)를 끈다 — 첫 행이 G.TOTAL/합계가
+    아닌 표(예: 채널별 추세 분석 — 첫 행이 그냥 1위 매장)용. 기존 호출부는 전부 기본값 유지.
     """
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -771,7 +773,7 @@ def styled_excel_bytes(disp, sheet="표", first_block_cols=None, extra_row_label
             r = data_start + ri
             ilab = disp.index[ri]
             labs = [str(x) for x in (ilab if isinstance(ilab, tuple) else (ilab,))]
-            if ri == 0:                                # 룰6: 첫 행(G.TOTAL/합계) 노란 강조
+            if ri == 0 and first_row_total:            # 룰6: 첫 행(G.TOTAL/합계) 노란 강조
                 fill, bold = gt_fill, True
             elif any(x in _XL_SEASON_BOLD for x in labs):
                 fill, bold = sg_fill, True
@@ -2227,6 +2229,242 @@ def render_dashboard(df):
     # (기존 '채널 TOP10' 차트는 채널 리그 랭킹 보드가 대체 — 2026-07-31)
 
 
+# ── B. 채널별 추세 분석 (260831, 중태님 요청) ─────────────────────────────────
+# A. 유통채널별 표 아래 신설(기존 브랜드별 표는 C로 재번호). 최근 X구간(주간/월간 토글)의
+# 흐름으로 "추세가 좋은 매장 / 나쁜 매장"을 두 가지 잣대로 나눠 보여준다:
+#   (1) 매출 순위 변동 — 구간마다 대상 매장끼리 실판매금액 순위(1위=최대)를 매기고,
+#       전반부 평균순위 − 후반부 평균순위(+면 순위가 올라가는 중 = 개선).
+#   (2) 전년동기대비 신장율 추세 — 구간별 신장율(정확히 1년 전 같은 날짜범위 대비 %)의
+#       후반부 평균 − 전반부 평균(+%p면 좋아지는 중 = 개선). 전년이 0인 구간은 "–"로 두고
+#       평균에서 제외 — 전·후반 어느 한쪽에 유효 구간이 하나도 없으면 그 매장은 (2)에서 제외.
+# 판정 방식(AskUserQuestion 확정, 260831): 전반부 vs 후반부 평균 — X구간을 반씩(h=X//2)
+# 나눠 앞 h개·뒤 h개 평균을 비교(X가 홀수면 가운데 1구간은 판정에서 빠지고 표에는 표시).
+# 출력(확정): 분석별 '개선 TOP N'·'악화 TOP N' 두 표(변화 0인 매장은 어느 쪽에도 안 나옴).
+# 엑셀(룰11·13)은 TOP 잘라내기 전 '전체 대상 매장' 추세표(개선폭 내림차순)를 내려준다.
+# 위젯은 조회 폼 밖 → 바꾸는 즉시 반영(A표 정렬·금액 필터와 동일 패턴). 기준 종료일 =
+# 조회기간 종료일(e). 브랜드/연차/시즌/담당 필터는 A표와 동일하게 적용된 상태(base)를 쓴다.
+
+
+def _trend_buckets(e, unit, n):
+    """추세 분석용 최근 n개 구간 [(라벨, 시작, 끝)] — 과거→최근 순.
+
+    주간: 조회 종료일 e로 끝나는 7일 단위 n개(라벨 = 그 주 종료일 "~MM/DD").
+    월간: e가 속한 달을 마지막 구간(1일~e, 진행분)으로 하는 달력월 n개
+    (라벨 = "M월", 연도가 다르면 "YY.M월").
+    """
+    e = pd.to_datetime(e).normalize()
+    out = []
+    if unit == "주간":
+        for i in range(n):                       # i=0 이 가장 과거
+            end = e - pd.Timedelta(days=7 * (n - 1 - i))
+            out.append((f"~{end:%m/%d}", end - pd.Timedelta(days=6), end))
+    else:
+        cur_m0 = e.replace(day=1)
+        for i in range(n):
+            m0 = cur_m0 - pd.DateOffset(months=n - 1 - i)
+            m_end = e if m0 == cur_m0 else (m0 + pd.DateOffset(months=1)
+                                            - pd.Timedelta(days=1))
+            lbl = f"{m0.month}월" if m0.year == e.year else f"{str(m0.year)[-2:]}.{m0.month}월"
+            out.append((lbl, m0, m_end))
+    return out
+
+
+def _trend_matrices(base, buckets):
+    """구간별 매장 매출 매트릭스 (cur, prev) — index=매장(_채널), columns=구간 라벨.
+
+    prev는 각 구간을 정확히 1년 전으로 시프트한 같은 날짜범위(앱 전역의 '전년 동기간'
+    관행 — render_channel_brand 등과 동일). 올해 매출이 전혀 없는 매장(전년만 있는
+    매장)은 대상에서 제외되도록 prev를 cur.index로 reindex한다.
+    """
+    cur_cols, prev_cols = {}, {}
+    dt = base["_판매일"]
+    for lbl, s, t in buckets:
+        cur_cols[lbl] = base.loc[(dt >= s) & (dt <= t)].groupby("_채널")["_매출액"].sum()
+        s1, t1 = s - pd.DateOffset(years=1), t - pd.DateOffset(years=1)
+        prev_cols[lbl] = base.loc[(dt >= s1) & (dt <= t1)].groupby("_채널")["_매출액"].sum()
+    cur = pd.DataFrame(cur_cols).fillna(0.0)
+    prev = pd.DataFrame(prev_cols).reindex(cur.index).fillna(0.0) if not cur.empty \
+        else pd.DataFrame(prev_cols)
+    return cur, prev
+
+
+def _trend_split(labels):
+    """전반부/후반부 라벨 분할 — h=len//2, 앞 h개 vs 뒤 h개(홀수면 가운데 1개 제외)."""
+    h = max(1, len(labels) // 2)
+    return list(labels[:h]), list(labels[-h:])
+
+
+def _trend_render_table(disp, key, empty_msg):
+    """추세 분석 소표 렌더 — perf_table과 같은 erp-tbl 룩. 단 첫 행은 G.TOTAL이 아니라
+    그냥 1위 매장이므로, 표 고유 클래스로 _TBL_CSS의 첫 행 노란 강조(룰6)를 되돌린다."""
+    if disp.empty:
+        st.caption(empty_msg)
+        return
+    cls = _season_css_class(key)
+
+    def _delta_color(col):
+        return ["color:#c62828;font-weight:600" if str(v).startswith("-")
+                else ("color:#1f8a4c;font-weight:600" if str(v).startswith("+") else "")
+                for v in disp[col]]
+    sty = disp.style.set_properties(**{"text-align": "right"})
+    if "담당자" in disp.columns:
+        sty = sty.set_properties(subset=pd.IndexSlice[:, ["담당자"]],
+                                 **{"text-align": "left"})
+    if "증감" in disp.columns:
+        sty = sty.apply(lambda s: _delta_color("증감"), subset=pd.IndexSlice[:, ["증감"]])
+    _css = f"""
+<style>
+table.{cls} tbody tr:first-child th{{background:#fbfbfd !important;font-weight:600;}}
+table.{cls} tbody tr:first-child td{{background:#fff !important;font-weight:400;}}
+</style>
+"""
+    render_styled_table(sty, extra_class=cls, extra_css=_css)
+
+
+def _render_channel_trend(base, e, chan_mgr):
+    """B. 채널별 추세 분석 본체 — 위 블록 주석 참고. base=필터 적용된 데이터, e=조회 종료일."""
+    st.markdown("### B. 채널별 추세 분석 (전반부 vs 후반부 평균 비교)")
+    tc1, tc2, tc3, tc4, _tsp = st.columns([1.1, 1.1, 1.1, 1.1, 1.1])
+    _unit = tc1.selectbox("기간 단위", ("주간", "월간"), key="cb_tr_unit",
+                          help="주간=조회 종료일로 끝나는 7일 단위, 월간=달력월"
+                               "(마지막 달은 조회 종료일까지 진행분).")
+    # 구간 수 위젯 key를 단위별로 분리(금액 필터의 기간별 key 분리와 같은 패턴) —
+    # 단위를 전환하면 그 단위의 디폴트(주간 8·월간 3)로 시작하되, 각 단위에서 직접
+    # 고친 값은 세션 안에서 따로 기억된다.
+    if _unit == "주간":
+        _n = tc2.number_input("최근 구간 수(주)", min_value=2, max_value=26, value=8,
+                              step=1, key="cb_tr_n_wk")
+    else:
+        _n = tc2.number_input("최근 구간 수(개월)", min_value=2, max_value=12, value=3,
+                              step=1, key="cb_tr_n_mo")
+    _topn = tc3.number_input("TOP 매장 수", min_value=3, max_value=30, value=10,
+                             step=1, key="cb_tr_topn")
+    _thr = tc4.number_input("대상 최소금액(만원)", min_value=0, step=100, value=100,
+                            key="cb_tr_min_amt",
+                            help="최근 X구간 실판매금액 합계가 이 금액(만원) 미만인 매장은 "
+                                 "추세 분석 대상에서 제외해요(소액 매장의 순위 노이즈 방지). "
+                                 "0을 넣으면 매출 있는 전체 매장이 대상.")
+    _n = int(_n)
+    buckets = _trend_buckets(e, _unit, _n)
+    labels = [b[0] for b in buckets]
+    front, back = _trend_split(labels)
+    cur, prev = _trend_matrices(base, buckets)
+    if cur.empty:
+        st.info("현재 조회조건에서 추세를 계산할 매출 데이터가 없어요.")
+        return
+    tot = cur.sum(axis=1)
+    keep = tot > 0
+    if _thr > 0:
+        keep &= tot >= _thr * 10000.0          # 만원 → 원
+    cur_u, prev_u = cur.loc[keep], prev.loc[keep]
+    if len(cur_u) < 2:
+        st.info("추세 분석 대상 매장이 2개 미만이에요 — 최소금액 문턱을 낮추거나 기간을 조정해 보세요.")
+        return
+    _mid_note = f" · 가운데 {_n - 2 * (_n // 2)}구간은 판정 제외(홀수 구간)" if _n % 2 else ""
+    st.caption(f"대상 {len(cur_u)}개 매장(최근 {_n}{'주' if _unit == '주간' else '개월'} 합계 "
+               f"{_thr:,}만원 이상{', 0=전체' if not _thr else ''}) · "
+               f"전반부 {len(front)}구간 vs 후반부 {len(back)}구간 평균 비교{_mid_note} · "
+               f"기준 종료일 = 조회기간 종료일({pd.to_datetime(e):%m/%d}) · "
+               "단위·구간 수·TOP·문턱은 바꾸는 즉시 반영 — 🔍 조회를 다시 누를 필요 없어요.")
+
+    def _mgr(ch):
+        return chan_mgr.get(str(ch), "")
+
+    # ── (1) 매출 순위 변동 ────────────────────────────────────────────────────
+    ranks = cur_u.rank(axis=0, ascending=False, method="min").astype(int)
+    rf, rb = ranks[front].mean(axis=1), ranks[back].mean(axis=1)
+    rd = rf - rb                                # +면 순위 상승(개선)
+
+    def _fmt_d(v, suf=""):
+        return "0.0" + suf if abs(v) < 1e-9 else f"{v:+.1f}{suf}"
+
+    def _rank_disp(idx):
+        rows = []
+        for ch in idx:
+            row = {"담당자": _mgr(ch)}
+            for lbl in labels:
+                row[lbl] = str(ranks.at[ch, lbl])
+            row["전반평균"] = f"{rf[ch]:.1f}"
+            row["후반평균"] = f"{rb[ch]:.1f}"
+            row["증감"] = _fmt_d(rd[ch])
+            rows.append(row)
+        return pd.DataFrame(rows, index=pd.Index(idx, name="매장"))
+
+    _imp_idx = sorted(rd[rd > 1e-9].index, key=lambda c: (-rd[c], rb[c]))
+    _wor_idx = sorted(rd[rd < -1e-9].index, key=lambda c: (rd[c], rb[c]))
+    _all_rank_idx = sorted(rd.index, key=lambda c: (-rd[c], rb[c]))
+    rh1, rh2 = st.columns([4, 1])
+    rh1.markdown("#### ① 매출 순위 변동 — 구간별 매출 순위(1위=최대)의 흐름")
+    rh2.download_button("⬇ 엑셀",
+                        styled_excel_bytes(_rank_disp(_all_rank_idx), "매출순위 변동",
+                                           first_row_total=False),
+                        file_name="채널추세_매출순위변동.xlsx", mime=XLSX_MIME,
+                        key="dl_cb_tr_rank", use_container_width=True)
+    rc1, rc2 = st.columns(2)
+    with rc1:
+        st.markdown(f"**🔼 순위 개선 TOP {min(_topn, len(_imp_idx))}** — 전반부보다 후반부 순위가 올라간 매장")
+        _trend_render_table(_rank_disp(_imp_idx[:_topn]), "cb_tr_rank_up",
+                            "순위가 개선된 매장이 없어요.")
+    with rc2:
+        st.markdown(f"**🔽 순위 악화 TOP {min(_topn, len(_wor_idx))}** — 전반부보다 후반부 순위가 내려간 매장")
+        _trend_render_table(_rank_disp(_wor_idx[:_topn]), "cb_tr_rank_dn",
+                            "순위가 악화된 매장이 없어요.")
+    st.caption("숫자는 각 구간의 매출 순위(대상 매장끼리, 1위=최대) · 증감 = 전반평균 − 후반평균 "
+               "(+면 순위 상승) · 증감 0인 매장은 어느 표에도 안 나와요 · 엑셀엔 전체 대상 매장이 담겨요.")
+
+    # ── (2) 전년동기대비 신장율 추세 ─────────────────────────────────────────
+    growth = (cur_u - prev_u) / prev_u.replace(0, np.nan) * 100.0
+    gf_ok = growth[front].notna().sum(axis=1) > 0
+    gb_ok = growth[back].notna().sum(axis=1) > 0
+    gf, gb = growth[front].mean(axis=1), growth[back].mean(axis=1)
+    gd = gb - gf                                # +%p면 신장율이 좋아지는 중(개선)
+    _g_valid = gf_ok & gb_ok & gd.notna()
+
+    def _fmt_g(v):
+        return "–" if pd.isna(v) else f"{v:+.1f}%"
+
+    def _growth_disp(idx):
+        rows = []
+        for ch in idx:
+            row = {"담당자": _mgr(ch)}
+            for lbl in labels:
+                row[lbl] = _fmt_g(growth.at[ch, lbl])
+            row["전반평균"] = _fmt_g(gf[ch] if gf_ok[ch] else np.nan)
+            row["후반평균"] = _fmt_g(gb[ch] if gb_ok[ch] else np.nan)
+            row["증감"] = _fmt_d(gd[ch], "%p") if _g_valid[ch] else "–"
+            rows.append(row)
+        return pd.DataFrame(rows, index=pd.Index(idx, name="매장"))
+
+    gdv = gd[_g_valid]
+    _gimp_idx = sorted(gdv[gdv > 1e-9].index, key=lambda c: (-gd[c], -gb[c]))
+    _gwor_idx = sorted(gdv[gdv < -1e-9].index, key=lambda c: (gd[c], gb[c]))
+    _all_g_idx = (sorted(gdv.index, key=lambda c: (-gd[c], -gb[c]))
+                  + sorted(gd.index[~_g_valid]))
+    gh1, gh2 = st.columns([4, 1])
+    gh1.markdown("#### ② 전년동기대비 신장율 추세 — 구간별 신장율(%)의 흐름")
+    gh2.download_button("⬇ 엑셀",
+                        styled_excel_bytes(_growth_disp(_all_g_idx), "신장율 추세",
+                                           first_row_total=False),
+                        file_name="채널추세_신장율추세.xlsx", mime=XLSX_MIME,
+                        key="dl_cb_tr_growth", use_container_width=True)
+    if not gdv.empty:
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            st.markdown(f"**🔼 신장율 개선 TOP {min(_topn, len(_gimp_idx))}** — 후반부 신장율이 전반부보다 좋아진 매장")
+            _trend_render_table(_growth_disp(_gimp_idx[:_topn]), "cb_tr_gr_up",
+                                "신장율이 개선된 매장이 없어요.")
+        with gc2:
+            st.markdown(f"**🔽 신장율 악화 TOP {min(_topn, len(_gwor_idx))}** — 후반부 신장율이 전반부보다 나빠진 매장")
+            _trend_render_table(_growth_disp(_gwor_idx[:_topn]), "cb_tr_gr_dn",
+                                "신장율이 악화된 매장이 없어요.")
+    else:
+        st.info("전년 같은 기간 매출이 있는 매장이 없어 신장율 추세를 계산할 수 없어요 — "
+                "전년 로우데이터가 적재돼 있는지, 기간이 너무 이르지 않은지 확인해 보세요.")
+    st.caption("신장율 = 그 구간 매출 vs 정확히 1년 전 같은 날짜범위 매출 · 전년이 0인 구간은 \"–\"로 "
+               "평균에서 제외(전·후반 한쪽이 전부 \"–\"인 매장은 판정 제외, 엑셀 맨 아래에만 표시) · "
+               "증감 = 후반평균 − 전반평균(+%p면 개선) · 증감 0인 매장은 어느 표에도 안 나와요.")
+
+
 def render_channel_brand(df):
     """매주 대표님 보고 B: 유통채널별 · 브랜드별 매출현황 (전년 동기간 비교)."""
     st.subheader("📈 유통별 세부 분석 (전년 동기간 비교)")
@@ -2277,6 +2515,10 @@ def render_channel_brand(df):
         perf_table(_empty, _empty, "_채널", None, "유통채널별 매출현황", "cb_ch_preview",
                    extra=("담당자", {}), month=(_empty, _empty),
                    blk_labels=("조회기간", "연간누계"), extra_rows=_preview_mgr_rows, preview=True)
+        # 260831: B. 채널별 추세 분석은 실계산이 필요해 미리보기 스켈레톤이 없음 — 안내만.
+        st.markdown("### B. 채널별 추세 분석")
+        st.caption("최근 X주/X개월의 매출 순위 변동·전년비 신장율 흐름으로 추세가 좋은 매장과 "
+                   "나쁜 매장을 나눠 보여드려요 — 🔍 조회 후 표시돼요.")
         perf_table(_empty, _empty, "브랜드명", None, "브랜드별 매출현황", "cb_br_preview",
                    preview=True)
         return
@@ -2371,7 +2613,10 @@ def render_channel_brand(df):
                "금액 필터에 걸러진 매장도 G.TOTAL·담당자별 TOTAL 합계엔 그대로 포함돼요(표시만 숨김). "
                "담당자 미지정 매장은 담당자별 TOTAL 어디에도 안 잡히지만 G.TOTAL엔 포함돼요.")
 
-    st.markdown("### B. 브랜드별")
+    # ── 260831(중태님 요청): B. 채널별 추세 분석 — A표 아래 신설, 기존 브랜드별은 C로 재번호 ──
+    _render_channel_trend(base, e, chan_mgr)
+
+    st.markdown("### C. 브랜드별")
     perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br", cy=cy_cb)
 
 
