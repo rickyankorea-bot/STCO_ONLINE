@@ -2234,9 +2234,10 @@ def render_dashboard(df):
 # 흐름으로 "추세가 좋은 매장 / 나쁜 매장"을 두 가지 잣대로 나눠 보여준다:
 #   (1) 매출 순위 변동 — 구간마다 대상 매장끼리 실판매금액 순위(1위=최대)를 매기고,
 #       전반부 평균순위 − 후반부 평균순위(+면 순위가 올라가는 중 = 개선).
-#   (2) 전년동기대비 신장율 추세 — 구간별 신장율(정확히 1년 전 같은 날짜범위 대비 %)의
-#       후반부 평균 − 전반부 평균(+%p면 좋아지는 중 = 개선). 전년이 0인 구간은 "–"로 두고
-#       평균에서 제외 — 전·후반 어느 한쪽에 유효 구간이 하나도 없으면 그 매장은 (2)에서 제외.
+#   (2) 전년동기대비 신장율 추세 — 전반부·후반부 각각 '기간 합계' 기준 신장율(그 구간
+#       매출 합 vs 정확히 1년 전 같은 날짜범위 합)을 구해 후반부 − 전반부(+%p면 개선).
+#       (260831 후속2: 주별 % 평균 방식은 극단값 노이즈로 폐지 — 함수 안 주석 참고.)
+#       전년 합이 없는(≤0) 반쪽은 판정 불가 → 그 매장은 (2)에서 제외(엑셀 맨 아래 "–").
 # 판정 방식(AskUserQuestion 확정, 260831): 전반부 vs 후반부 평균 비교.
 #   후반부 = 뒤 k개 구간(k = "후반부 구간 수" 위젯, 260831 후속 — 디폴트 X//2, 1까지 좁혀
 #   "가장 최근 흐름"만 볼 수 있음) / 전반부 = 후반부를 뺀 앞쪽 전체(X−k개).
@@ -2439,12 +2440,21 @@ def _render_channel_trend(base, e, chan_mgr):
                "(+면 순위 상승) · 증감 0인 매장은 어느 표에도 안 나와요 · 엑셀엔 전체 대상 매장이 담겨요.")
 
     # ── (2) 전년동기대비 신장율 추세 ─────────────────────────────────────────
-    growth = (cur_u - prev_u) / prev_u.replace(0, np.nan) * 100.0
-    gf_ok = growth[front].notna().sum(axis=1) > 0
-    gb_ok = growth[back].notna().sum(axis=1) > 0
-    gf, gb = growth[front].mean(axis=1), growth[back].mean(axis=1)
+    # 260831 후속2(중태님 확인): 판정은 '기간 합계' 기준 — 전반부·후반부 각각
+    # (그 구간 매출 합 − 전년 동기 합) ÷ 전년 동기 합. 처음엔 주별 신장율의 평균으로
+    # 판정했는데, 전년 매출이 몇 만원뿐인 주의 수천% 튐·반품(음수 매출) 주의 극단값이
+    # 평균을 통째로 흔들어 판정이 노이즈에 휘둘리는 걸 실화면(-4732% 등)으로 확인하고
+    # 합계 방식으로 교체. 구간별 % 컬럼은 참고용으로 유지(전년≤0인 구간은 "–").
+    # 전년 합이 0 이하(전년 데이터 없음 또는 반품 초과)인 반쪽은 판정 불가(NaN) —
+    # 전·후반 어느 한쪽이라도 판정 불가면 그 매장은 (2)에서 제외(엑셀 맨 아래 "–" 표시).
+    growth = (cur_u - prev_u) / prev_u.where(prev_u > 0) * 100.0
+
+    def _half_growth(cols):
+        c, p = cur_u[cols].sum(axis=1), prev_u[cols].sum(axis=1)
+        return (c - p) / p.where(p > 0) * 100.0
+    gf, gb = _half_growth(front), _half_growth(back)
     gd = gb - gf                                # +%p면 신장율이 좋아지는 중(개선)
-    _g_valid = gf_ok & gb_ok & gd.notna()
+    _g_valid = gf.notna() & gb.notna()
 
     def _fmt_g(v):
         return "–" if pd.isna(v) else f"{v:+.1f}%"
@@ -2455,8 +2465,8 @@ def _render_channel_trend(base, e, chan_mgr):
             row = {"담당자": _mgr(ch)}
             for lbl in labels:
                 row[lbl] = _fmt_g(growth.at[ch, lbl])
-            row["전반평균"] = _fmt_g(gf[ch] if gf_ok[ch] else np.nan)
-            row["후반평균"] = _fmt_g(gb[ch] if gb_ok[ch] else np.nan)
+            row["전반부"] = _fmt_g(gf[ch])
+            row["후반부"] = _fmt_g(gb[ch])
             row["증감"] = _fmt_d(gd[ch], "%p") if _g_valid[ch] else "–"
             rows.append(row)
         return pd.DataFrame(rows, index=pd.Index(idx, name="매장"))
@@ -2473,6 +2483,10 @@ def _render_channel_trend(base, e, chan_mgr):
                                            first_row_total=False),
                         file_name="채널추세_신장율추세.xlsx", mime=XLSX_MIME,
                         key="dl_cb_tr_growth", use_container_width=True)
+    _n_excl = int((~_g_valid).sum())
+    if _n_excl:
+        st.caption(f"판정 대상 {int(_g_valid.sum())}개 매장 · **전년 데이터 부족으로 판정 제외 "
+                   f"{_n_excl}개**(올해 신규 입점 등 — 엑셀 맨 아래 \"–\"로 표시돼요).")
     if not gdv.empty:
         gc1, gc2 = st.columns(2)
         with gc1:
@@ -2486,9 +2500,10 @@ def _render_channel_trend(base, e, chan_mgr):
     else:
         st.info("전년 같은 기간 매출이 있는 매장이 없어 신장율 추세를 계산할 수 없어요 — "
                 "전년 로우데이터가 적재돼 있는지, 기간이 너무 이르지 않은지 확인해 보세요.")
-    st.caption("신장율 = 그 구간 매출 vs 정확히 1년 전 같은 날짜범위 매출 · 전년이 0인 구간은 \"–\"로 "
-               "평균에서 제외(전·후반 한쪽이 전부 \"–\"인 매장은 판정 제외, 엑셀 맨 아래에만 표시) · "
-               "증감 = 후반평균 − 전반평균(+%p면 개선) · 증감 0인 매장은 어느 표에도 안 나와요.")
+    st.caption("전반부·후반부 = 그 구간 **매출 합계** 기준 전년동기 신장율(주별 % 평균이 아님 — "
+               "전년 매출이 아주 작은 주의 수천% 튐이 판정을 흔들지 않게) · 구간별 %는 참고용"
+               "(전년 매출 없는 구간은 \"–\") · 증감 = 후반부 − 전반부(+%p면 개선) · "
+               "전년 합계가 없는 매장은 판정 제외 · 증감 0인 매장은 어느 표에도 안 나와요.")
 
 
 def render_channel_brand(df):
