@@ -2329,7 +2329,10 @@ def _trend_render_table(disp, key, empty_msg):
                                  **{"text-align": "left"})
     for _dc in ("증감", "전체 기울기", "최근 기울기"):
         if _dc in disp.columns:
-            sty = sty.apply(lambda s, c=_dc: _delta_color(c), subset=pd.IndexSlice[:, [c]])
+            # 260831 버그수정: subset에 람다 안에서만 유효한 c를 쓰다 NameError(라이브 크래시)
+            # — 함수 스코프 변수 _dc로 통일.
+            sty = sty.apply(lambda s, c=_dc: _delta_color(c),
+                            subset=pd.IndexSlice[:, [_dc]])
     _css = f"""
 <style>
 table.{cls} tbody tr:first-child th{{background:#fbfbfd !important;font-weight:600;}}
