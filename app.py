@@ -464,7 +464,14 @@ def _existing_columns(conn, eng):
     return [r[0] for r in rows]
 
 
-@st.cache_data(ttl=21600)
+# 260922 메모리 대책(앱 크래시 "Oh no" 2일 연속 재발 — Cloud 로그에 트레이스백 없이 컨테이너만
+#   재프로비저닝됨 = 메모리 한도 초과 kill 패턴): st.cache_data는 호출될 때마다 캐시(pickle)에서
+#   51만 행 프레임을 "통째로 복제"해서 돌려준다 → 클릭(rerun)마다·접속자마다 수백 MB짜리 사본이
+#   생겨 피크 메모리가 한도를 넘김. st.cache_resource는 메모리에 있는 같은 객체를 그대로 공유해
+#   (복제 0회) 사본이 안 생긴다. 단, 돌려받은 df를 제자리에서 고치면 전원에게 반영되므로
+#   render_* 함수들은 반드시 d = df.copy() 로 자기 사본을 만들어 쓸 것(현재 전부 그렇게 돼 있음
+#   — AST로 df 제자리 대입 없음 확인). load_db.clear()·ttl 동작은 cache_data와 동일.
+@st.cache_resource(ttl=21600)
 def load_db():
     """필요한 컬럼만 청크 단위로 읽어 category/downcast로 적재 (대용량 메모리 최적화)."""
     eng = get_engine()
@@ -1510,7 +1517,7 @@ def render_flagship(df):
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
         st.info("데이터를 먼저 적재하세요.")
         return
-    d = df[df["_판매일"].notna()].copy()
+    d = df.copy()   # 260922: load_db가 이미 _판매일 결측행 제거 → 불리언인덱싱+copy 이중복제 제거(메모리 절반)
     years = sorted(d["_판매일"].dt.year.dropna().astype(int).unique(), reverse=True)
 
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 단위 백만원 · 판가율=실판가÷최초가(가중)")
@@ -2577,7 +2584,7 @@ def render_channel_brand(df):
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
         st.info("데이터를 먼저 적재하세요.")
         return
-    d = df[df["_판매일"].notna()].copy()
+    d = df.copy()   # 260922: load_db가 이미 _판매일 결측행 제거 → 불리언인덱싱+copy 이중복제 제거(메모리 절반)
     # 매장 담당자 매핑 (매장 마스터의 담당자 기준) — 담당자 컬럼·담당 필터용
     master = load_master()
     if not master.empty and "담당자" in master.columns:
@@ -3260,7 +3267,7 @@ def render_category_mix(df):
     if not need_cols.issubset(df.columns):
         st.info("이 리포트에 필요한 컬럼(아이템·매장코드·매장명 등)이 없어요.")
         return
-    d = df[df["_판매일"].notna()].copy()
+    d = df.copy()   # 260922: load_db가 이미 _판매일 결측행 제거 → 불리언인덱싱+copy 이중복제 제거(메모리 절반)
 
     # [수정7, 2026-08-09] 담당별 필터 추가 위해 매장 담당자를 행(거래) 단위로 먼저 매핑 — 이 앱의
     # 기존 관행(render_channel_brand 등)과 동일한 패턴. shown["_담당자"] 산출에도 동일 맵 재사용.
@@ -4870,7 +4877,7 @@ def render_weekly_report(df):
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
         st.info("데이터를 먼저 적재하세요.")
         return
-    d = df[df["_판매일"].notna()].copy()
+    d = df.copy()   # 260922: load_db가 이미 _판매일 결측행 제거 → 불리언인덱싱+copy 이중복제 제거(메모리 절반)
     master = load_master()
     if not master.empty and "채널스토리" in master.columns:
         cs_map = dict(zip(master["매장코드"].astype(str).str.strip(), master["채널스토리"]))
@@ -7845,7 +7852,7 @@ def render_return_rate(df):
     if df is None or df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
         st.info("데이터를 먼저 적재하세요.")
         return
-    d = df[df["_판매일"].notna()].copy()
+    d = df.copy()   # 260922: load_db가 이미 _판매일 결측행 제거 → 불리언인덱싱+copy 이중복제 제거(메모리 절반)
     if "품번" not in d.columns or "판매수량" not in d.columns:
         st.info("품번·판매수량 컬럼이 없어 반품률을 계산할 수 없어요.")
         return
@@ -10027,6 +10034,7 @@ def main():
         render_price_mgmt()
     else:
         render_dashboard(df)
+    gc.collect()   # 260922: rerun마다 남는 임시 프레임(d, disp 등) 즉시 회수 — 메모리 피크 억제
 
 
 if __name__ == "__main__":
