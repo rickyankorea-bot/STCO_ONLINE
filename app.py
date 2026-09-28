@@ -5088,7 +5088,11 @@ ITEM_MASTER_TABLE = "item_master"
 # 260811: 사이즈구분 컬럼 도입으로 입출력 스펙 변경 — 하드코딩 대신 상수로 관리.
 INV_RAW_COLS = 94          # 로우데이터 총 열 수 (구 93 → 94, '사이즈구분' 신규 1열)
 INV_RAW_MOLGA_COL = 9      # raw 0-index — 몰가격(J열)
-INV_RAW_GIJUN_COL = 27     # raw 0-index — 기준판매가(AB열)
+INV_RAW_GIJUN_COL = 26     # raw 0-index — 스티커가격(AA열). 260928 ERP 개편: '기준판매가'가
+                           # '스티커가격'으로 이름이 바뀌면서 위치도 이동(구 AB열=0-idx 27 → AA열=0-idx 26).
+                           # 값의 의미(캡핑·복제·SET합산 기준가)는 동일. 구형식 파일은 헤더 자동 감지로
+                           # 계속 처리한다 — process_inventory() 안의 260928 형식 감지 블록 참조.
+INV_RAW_GIJUN_COL_OLD = 27 # raw 0-index — 구형식(~260927)의 기준판매가(AB열)
 INV_RAW_CHOJOGA_COL = 7    # raw 0-index — 최초가(H열). 260814: 기준판매가가 공란일 때의 대체 캡핑 기준.
 INV_RAW_HYUNPAN_COL = 8    # raw 0-index — 현판가(I열). 260826: SET 가격 합산에 사용.
 # 260811(가격시뮬): 몰가격(22) 바로 뒤에 ① 기준판매가 복제 1컬럼(녹색) → ② 신규 가격 5컬럼(노란색)
@@ -5854,6 +5858,33 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     elif ws.max_column != INV_RAW_COLS:
         raise ValueError(f"로우데이터 열 수 {ws.max_column} ≠ {INV_RAW_COLS} — 파일을 확인하세요 "
                          f"(93열이면 '사이즈구분' 컬럼이 없는 구형식이에요 · 48열이면 매출 파일이에요).")
+    # 260928: ERP 로우데이터 개편 — '상품구분' 블록(raw 0-idx 21~30)의 컬럼 구성 변경.
+    #   구(~260927): 수정일 · 이관구분 · 물량등급_단품 · 물량등급_세트 · 상품테마1 · 상품테마2 ·
+    #                기준판매가(0-idx 27) · 가격변동여부 · 변동가 · 변동일자
+    #   신(260928~): 이관구분 · 상품테마1(상품종류) · 상품테마2(소재) · 상품테마3(특징) ·
+    #                특이사항(판매관련) · 스티커가격(0-idx 26) · 가격변동여부 · 변동가 · 변동일자 ·
+    #                가격변동사유
+    #   핵심: '기준판매가'→'스티커가격'은 이름만이 아니라 위치도 27→26으로 이동(캡핑·복제·SET합산의
+    #   기준가라 틀리면 가격 컬럼이 전부 어긋난다). 2행 헤더로 형식을 자동 감지해 두 형식 모두 처리.
+    #   블록 밖(0~20·31~93) 컬럼과 총 열 수(94)는 두 형식이 동일. 선판정(오프라인) 소스도 두 형식
+    #   다 0-idx 21 — 구형식은 '수정일'이라는 이름의 컬럼에, 신형식은 '이관구분' 컬럼에 실제
+    #   온라인/오프라인/부분이관 값이 들어온다(항목7 참조).
+    _hdr2 = next(ws.iter_rows(min_row=2, max_row=2, values_only=True), None) or ()
+
+    def _rawhdr(i):
+        return str(_hdr2[i]).strip() if len(_hdr2) > i and _hdr2[i] is not None else ""
+
+    if "스티커" in _rawhdr(INV_RAW_GIJUN_COL):
+        gijun_col, gijun_label = INV_RAW_GIJUN_COL, _rawhdr(INV_RAW_GIJUN_COL)   # 신형식
+    elif "기준판매가" in _rawhdr(INV_RAW_GIJUN_COL_OLD):
+        gijun_col, gijun_label = INV_RAW_GIJUN_COL_OLD, "기준판매가"             # 구형식
+    else:
+        raise ValueError(f"로우데이터 2행 헤더에서 가격 기준 컬럼을 찾지 못했어요 — 27번째 칸이 "
+                         f"'스티커가격'(신형식)도, 28번째 칸이 '기준판매가'(구형식)도 아니에요 "
+                         f"(현재 27번째='{_rawhdr(INV_RAW_GIJUN_COL)}' · 28번째="
+                         f"'{_rawhdr(INV_RAW_GIJUN_COL_OLD)}'). ERP 다운로드 형식이 또 바뀌었는지 "
+                         f"확인해 주세요.")
+
     rows = [r for r in ws.iter_rows(min_row=3, values_only=True)]
     skipped = sum(1 for r in rows if r[0] in (None, ""))
     rows = [r for r in rows if r[0] not in (None, "")]
@@ -5877,8 +5908,10 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
                    year=year_raw, season=season_raw,
                    season_grp=(season_group_map or {}).get(season_raw, season_raw),  # 비교 대상군(묶음) 라벨
                    year_grp=(year_group_map or {}).get(year_raw, year_raw),          # 비교 대상군(묶음) 라벨
-                   # 260811: 오프라인 판정 소스를 '이관구분'(raw22)에서 '수정일'(raw21)로 변경
-                   # — 실제 오프라인/온라인/부분이관 값이 담긴 컬럼은 '수정일'이라는 이름으로 내려온다.
+                   # 260811: 오프라인 판정 소스를 '이관구분'(raw22)에서 raw21로 변경 — 구형식에선
+                   # '수정일'이라는 이름의 컬럼에 실제 오프라인/온라인/부분이관 값이 내려왔다.
+                   # 260928: 신형식은 이 자리(raw21)가 '이관구분'으로 바로잡혀 값·위치 모두 그대로 —
+                   # 어느 형식이든 raw21이 선판정 소스다.
                    off=str(r[21]).strip() == "오프라인",
                    stock=_inv_num(r[39]) or 0, sales=_inv_num(r[45]) or 0, depl=_inv_num(r[47]),
                    size14={i + 1: int(_inv_num(r[79 + i]) or 0) for i in range(14)},
@@ -6050,7 +6083,7 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     def _inv_row_price9(r_):
         raw_ = r_["raw"]
         _m = _inv_num(raw_[INV_RAW_MOLGA_COL])
-        _g = _inv_num(raw_[INV_RAW_GIJUN_COL])
+        _g = _inv_num(raw_[gijun_col])   # 260928: 형식 감지된 스티커가격(신)/기준판매가(구) 위치
         _c = _inv_num(raw_[INV_RAW_CHOJOGA_COL])
         _h = _inv_num(raw_[INV_RAW_HYUNPAN_COL])
         return [_c, _h, _m, _g] + _inv_price_sim(_m, _g, _c)
@@ -6329,11 +6362,14 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     for _k, _h in enumerate(INV_PRICE_SIM_HEADERS):
         tws.cell(NAMES_R, INV_PRICE_SIM_COL + _k).value = _h
     # 260826(SET가격): SET 가격 9컬럼 헤더명 기입 (그룹행 "SET 가격" 병합은 아래 그룹헤더 재구성부에서).
+    # 260928: '기준판매가' 자리는 로우데이터 헤더의 실제 이름(신형식 '스티커가격'/구형식 '기준판매가')을
+    # 그대로 따라간다 — 팀이 부르는 이름과 결과물 헤더가 어긋나지 않도록.
     for _k, _h in enumerate(INV_SET_PRICE_HEADERS):
-        tws.cell(NAMES_R, INV_SET_PRICE_COL + _k).value = _h
-    # 260811 추가 개정(2): 몰가격 바로 옆에 '기준판매가' 복제 컬럼 헤더명 기입 (그룹행은 비워둠 —
-    # 사이즈구분과 동일 방식). 원본 기준판매가 컬럼(뒤쪽 패스스루 구간)은 헤더/값 모두 그대로 유지된다.
-    tws.cell(NAMES_R, INV_GIJUN_COPY_COL).value = "기준판매가"
+        tws.cell(NAMES_R, INV_SET_PRICE_COL + _k).value = (gijun_label if _h == "기준판매가" else _h)
+    # 260811 추가 개정(2): 몰가격 바로 옆에 기준가 복제 컬럼 헤더명 기입 (그룹행은 비워둠 —
+    # 사이즈구분과 동일 방식). 원본 기준가 컬럼(뒤쪽 패스스루 구간)은 헤더/값 모두 그대로 유지된다.
+    # 260928: 헤더명도 로우데이터 실제 이름(스티커가격/기준판매가)을 미러링.
+    tws.cell(NAMES_R, INV_GIJUN_COPY_COL).value = gijun_label
 
     # 260811 추가 개정(3): '수정일'을 로우데이터 순서대로 '이관구분' 바로 왼쪽(41번째 칸)으로 옮기며
     # AA~변경후할인율 블록이 한 칸씩 앞당겨졌다 — 템플릿에 박혀있던 32~42번째 칸 헤더명(NAMES_R)을
@@ -6341,14 +6377,21 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
     # 260815(헤더 개편, 중태님 확정): 컬럼명 3개 변경(사이즈 등급→단품 사이즈 컨디션 / SET 상태 구분→
     # SET 가능여부 / SET 등급→SET 사이즈 컨디션) + AI제안방향을 사이즈/세트 3컬럼 앞(34번째)으로 이동.
     # 260826-2(물량등급): 블록 맨 앞에 신규 "물량등급" 헤더 추가(41번째부터 기입).
+    # 260928: 마지막 2칸(구 "수정일"·"이관구분" 고정 문구)을 목록에서 제거 — 51~60번째 칸(=raw 21~30
+    # 패스스루 블록) 헤더는 아래에서 로우데이터 2행 헤더를 그대로 미러링한다. ERP 개편으로 이 블록이
+    # 구형식(수정일·이관구분·물량등급_단품·…·변동일자)과 신형식(이관구분·상품테마1~3·특이사항·
+    # 스티커가격·…·가격변동사유)이 완전히 달라졌는데, 미러링하면 형식 감지 없이 자동으로 맞는다.
     _INV_COL32_42_HEADERS = ["물량등급",
                              "기간판매수량분석", "소진예상기간분석", "AI제안방향",
                              "단품\n사이즈 컨디션", "SET\n가능여부", "SET\n사이즈 컨디션",
-                             "휴먼의사결정", "변동가격", "변경후할인율",
-                             "수정일", "이관구분"]
+                             "휴먼의사결정", "변동가격", "변경후할인율"]
     # 260826(SET가격): 이 블록의 시작 위치가 32 → 41로 +9 밀림.
     for _k, _h in enumerate(_INV_COL32_42_HEADERS):
         tws.cell(NAMES_R, INV_VOL_GRADE_COL + _k).value = _h
+    # 260928: 51~60번째 칸 헤더 = 로우데이터 raw 0-idx 21~30의 실제 헤더명 (템플릿에 박힌 구형식
+    # 이름 대신 매번 덮어씀 — 여기 값도 출력 루프에서 raw[21]~raw[30]을 그대로 통과시키므로 항상 일치).
+    for _k in range(10):
+        tws.cell(NAMES_R, 51 + _k).value = _rawhdr(21 + _k)
 
     # 260815(헤더 개편): 위 재배치에 맞춰 GROUP_R(7행) 상위 그룹 병합 범위도 조정.
     #   · '기본사항' 그룹 14~31 (변경 없음)
@@ -6454,9 +6497,9 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         # 260811 추가 개정(2): 몰가격(22) 바로 뒤에 '기준판매가' 복제 컬럼(23) 1칸 삽입 — 원본
         # 기준판매가 컬럼은 뒤쪽 패스스루 구간에 그대로 남아 있고, 이건 순수 참고용 복제일 뿐이다.
         _mol = _inv_num(raw[INV_RAW_MOLGA_COL])
-        _gijun = _inv_num(raw[INV_RAW_GIJUN_COL])
+        _gijun = _inv_num(raw[gijun_col])   # 260928: 형식 감지된 스티커가격(신)/기준판매가(구) 위치
         _chojo = _inv_num(raw[INV_RAW_CHOJOGA_COL])   # 260814: 기준판매가 공란 시 대체 캡핑 기준
-        vals[INV_GIJUN_COPY_COL] = raw[INV_RAW_GIJUN_COL]
+        vals[INV_GIJUN_COPY_COL] = raw[gijun_col]
         # 260811(가격시뮬): 그 다음에 신규 가격 5컬럼(24~28) 삽입 — 이후 컬럼은 전부 +6(가격시뮬5 + 기준판매가복제1).
         for _k, _v in enumerate(_inv_price_sim(_mol, _gijun, _chojo)):
             vals[INV_PRICE_SIM_COL + _k] = _v
@@ -6474,8 +6517,8 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         vals[45], vals[46], vals[47] = rec["AC"], rec["AD"], rec["AE"]
         vals[48] = vals[49] = None
         vals[50] = f"={_INV_AH_COL_LETTER}{rr}/T{rr}"                # 변경후할인율 = 변동가격(AW)÷최초가(T)
-        vals[51] = raw[21]                                          # 수정일(이관구분 바로 왼쪽)
-        vals[52] = raw[22]                                          # 이관구분
+        vals[51] = raw[21]      # 260928: 구형식=수정일 / 신형식=이관구분 (선판정 소스, 헤더는 미러링)
+        vals[52] = raw[22]      # 260928: 구형식=이관구분 / 신형식=상품테마1 (헤더는 미러링)
         # 260811: 패스스루 구간이 raw24~93(70열) → raw24~94(71열)로 1열 확장. 신규 '사이즈구분'이
         # raw79 자리에 자연스럽게 끼어 있어 이 구간 안에서 함께 넘어간다(출력 108번째 칸에 그대로 안착).
         # 260826(SET가격) +9 · 260826-2(물량등급) +1: 시작 위치 43 → 53.
@@ -6589,20 +6632,14 @@ def render_inventory():
     # 260826-2(중태님 지시): 제목 옆에 붙던 "1차 (260731 확정 기준 · …)" 버전 꼬리표는 더 이상
     # 노출하지 않는다 — 상세 기준은 아래 캡션에만 남긴다.
     st.subheader("🏷️ 쇼핑몰 재고 가공")
+    # 260928(중태님 지시): 설명글 대폭 축약 — 마크다운이 '물량A~물량D'·'001~500' 같은 물결(~) 구간을
+    # 취소선으로 잘못 렌더링해 지저분하게 보이던 긴 상세 설명을 삭제. 세부 규칙은 화면 맨 아래 판정
+    # 규칙 캡션과 매뉴얼 문서에 이미 있으므로 여기선 핵심만 남긴다(물결 문자는 취소선 방지를 위해 미사용).
     st.caption("재고모니터링 로우데이터(94열, '사이즈구분' 컬럼 포함)를 올리면 AA·AB 5등급, AF(AI제안방향), "
-               "단품 사이즈 컨디션(AC), SET 가능여부·SET 사이즈 컨디션(AD·AE), 기준판매가 비교컬럼, 가격 시뮬레이션 5컬럼, "
-               "SET 가격 9컬럼, 물량등급(온라인창고 재고 기준 물량A~물량D — 기준 숫자는 아래에서 직접 입력)을 부여한 "
-               "123열 v3.5 엑셀을 만들어 드려요. "
-               "재고 데이터는 DB에 저장하지 않아요(가공 → 다운로드만). "
-               "260811부터 사이즈코드는 로우데이터의 '사이즈구분' 컬럼값을 그대로 사용해요(마스터 조회 안 함). "
-               "몰가격 바로 뒤에 기준판매가를 그대로 복제한 컬럼이 초록색으로 1개 추가되고(원본 기준판매가 컬럼은 "
-               "뒤쪽 그대로 유지, 비교하기 편하도록 옆에 나란히 표시), 그 뒤로 (네이버)상시가·(쿠폰진행)상시가·(쿠폰진행)행사가·"
-               "(쿠폰X/무배)상시가·(쿠폰X/무배)행사가 5컬럼이 노란색으로 추가돼요"
-               "(끝 3자리 기준 000→그대로·001~500→500·501~999→900 스냅, 기준판매가 넘으면 자동 캡핑 "
-               "— 기준판매가가 공란이면 대신 최초가를 넘지 않도록 캡핑). "
-               "단품가격 블록 바로 뒤 'SET 가격' 9컬럼(진파랑 그룹헤더)에는 SET품번으로 짝지어진 상의+하의의 "
-               "최초가·현판가·몰가격·기준판매가·가격시뮬 5컬럼을 각각 합산한 세트 가격이 짝 양쪽 행에 "
-               "동일하게 들어가요(단품아이템·짝이 없는 세트상품은 공란).")
+               "단품 사이즈 컨디션(AC), SET 가능여부·SET 사이즈 컨디션(AD·AE), 스티커가격(구 기준판매가) "
+               "복제·비교컬럼, 가격 시뮬레이션 5컬럼, SET 가격 9컬럼, 물량등급(기준 숫자는 아래에서 직접 "
+               "입력)을 부여한 123열 v3.5 엑셀을 만들어 드려요. 재고 데이터는 DB에 저장하지 않아요"
+               "(가공 → 다운로드만).")
 
     master = load_size_master()
     n_master = len(master)
@@ -6648,7 +6685,7 @@ def render_inventory():
     if _vol_ok:
         st.caption(f"📦 물량등급 기준(온라인창고 재고): **A** {int(vol_a):,}장 이상 · "
                    f"**B** {int(vol_b):,}장 이상 · **C** {int(vol_c):,}장 이상 · "
-                   f"**D** {int(vol_c) - 1:,}장 이하(자동) — 결과물엔 물량A~물량D로 표기돼요.")
+                   f"**D** {int(vol_c) - 1:,}장 이하(자동) — 결과물엔 물량A·물량B·물량C·물량D로 표기돼요.")
     else:
         st.error("물량등급 기준은 A > B > C 순으로 커야 해요 — 숫자를 확인해 주세요.")
 
