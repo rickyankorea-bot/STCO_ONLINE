@@ -2283,8 +2283,9 @@ def render_dashboard(df):
     # (기존 '채널 TOP10' 차트는 채널 리그 랭킹 보드가 대체 — 2026-07-31)
 
 
-# ── B. 채널별 추세 분석 (260831, 중태님 요청) ─────────────────────────────────
-# A. 유통채널별 표 아래 신설(기존 브랜드별 표는 C로 재번호). 최근 X구간(주간/월간 토글)의
+# ── C. 채널별 추세 분석 (260831, 중태님 요청 · 261006 항목31로 B → C 재번호) ──────
+# A. 유통채널별 표 아래 신설(기존 브랜드별 표는 C로 재번호 → 261006: 'B. 매장별 BEST 상품'이
+# A와 이 섹션 사이에 들어오면서 이 섹션은 C, 브랜드별은 D가 됨). 최근 X구간(주간/월간 토글)의
 # 흐름으로 "추세가 좋은 매장 / 나쁜 매장"을 두 가지 잣대로 나눠 보여준다:
 #   (1) 매출 순위 변동 — 구간마다 대상 매장끼리 실판매금액 순위(1위=최대)를 매기고,
 #       전반부 평균순위 − 후반부 평균순위(+면 순위가 올라가는 중 = 개선).
@@ -2398,8 +2399,8 @@ table.{cls} tbody tr:first-child td{{background:#fff !important;font-weight:400;
 
 
 def _render_channel_trend(base, e, chan_mgr):
-    """B. 채널별 추세 분석 본체 — 위 블록 주석 참고. base=필터 적용된 데이터, e=조회 종료일."""
-    st.markdown("### B. 채널별 추세 분석")
+    """C. 채널별 추세 분석 본체 — 위 블록 주석 참고. base=필터 적용된 데이터, e=조회 종료일."""
+    st.markdown("### C. 채널별 추세 분석")
     tc1, tc2, tc3, tc4, tc5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.1])
     _unit = tc1.selectbox("기간 단위", ("주간", "월간"), key="cb_tr_unit",
                           help="주간=조회 종료일로 끝나는 7일 단위, 월간=달력월"
@@ -2625,6 +2626,183 @@ def _render_channel_trend(base, e, chan_mgr):
                "관점은 A표 증감율로 확인하세요.")
 
 
+# ── B. 매장별 BEST 상품 (항목31 · 261006, 중태님 요청) ────────────────────────────
+# A. 유통채널별 표 바로 아래 신설(기존 B 채널별 추세 분석 → C, C 브랜드별 → D로 재번호).
+# A표와 **같은 데이터**(조회 폼의 기간·브랜드·연차·시즌·담당 필터가 적용된 cur/cur_y)에서
+# 선택한 유통 채널(복수·합산)의 품번별 판매 실적을 많이 팔린 순으로 보여준다.
+#   컬럼(중태님 첨부 양식 그대로): 품번 · 아이템 · 판매수량 · 택가합계 · 실판가합계 · 평균판매가 · 평균할인율
+#   · 판매수량 = _수량 합(반품은 음수로 차감) · 택가합계 = _최초가매출 합(최초가×수량)
+#   · 실판가합계 = _매출액 합 · 평균판매가 = 실판가합계 ÷ 판매수량
+#   · 평균할인율 = 1 − 실판가합계 ÷ 택가합계  (= 1 − 판가율, 앱 전체의 가중 판가율과 같은 원리)
+#   · 아이템 = 아이템코드 + (아이템명) — 추세분석의 아이템코드 축 표기와 동일. 로우데이터의
+#     아이템 칸이 비어 있으면 품번 2~3번째 글자(STCO 품번 규칙)로 보완.
+# 맨 윗줄 '합계'는 화면에 몇 개만 보여주든 **선택 조건 전체** 기준 — 유통 채널·필터를 비워두면
+# 실판가합계 합계가 A표 G.TOTAL(선택한 기간 블록)의 실판매금액과 같아야 정상(검증용).
+# 조건은 st.form으로 묶어 '🔍 BEST 상품 보기'를 눌러야 반영(조건을 고르는 동안 페이지 전체가
+# 매번 다시 계산되지 않게 — 260806 조회 버튼 구조와 같은 취지). 첫 화면은 기본 조건으로 바로 표시.
+_BEST_COLS = ["품번", "아이템", "판매수량", "택가합계", "실판가합계", "평균판매가", "평균할인율"]
+_BEST_SORTS = {"판매수량": ["q", "r"], "실판가합계": ["r", "q"]}
+
+
+def _best_item_table(src, sort_by="판매수량"):
+    """필터가 끝난 거래행(src)을 품번별로 묶어 BEST 표 원자료를 만든다.
+
+    반환: (DataFrame[품번, 아이템, q(판매수량), o(택가합계), r(실판가합계)] — sort_by 내림차순,
+           합계 dict{q, o, r}).  데이터가 없으면 (빈 DataFrame, None).
+    """
+    need = {"품번", "_수량", "_매출액", "_최초가매출"}
+    if src is None or src.empty or not need.issubset(set(src.columns)):
+        return pd.DataFrame(), None
+    w = pd.DataFrame({
+        "품번": src["품번"].astype(str).str.strip().values,
+        "q": pd.to_numeric(src["_수량"], errors="coerce").fillna(0.0).astype("float64").values,
+        "r": pd.to_numeric(src["_매출액"], errors="coerce").fillna(0.0).astype("float64").values,
+        "o": pd.to_numeric(src["_최초가매출"], errors="coerce").fillna(0.0).astype("float64").values,
+    })
+    if "아이템" in src.columns:
+        w["ic"] = src["아이템"].astype(str).str.strip().str.upper().values
+    else:
+        w["ic"] = ""
+    w = w[~w["품번"].str.lower().isin(["", "nan", "none"])]
+    if w.empty:
+        return pd.DataFrame(), None
+    g = w.groupby("품번", sort=False)[["q", "r", "o"]].sum()
+    _ic = w[~w["ic"].isin(["", "NAN", "NONE"])].drop_duplicates("품번").set_index("품번")["ic"]
+    code = pd.Series(g.index.map(_ic), index=g.index)
+    code = code.where(code.notna(), pd.Series(g.index.str[1:3].str.upper(), index=g.index))
+    try:
+        name_map = _trend_cat_maps()[2]
+    except Exception:                                             # noqa: BLE001
+        name_map = {k: v[0] for k, v in ITEM_MAP.items()}
+    g["아이템"] = [f"{c} ({name_map[c]})" if name_map.get(c) else str(c) for c in code]
+    g = g.sort_values(_BEST_SORTS.get(sort_by, ["q", "r"]), ascending=False).reset_index()
+    tot = {"q": float(w["q"].sum()), "r": float(w["r"].sum()), "o": float(w["o"].sum())}
+    return g[["품번", "아이템", "q", "o", "r"]], tot
+
+
+def _best_fmt(det, tot):
+    """BEST 표 원자료 → 화면·엑셀 공용 표시용 DataFrame(첨부 양식 7컬럼, 맨 윗줄 합계)."""
+    def _n(v):
+        return "–" if (v is None or pd.isna(v)) else f"{v:,.0f}"
+
+    def _avg(r, q):
+        return "–" if not (q and q > 0) else f"{r / q:,.0f}"
+
+    def _disc(r, o):
+        return "–" if not o else f"{(1 - r / o) * 100:.1f}%"
+
+    rows = [["전체", "–", _n(tot["q"]), _n(tot["o"]), _n(tot["r"]),
+             _avg(tot["r"], tot["q"]), _disc(tot["r"], tot["o"])]]
+    for pn, it, q, o, r in zip(det["품번"], det["아이템"], det["q"], det["o"], det["r"]):
+        rows.append([str(pn), str(it), _n(q), _n(o), _n(r), _avg(r, q), _disc(r, o)])
+    disp = pd.DataFrame(rows, columns=_BEST_COLS)
+    disp.index = ["합계"] + [str(i) for i in range(1, len(det) + 1)]   # 맨 왼쪽 칸 = 순위(1,2,3…)
+    return disp
+
+
+def _render_store_best(cur, cur_y, s, e, y_start):
+    """B. 매장별 BEST 상품 본체 — 위 블록 주석 참고. cur=조회기간, cur_y=연간누계(둘 다 조회 폼 필터 적용 후)."""
+    st.markdown("### B. 매장별 BEST 상품")
+    pool = cur_y if (cur_y is not None and not cur_y.empty) else cur
+    if pool is None or pool.empty or "_채널" not in pool.columns:
+        st.info("표시할 판매 데이터가 없어요.")
+        return
+
+    def _opts(col, key=None):
+        vals = set()
+        for f in (cur, cur_y):
+            if f is not None and not f.empty and col in f.columns:
+                vals |= {str(v) for v in f[col].dropna().unique()}
+        vals -= {"", "nan", "None"}
+        return sorted(vals, key=key) if key else sorted(vals)
+
+    # 유통 채널 선택지 = A표의 매장 행과 같은 기준(_채널), 연간누계 실판매금액 큰 순(A표 기본 정렬과 동일)
+    _rev = pool.groupby(pool["_채널"].astype(str), observed=True)["_매출액"].sum().sort_values(ascending=False)
+    ch_opts = [c for c in _rev.index if c not in ("", "nan", "None")]
+    ch_opts += [c for c in _opts("_채널") if c not in set(ch_opts)]
+    grp_opts = ([g for g in ITEMGROUP_ORDER if g in set(_opts("아이템그룹"))]
+                + [g for g in _opts("아이템그룹") if g not in ITEMGROUP_ORDER])
+    age_opts = _opts("연차", key=_age_sort_key)
+    sea_opts = _opts("시즌명")
+    br_opts = _opts("브랜드명")
+    # 조회 폼 조건이 바뀌어 선택지에서 사라진 값이 세션에 남아 있으면 미리 걸러낸다(위젯 오류 방지)
+    for _k, _o in (("cb_best_ch", ch_opts), ("cb_best_item", grp_opts), ("cb_best_age", age_opts),
+                   ("cb_best_season", sea_opts), ("cb_best_brand", br_opts)):
+        _v = st.session_state.get(_k)
+        if _v:
+            _keep = [x for x in _v if x in _o]
+            if len(_keep) != len(_v):
+                st.session_state[_k] = _keep
+
+    _pd_txt = {"조회기간": f"조회기간 ({s.month:02d}/{s.day:02d}~{e.month:02d}/{e.day:02d})",
+               "연간누계": f"연간누계 ({y_start.month:02d}/{y_start.day:02d}~{e.month:02d}/{e.day:02d})"}
+    with st.form("cb_best_form"):
+        b1, b2, b3, b4 = st.columns([2.0, 2.2, 1.3, 0.8])
+        selch = b1.multiselect("유통 채널 (복수 선택 · 비우면 전체)", ch_opts, default=[],
+                               placeholder="전체", key="cb_best_ch")
+        selpd = b2.radio("기간", ["조회기간", "연간누계"], horizontal=True, key="cb_best_pd",
+                         format_func=lambda o: _pd_txt[o])
+        selsort = b3.radio("순위 기준", list(_BEST_SORTS), horizontal=True, key="cb_best_sort")
+        topn = b4.number_input("표시 개수", min_value=5, max_value=500, value=30, step=5, key="cb_best_n")
+        c1, c2, c3, c4 = st.columns(4)
+        seli = c1.multiselect("아이템(그룹)", grp_opts, default=[], placeholder="전체", key="cb_best_item")
+        sela = c2.multiselect("연차", age_opts, default=[], placeholder="전체", key="cb_best_age")
+        sels = c3.multiselect("시즌", sea_opts, default=[], placeholder="전체", key="cb_best_season")
+        selb = c4.multiselect("브랜드", br_opts, default=[], placeholder="전체", key="cb_best_brand")
+        st.form_submit_button("🔍 BEST 상품 보기", type="primary")
+
+    src = cur if selpd == "조회기간" else cur_y
+    if src is not None and not src.empty:
+        if selch:
+            src = src[src["_채널"].astype(str).isin(selch)]
+        if seli and "아이템그룹" in src.columns:
+            src = src[src["아이템그룹"].astype(str).isin(seli)]
+        if sela and "연차" in src.columns:
+            src = src[src["연차"].astype(str).isin(sela)]
+        if sels and "시즌명" in src.columns:
+            src = src[src["시즌명"].astype(str).isin(sels)]
+        if selb and "브랜드명" in src.columns:
+            src = src[src["브랜드명"].astype(str).isin(selb)]
+    try:
+        det, tot = _best_item_table(src, selsort)
+    except Exception as ex:                                       # noqa: BLE001
+        st.error(f"BEST 상품 표를 만드는 중 오류가 났어요 — 이 문구를 그대로 전달해 주세요.\n\n"
+                 f"`{type(ex).__name__}: {ex}`")
+        return
+    if det.empty:
+        st.info("선택한 조건에 해당하는 판매 데이터가 없어요.")
+        return
+
+    total_n = len(det)
+    shown = det.head(int(topn))
+    disp = _best_fmt(shown, tot)
+    _ch_txt = "전체" if not selch else (", ".join(selch) if len(selch) <= 3
+                                       else f"{', '.join(selch[:3])} 외 {len(selch) - 3}개")
+    _flt = [f"{nm}: {'·'.join(v)}" for nm, v in (("아이템", seli), ("연차", sela), ("시즌", sels), ("브랜드", selb)) if v]
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(
+        f"<div class='perf-title'><b>매장별 BEST 상품</b> "
+        f"<span style='color:#888;font-size:0.8rem;font-weight:400;'>"
+        f"(유통: {_ch_txt} · {_pd_txt[selpd]}{' · ' + ' / '.join(_flt) if _flt else ''} · "
+        f"품번 {total_n:,}개 중 {selsort} 많은 순 {len(shown):,}개)</span>"
+        f"<span style='float:right;color:#888;font-weight:400;font-size:0.78rem;white-space:nowrap;'>"
+        f"[금액: 원 / VAT+]</span></div>", unsafe_allow_html=True)
+    # 엑셀은 전체 품번 — 화면과 같은 함수·같은 서식(룰11·13)
+    h2.download_button("⬇ 엑셀(전체)", table_excel_bytes(_best_fmt(det, tot), "매장별 BEST 상품"),
+                       file_name=f"매장별BEST상품_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
+                       key="cb_best_dl", use_container_width=True)
+    sty = disp.style.set_properties(**{"text-align": "right"})
+    sty = sty.set_properties(subset=["품번", "아이템"], **{"text-align": "left"})
+    render_styled_table(sty)   # 룰6: 첫 행(=합계) 노란 강조
+    st.caption("※ A표와 같은 조회 조건(기간·브랜드·연차·시즌·담당)이 적용된 데이터에서, 여기서 고른 유통 채널·"
+               "아이템·연차·시즌·브랜드로 한 번 더 좁혀요. 유통 채널을 여러 개 고르면 합산해서 순위를 매겨요. "
+               "맨 윗줄 합계는 화면 표시 개수와 무관하게 선택 조건 전체 기준이에요. "
+               "택가합계=최초가×수량 합 · 평균판매가=실판가합계÷판매수량 · 평균할인율=1−실판가합계÷택가합계. "
+               "반품은 수량·금액에서 차감돼요."
+               + (f" 화면엔 상위 {len(shown):,}개만 보여요 — 나머지 {total_n - len(shown):,}개는 '⬇ 엑셀(전체)'로 받아주세요."
+                  if total_n > len(shown) else ""))
+
+
 def render_channel_brand(df):
     """매주 대표님 보고 B: 유통채널별 · 브랜드별 매출현황 (전년 동기간 비교)."""
     st.subheader("📈 유통별 세부 분석 (전년 동기간 비교)")
@@ -2675,8 +2853,12 @@ def render_channel_brand(df):
         perf_table(_empty, _empty, "_채널", None, "유통채널별 매출현황", "cb_ch_preview",
                    extra=("담당자", {}), month=(_empty, _empty),
                    blk_labels=("조회기간", "연간누계"), extra_rows=_preview_mgr_rows, preview=True)
-        # 260831: B. 채널별 추세 분석은 실계산이 필요해 미리보기 스켈레톤이 없음 — 안내만.
-        st.markdown("### B. 채널별 추세 분석")
+        # 항목31(261006): B. 매장별 BEST 상품도 실계산이 필요해 안내만.
+        st.markdown("### B. 매장별 BEST 상품")
+        st.caption("위 A표와 같은 조회 조건에서, 선택한 유통 채널(복수 선택 가능)에서 많이 팔린 상품을 "
+                   "품번별로 순서대로 보여드려요(아이템·연차·시즌·브랜드 필터) — 🔍 조회 후 표시돼요.")
+        # 260831: C. 채널별 추세 분석은 실계산이 필요해 미리보기 스켈레톤이 없음 — 안내만.
+        st.markdown("### C. 채널별 추세 분석")
         st.caption("최근 X주/X개월의 매출 순위 변동과 이동평균 매출 추세 기울기로 추세가 좋은 "
                    "매장과 나쁜 매장을 나눠 보여드려요 — 🔍 조회 후 표시돼요.")
         perf_table(_empty, _empty, "브랜드명", None, "브랜드별 매출현황", "cb_br_preview",
@@ -2773,10 +2955,13 @@ def render_channel_brand(df):
                "금액 필터에 걸러진 매장도 G.TOTAL·담당자별 TOTAL 합계엔 그대로 포함돼요(표시만 숨김). "
                "담당자 미지정 매장은 담당자별 TOTAL 어디에도 안 잡히지만 G.TOTAL엔 포함돼요.")
 
-    # ── 260831(중태님 요청): B. 채널별 추세 분석 — A표 아래 신설, 기존 브랜드별은 C로 재번호 ──
+    # ── 항목31(261006, 중태님 요청): B. 매장별 BEST 상품 — A표와 채널별 추세 분석 사이 신설 ──
+    _render_store_best(cur, cur_y, s, e, y_start)
+
+    # ── 260831(중태님 요청): C. 채널별 추세 분석(구 B) — 261006 재번호, 브랜드별은 D ──
     _render_channel_trend(base, e, chan_mgr)
 
-    st.markdown("### C. 브랜드별")
+    st.markdown("### D. 브랜드별")
     perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br", cy=cy_cb)
 
 
