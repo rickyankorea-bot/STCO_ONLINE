@@ -1426,7 +1426,7 @@ def _show_pn_dialog(title, sub_title, detail, group_col="품번", key_prefix="pn
     _popup()
 
 
-def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_prefix, cy):
+def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_prefix, cy, mon_disp=None):
     """표 아래 [🔍 상세보기 + 아이템그룹/연차 선택 + 기간 + 연도] 컨트롤 + 2단계 팝업 연결.
 
     dim: "아이템그룹" 또는 "연차" — 이 표가 어떤 기준으로 나뉘는지.
@@ -1438,15 +1438,21 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
     st.dialog는 중첩 호출이 안 되므로(Streamlit 제약) 두 팝업을 동시에 열지 않고 이렇게
     "단계 전환" 방식으로 이어붙임 — 사용자 입장에선 품번 클릭 → 매장별 팝업으로 바로 이어지는
     것처럼 보인다.
+
+    mon_disp(항목30 · 261006): 첫 블록(구 '당월누계')의 화면 표기. 조회 시작일을 당월 밖으로 잡으면
+    호출부가 "조회기간 (09/20→10/05)" 같은 문구를 넘긴다. 선택지의 **내부 값은 그대로 "당월누계"**
+    라서 세션에 남아있는 이전 선택이 그대로 유효하고, 화면 문구·팝업 타이틀만 바뀐다. None이면 기존과 동일.
     """
     if not dim_values:
         return
+    _pd_fmt = (lambda o: mon_disp if (mon_disp and o == "당월누계") else o)
     # 2026-08-07: 버튼을 맨 왼쪽으로 이동(중태님 요청) — 나머지 셀렉트는 뒤로.
     c1, c2, c3, c4 = st.columns([1, 1.4, 1.3, 0.9])
     c1.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
     go = c1.button("🔍 상세보기", key=f"{key_prefix}_go", use_container_width=True)
     sel_v = c2.selectbox(dim, dim_values, key=f"{key_prefix}_dv")
-    period = c3.selectbox("기간", ["당월누계", "연간누계"], key=f"{key_prefix}_pd")
+    period = c3.selectbox("기간", ["당월누계", "연간누계"], key=f"{key_prefix}_pd", format_func=_pd_fmt)
+    period_disp = _pd_fmt(period)   # 팝업 타이틀용 화면 표기 (항목30)
     yr = c4.selectbox("연도", [cy, cy - 1], key=f"{key_prefix}_yr")
 
     stage_key, pn_key, pn_df_key = f"{key_prefix}_stage", f"{key_prefix}_pnsel", f"{key_prefix}_df"
@@ -1492,7 +1498,7 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
                    if (not store_sub.empty and "품명" in store_sub.columns) else "")
         pn_label = f"{pn_sel}({pn_name})" if pn_name else str(pn_sel)
         # 타이틀 순서(중태님 확정): 연도 · 매장별상세 · 기간 · 아이템그룹/연차 · 품번(상품명)
-        _show_pn_dialog(f"{yr}년 매장별상세 · {period} · {sel_v} · {pn_label}",
+        _show_pn_dialog(f"{yr}년 매장별상세 · {period_disp} · {sel_v} · {pn_label}",
                          f"실판매금액 큰 순 정렬 · 합계 {_mm(total_rev):,.1f}백만원",
                          store_detail, group_col="매장코드", key_prefix=f"{key_prefix}_st",
                          on_dismiss=_close_all, on_back=_back_to_pn)
@@ -1506,7 +1512,7 @@ def pn_drilldown(cur, prev, cur_m, prev_m, dim, dim_values, title_prefix, key_pr
         st.session_state[stage_key] = "store"
         st.rerun()
 
-    _show_pn_dialog(f"{title_prefix} · {sel_v} · {period} · {yr}년 품번별 상세",
+    _show_pn_dialog(f"{title_prefix} · {sel_v} · {period_disp} · {yr}년 품번별 상세",
                      f"실판매금액 큰 순 정렬 · 합계 {_mm(total_rev):,.1f}백만원",
                      detail, group_col="품번", key_prefix=key_prefix,
                      on_row_click=_drill_to_store, on_dismiss=_close_all)
@@ -1522,16 +1528,43 @@ def render_flagship(df):
 
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 단위 백만원 · 판가율=실판가÷최초가(가중)")
     # ── 조건 폼 (2026-08-06): 안의 위젯은 아무리 바꿔도 계산이 안 돌고, 🔍 조회를 눌러야 1번 계산 ──
+    _all_min, _all_max = d["_판매일"].min().date(), d["_판매일"].max().date()
     with st.form("fs_form"):
-        f1, f2 = st.columns([1, 2.4])
+        f1, f2, f3 = st.columns([1, 2.0, 1.4])   # 항목30(261006): 당월누계 시작일 칸 추가
         with f1:
             cy = st.selectbox("기준연도", years, index=0, key="fs_y")
         cur_all = d[d["_판매일"].dt.year == cy]
         dmin, dmax = cur_all["_판매일"].min().date(), cur_all["_판매일"].max().date()
         with f2:
             rng = st.date_input(f"기준기간 (전년 {cy-1} 동기간 자동)", value=(dmin, dmax),
-                                min_value=d["_판매일"].min().date(), max_value=d["_판매일"].max().date(),
+                                min_value=_all_min, max_value=_all_max,
                                 key="fs_rng")
+        # ── 항목30(261006): '당월누계' 블록의 시작일 직접 지정 (주간현황 항목29와 같은 규칙) ──
+        # · 기본값 = 기준기간 끝날짜가 속한 달의 1일(= 지금까지의 당월누계). 손대지 않으면 끝날짜를
+        #   바꿔 조회할 때마다 그 달 1일로 따라가고, 직접 고치면 그 날짜가 유지된다. 다시 그 달 1일로
+        #   맞추면 자동 따라가기로 복귀. 끝날짜보다 늦으면 그 달 1일로 되돌린다.
+        # · 폼 안 위젯은 on_change 콜백을 못 쓰므로 "손댔는지"는 '지난번에 자동으로 넣어준 값과
+        #   같은가'로 판정한다(_fs_ms_auto). 값이 실제로 달라질 때만 세션에 써서, 조회 전 입력 중인
+        #   값이 다른 버튼(상세보기 등) 재실행 때 되돌아가지 않게 한다.
+        if isinstance(rng, (list, tuple)):
+            _e_cur = rng[1] if len(rng) == 2 else (rng[0] if len(rng) == 1 else dmax)
+        else:
+            _e_cur = rng or dmax
+        _ms_def = max(_e_cur.replace(day=1), _all_min)
+        _ms_cur = st.session_state.get("fs_ms")
+        _ms_note = False
+        if _ms_cur is None or _ms_cur == st.session_state.get("_fs_ms_auto"):
+            _ms_val = _ms_def
+        elif _ms_cur > _e_cur or _ms_cur < _all_min:
+            _ms_val, _ms_note = _ms_def, True
+        else:
+            _ms_val = _ms_cur
+        if _ms_cur != _ms_val:
+            st.session_state["fs_ms"] = _ms_val
+        st.session_state["_fs_ms_auto"] = _ms_def
+        with f3:
+            st.date_input("당월누계 시작일 (기본: 끝날짜가 속한 달 1일 · 수정 가능)",
+                          min_value=_all_min, max_value=_all_max, key="fs_ms")
         # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 · 빈칸=전체
         fb1, fb2, fb3 = st.columns(3)
         brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
@@ -1543,7 +1576,9 @@ def render_flagship(df):
         chans = sorted(d["_채널"].dropna().unique()) if "_채널" in d.columns else []
         selc = st.multiselect("매장/채널", chans, default=[], placeholder="전체", key="fs_c")
         st.caption("※ 기준연도를 바꿨다면 기준기간 날짜도 그 연도로 맞춘 뒤 🔍 조회를 눌러 주세요. "
-                   "(실제 집계는 기준기간 날짜를 따라요)")
+                   "(실제 집계는 기준기간 날짜를 따라요)  \n"
+                   "※ **당월누계 시작일**을 앞 달로 당기면(예: 9/20) 모든 표의 '당월누계' 블록이 "
+                   "그 날짜부터 끝날짜까지의 '조회기간'으로 바뀌어요. 연간누계 블록은 기준기간 그대로예요.")
         run = st.form_submit_button("🔍 조회", type="primary")
     if _need_search("fs_go", run):
         # 2026-08-06: 조회 전에도 "이 화면이 뭘 보여주는 표인지" 헤더만 미리 보여줌 —
@@ -1571,11 +1606,23 @@ def render_flagship(df):
     cur = base[(base["_판매일"] >= s) & (base["_판매일"] <= e)]
     prev = base[(base["_판매일"] >= s - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
     # 당월누계 (2026-07-31 목업 v2 컨펌): 기준기간 끝날짜가 속한 달의 1일 → 끝날짜 · 전년 동범위 비교
-    ms = e.replace(day=1)
+    # 항목30(261006): 시작일을 직접 지정 가능 — 끝날짜와 다른 달이면 블록 이름이 '조회기간'으로 바뀐다.
+    ms = pd.to_datetime(_ms_val)
+    if ms > e:                      # 방어: 폼 계산과 어긋난 경우(이론상 없음) 그 달 1일로
+        ms, _ms_note = e.replace(day=1), True
+    if _ms_note:
+        st.caption("⚠️ 당월누계 시작일이 기준기간 끝날짜보다 늦어서, 끝날짜가 속한 달의 1일로 되돌렸어요.")
     cur_m = base[(base["_판매일"] >= ms) & (base["_판매일"] <= e)]
     prev_m = base[(base["_판매일"] >= ms - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
-    blk = (f"당월누계 ({ms.month:02d}/{ms.day:02d}→{e.month:02d}/{e.day:02d})",
+    _fs_multi = (ms.year, ms.month) != (e.year, e.month)      # 복수의 달 → '조회기간'
+    if ms.year != e.year:
+        _ms_rng = (f"{ms.year % 100:02d}/{ms.month:02d}/{ms.day:02d}→"
+                   f"{e.year % 100:02d}/{e.month:02d}/{e.day:02d}")
+    else:
+        _ms_rng = f"{ms.month:02d}/{ms.day:02d}→{e.month:02d}/{e.day:02d}"
+    blk = (f"{'조회기간' if _fs_multi else '당월누계'} ({_ms_rng})",
            f"연간누계 ({s.month:02d}/{s.day:02d}→{e.month:02d}/{e.day:02d})")
+    _mon_disp = blk[0] if _fs_multi else None   # 품번 상세보기의 '기간' 선택지·팝업 타이틀 표기
 
     tot_c = cur["_매출액"].sum()
     tot_p = prev["_매출액"].sum()
@@ -1607,14 +1654,14 @@ def render_flagship(df):
     st.caption("※ 분홍색 행 = 브랜드별 TOTAL(비중은 G.TOTAL 대비). **S/D/L은 브랜드 코드 S·D·L "
                "3개(STCO·DIEMS·GENDERLESS) 합산**이에요. 위 '브랜드' 필터를 걸면 그 조건 안에서만 집계돼요.")
     pn_drilldown(cur, prev, cur_m, prev_m, "연차", age_order,
-                 "시즌별/연차별 한눈에 보기", "pn_age", cy)
+                 "시즌별/연차별 한눈에 보기", "pn_age", cy, mon_disp=_mon_disp)
 
     st.markdown("### 아이템그룹별 성과표 (전연차 토탈 + 연차별)")
     grp_present = [g for g in ITEMGROUP_ORDER if g in cur["아이템그룹"].unique()] if "아이템그룹" in cur.columns else ITEMGROUP_ORDER
     perf_table(cur, prev, "아이템그룹", ITEMGROUP_ORDER, "아이템그룹별 성과표 (전연차)", "grp_all",
                month=(cur_m, prev_m), blk_labels=blk, cy=cy)
     pn_drilldown(cur, prev, cur_m, prev_m, "아이템그룹", grp_present,
-                 "아이템그룹별 성과표 (전연차)", "pn_grp_all", cy)
+                 "아이템그룹별 성과표 (전연차)", "pn_grp_all", cy, mon_disp=_mon_disp)
     # 연차별 버킷
     buckets = []
     sinsang = [a for a in ["신상", "내년신상"] if a in age_order]
@@ -1634,7 +1681,7 @@ def render_flagship(df):
         grp_present_b = ([g for g in ITEMGROUP_ORDER if g in curb["아이템그룹"].unique()]
                           if "아이템그룹" in curb.columns else ITEMGROUP_ORDER)
         pn_drilldown(curb, prevb, curb_m, prevb_m, "아이템그룹", grp_present_b,
-                     f"아이템그룹별 성과표 ({name})", f"pn_grp_{name}", cy)
+                     f"아이템그룹별 성과표 ({name})", f"pn_grp_{name}", cy, mon_disp=_mon_disp)
 
 
 # ── 대시보드 채널 통합 (2026-07-31): 수수료 조건 때문에 2개로 나눠 등록한 매장을 실제 채널로 합산 ──
