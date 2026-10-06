@@ -3903,6 +3903,25 @@ def inject_plan_manager(by, idx, master):
 SDL_BRANDS = ["STCO", "DIEMS", "GENDERLESS"]
 WK_MONEY = ["실판가", "사업계획"]
 
+# 항목29(261006): 조회 시작일·종료일 직접 지정 — 첫 블록(구 '당월 실적') 헤더 라벨.
+# 시작일·종료일이 같은 달이면 지금까지처럼 '당월 실적', 여러 달에 걸치면 '조회기간'으로 자동 전환.
+# ⚠️ '표시 기간' 필터(period 파라미터)의 내부 값은 화면 라벨과 무관하게 항상 WK_MON("당월 실적")·
+#    WK_YTD("연간누계") 그대로 쓴다 — 화면에 보이는 헤더 문구만 mon_label로 바뀐다.
+WK_MON, WK_RANGE, WK_YTD = "당월 실적", "조회기간", "연간누계"
+
+
+def _wk_mon_label(start, end):
+    """첫 블록 헤더 라벨 — 시작·종료가 같은 연·월이면 '당월 실적', 아니면(복수의 달) '조회기간'."""
+    return WK_MON if (start.year, start.month) == (end.year, end.month) else WK_RANGE
+
+
+def _wk_range_txt(start, end):
+    """조회기간 짧은 표기(엑셀 헤더·특이사항용) — 같은 해면 MM/DD~MM/DD, 해가 다르면 YY/MM/DD~YY/MM/DD."""
+    if start.year == end.year:
+        return f"{start.month:02d}/{start.day:02d}~{end.month:02d}/{end.day:02d}"
+    return (f"{str(start.year)[-2:]}/{start.month:02d}/{start.day:02d}~"
+            f"{str(end.year)[-2:]}/{end.month:02d}/{end.day:02d}")
+
 # 유통별 5개 분류 기준 (요약행 + 매장 드릴다운 공용 · 단일 소스)
 _CHANNEL_MASKS = {
     "통합몰":      lambda x: x["매장코드"].astype(str).str.strip().isin(["SD065"]),
@@ -4004,8 +4023,12 @@ def _wk_fmt(block, sub, v):
     return v
 
 
-def weekly_excel_bytes(rows, bm, by, asof, cy, py):
-    """팀 주간보고 양식(weekly_template.xlsx)을 템플릿으로 열어 매출현황·마감일·특이사항만 채워 반환."""
+def weekly_excel_bytes(rows, bm, by, asof, cy, py, m_start=None):
+    """팀 주간보고 양식(weekly_template.xlsx)을 템플릿으로 열어 매출현황·마감일·특이사항만 채워 반환.
+
+    m_start(항목29 · 261006): 조회 시작일. 시작~종료가 여러 달에 걸치면 표 헤더의 '당월 실적' 칸을
+    '조회기간 (MM/DD~MM/DD)'으로, 특이사항 1번 문구의 '당월실적'도 조회기간 표기로 바꾼다.
+    None이거나 같은 달이면 기존과 100% 동일."""
     import os
     from openpyxl import load_workbook
     tpl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weekly_template.xlsx")
@@ -4013,6 +4036,16 @@ def weekly_excel_bytes(rows, bm, by, asof, cy, py):
     ws = wb["주간보고"] if "주간보고" in wb.sheetnames else wb.active
 
     ws["P1"] = f"마감일: {str(cy)[-2:]}년 {asof.month:02d}월 {asof.day:02d}일"
+
+    # 항목29(261006): 복수의 달 조회 시 헤더 '당월 실적' → '조회기간 (기간)'. 템플릿 셀을 고정 좌표가
+    # 아니라 문구로 찾는다(양식이 몇 칸 밀려도 안전) — '당월 우선순위' 제목은 문구가 달라 안 걸린다.
+    _multi = m_start is not None and _wk_mon_label(m_start, asof) == WK_RANGE
+    _rng = _wk_range_txt(m_start, asof) if _multi else ""
+    if _multi:
+        for _hrow in ws.iter_rows(min_row=1, max_row=12):
+            for _hc in _hrow:
+                if isinstance(_hc.value, str) and _hc.value.replace(" ", "") == "당월실적":
+                    _hc.value = f"{WK_RANGE} ({_rng})"
 
     row_map = {
         ("전체", "G.TOTAL", "합계"): 12,
@@ -4053,7 +4086,8 @@ def weekly_excel_bytes(rows, bm, by, asof, cy, py):
     WK = bm.get(("유통별", "웍스바이이관", "합계"), {})
     gt = G.get("증감율")
     trend = "상승" if (gt or 0) >= 0 else "하락"
-    ws["A29"] = (f"1. 당월실적 전년대비 {pc(gt)} {trend} 추세\n"
+    _mon_txt = f"{WK_RANGE}({_rng}) 실적" if _multi else "당월실적"   # 항목29
+    ws["A29"] = (f"1. {_mon_txt} 전년대비 {pc(gt)} {trend} 추세\n"
                  f"2. 통합몰은 {pc(TM.get('증감율'))} , 네이버스토어 {pc(NV.get('증감율'))}. "
                  f"자사채널 전체는 {pc(jasa)} 추세\n"
                  f"3. 원래직입점 {pc(OW.get('증감율'))} , 웹뜰이관 {pc(WT.get('증감율'))}, "
@@ -4101,7 +4135,7 @@ def weekly_excel_bytes(rows, bm, by, asof, cy, py):
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
-def _wk_style_table(bm, by, idx, cy, py, click_ns=None, period=None):
+def _wk_style_table(bm, by, idx, cy, py, click_ns=None, period=None, mon_label=None):
     """주간보고 프레임(당월+누계 · 동일 컬럼)으로 (bm,by,idx)를 스타일 표로 변환. 메인표·담당별표 공용.
 
     반환: (Styler, 표시용 DataFrame) — 표시용 DF는 엑셀 다운로드(룰11)에 사용.
@@ -4115,8 +4149,11 @@ def _wk_style_table(bm, by, idx, cy, py, click_ns=None, period=None):
     숨은 버튼과 연결해줘야 실제로 팝업이 뜬다(아이템그룹별 상세표 전용 — 다른 표는 기본값 None
     이라 지금까지와 완전히 동일하게 렌더된다). 엑셀 다운로드에 쓰는 disp는 링크를 씌우기 **전**
     값을 그대로 돌려주므로 다운로드 파일엔 HTML 태그가 섞이지 않는다.
+
+    mon_label(항목29 · 261006): 첫 블록 헤더 문구. None(기본값)이면 기존 "당월 실적", 조회기간이
+    여러 달에 걸칠 때 호출부가 "조회기간"을 넘긴다. 컬럼 구성·계산은 동일하고 헤더 문구만 바뀐다.
     """
-    MON, YTD = "당월 실적", "연간누계"
+    MON, YTD = (mon_label or WK_MON), WK_YTD
     sy, sc = str(py)[-2:], str(cy)[-2:]   # 룰2: 연도 2자리
     # 컬럼 순서 (2026-07-31 팀장님 지정): 실판가 25→26 → 증감율 → 비중 → (누계: 사업계획→진도율) → 판가율 25→26 → 편차
     mcols = [(MON, f"{sy}실판가"), (MON, f"{sc}실판가"), (MON, "증감율"), (MON, "비중"),
@@ -4126,7 +4163,7 @@ def _wk_style_table(bm, by, idx, cy, py, click_ns=None, period=None):
              (YTD, f"{sy}판가율"), (YTD, f"{sc}판가율"), (YTD, "편차")]
     # 항목26(260828): 표시 기간 필터 — 한 블록만 고르면 그 블록 컬럼만 남긴다
     use_m = period != YTD
-    use_y = period != MON
+    use_y = period != WK_MON   # period 값은 화면 라벨(mon_label)과 무관하게 내부 상수 기준 (항목29)
     if not use_m:
         mcols = []
     if not use_y:
@@ -4572,7 +4609,7 @@ def _wk_pn_popup(sub, title, caption, key_prefix, on_dismiss=None):
 
 
 def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, show_plan=True,
-                            period=None, big_title=False):
+                            period=None, big_title=False, mon_label=None):
     """선택한 그룹(유통 또는 담당자)의 매장별 상세표 — 주간보고와 동일 형식(당월+누계). 비중=해당 그룹 내.
 
     period·big_title(항목26 · 260828): 드릴다운1 전용 — period("당월 실적"/"연간누계")면 그 블록만
@@ -4621,7 +4658,7 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
     entries += [(r[0], r[1], r[2]) for r in store_rows]
 
     sy, sc = str(py)[-2:], str(cy)[-2:]
-    MON, YTD = "당월 실적", "연간누계"
+    MON, YTD = (mon_label or WK_MON), WK_YTD   # 항목29: 복수의 달 조회 시 "조회기간"
     # 컬럼 순서 (2026-07-31 팀장님 지정): 실판가 25→26 → 증감율 → 비중 → (누계: 사업계획→진도율) → 판가율 25→26 → 편차
     mcols = [(MON, f"{sy}실판가"), (MON, f"{sc}실판가"), (MON, "증감율"), (MON, "비중"),
              (MON, f"{sy}판가율"), (MON, f"{sc}판가율"), (MON, "편차")]
@@ -4630,7 +4667,7 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
              (YTD, f"{sy}판가율"), (YTD, f"{sc}판가율"), (YTD, "편차")]
     # 항목26(260828): 표시 기간 필터 — 한 블록만 고르면 그 블록 컬럼만 남긴다
     use_m = period != YTD
-    use_y = period != MON
+    use_y = period != WK_MON   # period 값은 화면 라벨(mon_label)과 무관하게 내부 상수 기준 (항목29)
     if not use_m:
         mcols = []
     if not use_y:
@@ -4684,14 +4721,19 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
 
 
 def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, click_ns=None,
-                                 period=None, big_title=False):
+                                 period=None, big_title=False, mon_label=None, period_txt=None):
     """선택한 매장(또는 담당자 전체매장)의 아이템그룹별 상세표 — 주간보고 동일 프레임. 비중=해당 그룹 내.
 
     click_ns(2026-08-18 추가): 표 안의 **당월 올해 실판가** 숫자를 클릭하면 그 행(아이템그룹)의
     품번별 판매현황 + 품번별 상위 3개 매장을 팝업으로 보여준다. 기간은 당월(cm) 기준이고,
     유통/브랜드·연차 등 위쪽 필터는 이미 cm에 적용된 상태라 별도 조건 전달이 필요 없다.
     None(기본값)이면 클릭 기능 없이 지금까지와 완전히 동일하게 렌더된다.
+
+    mon_label·period_txt(항목29 · 261006): 첫 블록 헤더 문구("당월 실적"/"조회기간")와 팝업 캡션에
+    쓸 실제 조회기간 문구. None이면 기존 표기 그대로.
     """
+    _mon = mon_label or WK_MON
+    _mon_short = "조회기간" if _mon == WK_RANGE else "당월"
     cm, pm = cur_m[mask(cur_m)], prev_m[mask(prev_m)]
     cyd, pyd = cur_y[mask(cur_y)], prev_y[mask(prev_y)]
     if cm.empty and cyd.empty and pm.empty and pyd.empty:
@@ -4705,7 +4747,8 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
                      (lambda gg: (lambda x: x["아이템그룹"].astype(str) == gg))(g)))
     bm = _wk_block(cm, pm, rows)
     by = _wk_block(cyd, pyd, rows)
-    sty, disp = _wk_style_table(bm, by, [k for k, _ in rows], cy, py, click_ns=click_ns, period=period)
+    sty, disp = _wk_style_table(bm, by, [k for k, _ in rows], cy, py, click_ns=click_ns, period=period,
+                                mon_label=mon_label)
     if click_ns:
         # 링크 스타일 + 숨은 버튼 감추기 CSS를 표보다 먼저 내보낸다(버튼이 잠깐 보였다 사라지는 것 방지).
         # 항목26: 타이틀 줄보다도 먼저 내보낸다 — 타이틀과 표 사이에 끼면 빈 세로 여백이 생긴다.
@@ -4714,16 +4757,17 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
     if big_title:   # 항목26: 드릴다운1은 위 필터 박스와 간격을 살짝 띄운다
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
     i1, i2 = st.columns([5, 1])
-    _has_m = any(c[0] == "당월 실적" for c in disp.columns)
-    _hint = ("· <b>당월 26실판가 숫자를 클릭</b>하면 품번별 상세" if (click_ns and _has_m) else "")
+    _has_m = any(c[0] == _mon for c in disp.columns)
+    _hint = (f"· <b>{_mon_short} {str(cy)[-2:]}실판가 숫자를 클릭</b>하면 품번별 상세"
+             if (click_ns and _has_m) else "")
     _sub = (f"<span style='color:#888;font-size:0.8rem;font-weight:400;'>"
             f"(비중=해당 그룹 내 · G.TOTAL=선택 전체 {_hint})</span>")
     if big_title:   # 항목26: 드릴다운1 결과 타이틀은 다른 드릴다운 타이틀과 동일 크기(##### 헤딩)
         i1.markdown(f"##### 🔍 {label} · 아이템그룹별 상세  {_sub}{_NOTE_FLOAT}", unsafe_allow_html=True)
     else:
         i1.markdown(f"**🔍 {label} · 아이템그룹별 상세**  {_sub}{_NOTE_FLOAT}", unsafe_allow_html=True)
-    _nm = sum(1 for c in disp.columns if c[0] == "당월 실적")   # 당월 블록 컬럼 수(7)
-    _ny = sum(1 for c in disp.columns if c[0] == "연간누계")
+    _nm = sum(1 for c in disp.columns if c[0] == _mon)   # 당월(조회기간) 블록 컬럼 수(7)
+    _ny = sum(1 for c in disp.columns if c[0] == WK_YTD)
     i2.download_button("⬇ 엑셀", table_excel_bytes(disp, f"{label} 아이템",
                                                   first_block_cols=_nm if (_nm and _ny) else None),
                        file_name=f"{_safe_name(label)}_아이템그룹별상세.xlsx", mime=XLSX_MIME,
@@ -4781,14 +4825,15 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
     _wk_pn_popup(
         sub,
         title=f"{label} · {grp_txt} · 품번별 상세",
-        caption=f"{label} · 아이템: {grp_txt} · 기간: 당월({cy}년) — "
+        caption=f"{label} · 아이템: {grp_txt} · 기간: "
+                + (f"{_mon_short} {period_txt}" if period_txt else f"당월({cy}년)") + " — "
                 f"품번별 판매현황 + 품번별 판매수량 상위 3개 매장",
         key_prefix=f"wkpn_{click_ns}_{_safe_name(grp)}",
         on_dismiss=_close,
     )
 
 
-def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
+def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py, mon_label=None, period_txt=None):
     """🔍 (드릴다운 1) 유통/브랜드 · 연차 · 아이템/매장별 상세 보기 — 2026-08-10 신규.
     (260828 번호 재정렬: 화면 표기가 드릴다운 1로 바뀜. 코드 내부 주석·키의 "드릴다운3"(click_ns "cat" 등)
      명칭은 세션키 호환을 위해 그대로 두었다 — 내부 드릴다운3 = 화면 드릴다운 1, 내부 1·2 = 화면 2·3.)
@@ -4815,7 +4860,10 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
         selg = wc0.multiselect("유통/브랜드 선택", group_opts, default=[], placeholder="전체", key="wk_cat_grp")
         sela = wc1.multiselect("연차", age_opts, default=[], placeholder="전체", key="wk_cat_age")
         sels = wc3.multiselect("시즌", season_opts, default=[], placeholder="전체", key="wk_cat_season")
-        selp = wc4.radio("표시 기간", ["전체", "당월 실적", "연간누계"], horizontal=True, key="wk_cat_period")
+        # 항목29(261006): 선택지의 '실제 값'은 그대로 두고 화면 문구만 바꾼다(복수의 달 → "조회기간").
+        # 값이 그대로라 아래 period 비교·세션에 남아있는 이전 선택값이 모두 그대로 유효하다.
+        selp = wc4.radio("표시 기간", ["전체", WK_MON, WK_YTD], horizontal=True, key="wk_cat_period",
+                         format_func=lambda o: (mon_label or WK_MON) if o == WK_MON else o)
         dim = wc2.radio("아이템 or 매장", WK_DIM_OPTS, horizontal=True, key="wk_cat_dim")
         run = st.form_submit_button("🔍 상세보기", type="primary")
     if _need_search("wk_cat_go", run):
@@ -4862,10 +4910,11 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
     if dim == "아이템":
         # click_ns="cat" → 당월 올해 실판가 숫자 클릭 시 품번별 상세 팝업(260818 신규)
         render_weekly_item_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, click_ns="cat",
-                                     period=_period, big_title=True)
+                                     period=_period, big_title=True,
+                                     mon_label=mon_label, period_txt=period_txt)
     else:
         render_weekly_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, show_plan=False,
-                                period=_period, big_title=True)
+                                period=_period, big_title=True, mon_label=mon_label)
     st.caption("※ 유통/브랜드·연차·시즌은 다중선택(선택한 항목 중 하나라도 해당하면 포함, OR 조건) — "
                "빈칸이면 전체. '아이템'은 중카테고리(아이템그룹) 기준 breakdown, '매장별'은 위 필터에 "
                "해당하는 매장 목록을 보여줘요. 비중=선택 조건 내 비중, 필터가 걸린 상태라 사업계획·진도율은 "
@@ -4873,7 +4922,8 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py):
 
 
 def render_weekly_report(df):
-    st.subheader("📋 주간현황 분석 (당월 · 연간누계, 전년 동기간 비교)")
+    _ttl = st.empty()   # 항목29: 조회기간이 여러 달이면 아래에서 제목의 '당월'을 '조회기간'으로 다시 쓴다
+    _ttl.subheader("📋 주간현황 분석 (당월 · 연간누계, 전년 동기간 비교)")
     if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
         st.info("데이터를 먼저 적재하세요.")
         return
@@ -4894,8 +4944,44 @@ def render_weekly_report(df):
         d["_담당자"] = None
 
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
-    asof = st.date_input("조회 기준일 (당월·누계의 끝 날짜)", value=dmax, min_value=dmin, max_value=dmax, key="wk_asof")
+    # ── 항목29(261006): 조회 기준일(끝 날짜 1개) → 조회 시작일 + 종료일 ──────────────────
+    # · 종료일 = 기존 '조회 기준일' 그대로(연간누계의 끝 날짜이기도 함, 위젯 키 wk_asof 유지).
+    # · 시작일 기본값 = 종료일이 속한 달의 1일. 손대지 않으면 종료일을 바꿀 때마다 그 달 1일로 따라가고
+    #   (= 지금까지의 '당월 실적'과 동일), 직접 고치면 그 날짜가 유지된다. 다시 그 달 1일로 맞추면
+    #   자동 따라가기로 복귀. 시작일이 종료일보다 늦어지면 종료일이 속한 달 1일로 되돌린다.
+    # · 화면 배치는 시작일(왼쪽)·종료일(오른쪽)이지만, 시작일 기본값이 종료일에 달려 있어 종료일
+    #   위젯을 먼저 만든다. 시작일 값은 매 실행 세션에 직접 넣어준 뒤 위젯을 만든다(value 인자 미사용).
+    dc1, dc2 = st.columns(2)
+    asof = dc2.date_input("조회 종료일 (조회기간·누계의 끝 날짜)", value=dmax, min_value=dmin, max_value=dmax,
+                          key="wk_asof")
+    _s_def = max(asof.replace(day=1), dmin)          # 기본 시작일(종료일이 속한 달 1일, 데이터 시작일 이전이면 보정)
+    _s_cur = st.session_state.get("wk_start")
+    _s_edited = st.session_state.pop("_wk_start_edited", False)
+    _s_auto = False if (_s_edited and _s_cur is not None) else st.session_state.get("_wk_start_auto", True)
+    _s_reset_note = False
+    if _s_auto or _s_cur is None:
+        _s_val = _s_def
+    elif _s_cur > asof or _s_cur < dmin:
+        _s_val, _s_reset_note = _s_def, True
+    else:
+        _s_val = _s_cur
+    st.session_state["wk_start"] = _s_val
+    st.session_state["_wk_start_auto"] = (_s_val == _s_def)
+
+    def _wk_start_touched():
+        st.session_state["_wk_start_edited"] = True
+
+    dc1.date_input("조회 시작일 (기본: 종료일이 속한 달의 1일 · 수정 가능)", min_value=dmin, max_value=dmax,
+                   key="wk_start", on_change=_wk_start_touched)
+    if _s_reset_note:
+        st.caption("⚠️ 시작일이 종료일보다 늦어서, 시작일을 종료일이 속한 달의 1일로 되돌렸어요.")
     asof = pd.to_datetime(asof)
+    m_start = pd.to_datetime(_s_val)
+    mon_label = _wk_mon_label(m_start, asof)          # "당월 실적" 또는 (복수의 달이면) "조회기간"
+    _mon_short = "조회기간" if mon_label == WK_RANGE else "당월"
+    _period_txt = f"{m_start.date()} → {asof.date()}"
+    if mon_label == WK_RANGE:
+        _ttl.subheader("📋 주간현황 분석 (조회기간 · 연간누계, 전년 동기간 비교)")
     cy, py = asof.year, asof.year - 1
     st.caption(f"올해({cy}) vs 전년({py}) 동기간 · 실판가=실매출(백만원) · 판가율=실판가÷최초가(가중) · 비중=행÷전체")
 
@@ -4919,7 +5005,7 @@ def render_weekly_report(df):
         st.caption("🔎 필터 적용 중 — 실적·판가율·증감·비중은 선택 조건 기준. "
                    "**사업계획·진도율은 시즌/연차 세분화가 없어 필터 시 '–'로 표시**(전체일 때만 계획 표시).")
 
-    m_start = asof.replace(day=1)
+    # m_start = 조회 시작일(항목29 — 구: 무조건 asof.replace(day=1)). 연간누계는 종전대로 1/1 → 종료일.
     y_start = asof.replace(month=1, day=1)
     cur_m = fd[(fd["_판매일"] >= m_start) & (fd["_판매일"] <= asof)]
     prev_m = fd[(fd["_판매일"] >= m_start - pd.DateOffset(years=1)) & (fd["_판매일"] <= asof - pd.DateOffset(years=1))]
@@ -4934,15 +5020,17 @@ def render_weekly_report(df):
     idx = [k for k, _ in rows]
     if not _filtered:
         inject_plan(by, idx, master)   # 연간 사업계획·진도율 주입 (필터 없을 때만)
-    sty, _disp_main = _wk_style_table(bm, by, idx, cy, py)
+    sty, _disp_main = _wk_style_table(bm, by, idx, cy, py, mon_label=mon_label)
 
     h1, h2 = st.columns([5, 1])
-    h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  (당월 {m_start.date()} → {asof.date()} · 누계 {y_start.date()} → {asof.date()})"
+    h1.markdown(f"**주간보고 · 기준일 {asof.date()}**  ({_mon_short} {m_start.date()} → {asof.date()} · 누계 {y_start.date()} → {asof.date()})"
                 f"{_NOTE_FLOAT}", unsafe_allow_html=True)
     # 엑셀 다운로드 — ⚠️ 메인 표 전용 '특별 조건': 팀 주간보고 양식(weekly_template.xlsx) 템플릿에
     # 값을 채워 내려받는 방식. 룰11(일반 엑셀 버튼)의 예외이므로 절대 일반 방식으로 바꾸지 말 것.
-    xls_bytes = weekly_excel_bytes(rows, bm, by, asof, cy, py)
-    h2.download_button("⬇ 엑셀", xls_bytes, file_name=f"주간보고_{asof.date()}.xlsx",
+    xls_bytes = weekly_excel_bytes(rows, bm, by, asof, cy, py, m_start=m_start)
+    _wk_fn = (f"주간보고_{m_start.date()}_{asof.date()}.xlsx" if mon_label == WK_RANGE
+              else f"주간보고_{asof.date()}.xlsx")   # 항목29: 복수의 달 조회는 파일명에 기간 표기
+    h2.download_button("⬇ 엑셀", xls_bytes, file_name=_wk_fn,
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="wk_dl", use_container_width=True)
     render_styled_table(sty)   # 룰3·4 + 헤더검정 + G.TOTAL 노란강조
@@ -4950,7 +5038,8 @@ def render_weekly_report(df):
                "S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음. 사업계획·진도율은 목표 입력 후 채워짐.")
 
     st.divider()
-    render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py)   # 2026-08-10, 메인 표 바로 아래로 배치(중태님 지시)
+    render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py,
+                                     mon_label=mon_label, period_txt=_period_txt)   # 2026-08-10, 메인 표 바로 아래로 배치(중태님 지시)
 
     # ── 매장 담당별 분석 (위 표와 동일 프레임, 행만 담당자) ──
     _MGR_BOTTOM = ["없음", "26년 미운영", "직원구매"]   # 비담당 라벨 → 맨 아래(이 순서)
@@ -4969,11 +5058,11 @@ def render_weekly_report(df):
         by2 = _wk_block(cur_y, prev_y, mrows)
         if not _filtered:
             inject_plan_manager(by2, [k for k, _ in mrows], master)   # 담당자 매장 연간계획 합
-        sty2, disp2 = _wk_style_table(bm2, by2, [k for k, _ in mrows], cy, py)
+        sty2, disp2 = _wk_style_table(bm2, by2, [k for k, _ in mrows], cy, py, mon_label=mon_label)
         # 룰11: 제목 + 우측 일반 엑셀 다운로드 버튼 (2026-07-31)
         g1, g2 = st.columns([5, 1])
         g1.markdown("##### 👤 매장 담당별 분석" + _NOTE_FLOAT, unsafe_allow_html=True)
-        _nm2 = sum(1 for c in disp2.columns if c[0] == "당월 실적")   # 당월 블록 컬럼 수(7)
+        _nm2 = sum(1 for c in disp2.columns if c[0] == mon_label)   # 당월(조회기간) 블록 컬럼 수(7)
         g2.download_button("⬇ 엑셀", table_excel_bytes(disp2, "매장 담당별 분석", first_block_cols=_nm2),
                            file_name=f"매장담당별분석_{asof.date()}.xlsx", mime=XLSX_MIME,
                            key="wk_dl_mgr", use_container_width=True)
@@ -4993,7 +5082,8 @@ def render_weekly_report(df):
             _mask = _CHANNEL_MASKS[sel]
         else:
             _mask = (lambda nm: (lambda x: x["_담당자"].astype(str).str.strip() == nm))(sel)
-        render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, _mask, cy, py, show_plan=not _filtered)
+        render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, _mask, cy, py, show_plan=not _filtered,
+                                mon_label=mon_label)
 
     st.divider()
     st.markdown("##### 🔍 (드릴다운 3) 매장별/담당별 아이템분석")   # 260828: 드릴다운 번호 재정렬(구 드릴다운2)
@@ -5014,11 +5104,12 @@ def render_weekly_report(df):
         if isel in managers:
             imask = (lambda nm: (lambda x: x["_담당자"].astype(str).str.strip() == nm))(isel)
             render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, f"{isel} (담당 전체매장)", imask,
-                                         cy, py, click_ns="d2")
+                                         cy, py, click_ns="d2", mon_label=mon_label, period_txt=_period_txt)
         else:
             code = code_of[isel]
             imask = (lambda c: (lambda x: x["매장코드"].astype(str).str.strip() == c))(code)
-            render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, isel, imask, cy, py, click_ns="d2")
+            render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, isel, imask, cy, py, click_ns="d2",
+                                         mon_label=mon_label, period_txt=_period_txt)
 
 
 # ==============================================================================
