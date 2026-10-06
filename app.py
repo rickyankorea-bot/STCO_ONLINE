@@ -1283,6 +1283,35 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
         render_styled_table(sty, extra_class=_tcls, extra_css=_css)   # 룰3·4 + G.TOTAL 노란강조
 
 
+def date_range_input(label, value, min_value=None, max_value=None, key=None, hint="", cols=None):
+    """공통 기간 입력 (항목32 · 261006, 중태님 요청) — **시작일·종료일을 각각 별도 칸으로** 받는다.
+
+    예전엔 한 칸짜리 범위 달력(st.date_input에 (시작, 끝) 튜플)을 썼는데, 시작일을 찍은 뒤
+    종료일을 찍으려고 다시 누르면 시작일이 또 바뀌어서 종료일은 키보드로 쳐 넣어야 했다.
+    두 칸으로 나누면 칸마다 '달력에서 날짜 클릭 → 달력 닫힘'으로 따로 동작한다.
+    ⚠️ 앞으로 ERP에 기간(시작~끝) 입력을 새로 만들 땐 범위 달력을 직접 쓰지 말고 이 함수를 쓸 것.
+
+    · label = 기간 이름(예: "조회기간") → 칸 이름이 "조회기간 시작일" / "조회기간 종료일"이 된다.
+    · hint  = 종료일 칸 이름 뒤 괄호 안내(예: "기본: 최근 1주"). 없으면 생략.
+    · value = (기본 시작일, 기본 종료일) · key = 위젯 키 접두어 → 실제 키는 f"{key}_s" / f"{key}_e".
+    · cols  = (시작일 칸, 종료일 칸)을 놓을 컬럼 2개. 안 주면 현재 위치에 반반 나눠 그린다.
+    반환값은 예전 범위 달력과 같은 **(시작일, 종료일) 튜플**이라 호출부의 rng[0]/rng[1] 처리는 그대로다.
+    시작일이 종료일보다 늦으면 두 날짜를 서로 바꿔 돌려주고 안내 문구를 보여준다(조회가 막히지 않게).
+    """
+    d0, d1 = value
+    c1, c2 = cols if cols is not None else st.columns(2)
+    s_val = c1.date_input(f"{label} 시작일", value=d0, min_value=min_value, max_value=max_value,
+                          key=f"{key}_s")
+    e_val = c2.date_input(f"{label} 종료일" + (f" ({hint})" if hint else ""), value=d1,
+                          min_value=min_value, max_value=max_value, key=f"{key}_e")
+    if s_val is None or e_val is None:
+        return tuple(v for v in (s_val, e_val) if v is not None)   # 호출부의 '기간을 선택하세요' 분기로
+    if s_val > e_val:
+        st.caption(f"⚠️ {label} 시작일({s_val})이 종료일({e_val})보다 늦어서, 두 날짜를 서로 바꿔서 조회했어요.")
+        s_val, e_val = e_val, s_val
+    return (s_val, e_val)
+
+
 def _need_search(flag_key, submitted):
     """조회 버튼 게이트 (2026-08-06 메모리 개선).
 
@@ -1530,15 +1559,14 @@ def render_flagship(df):
     # ── 조건 폼 (2026-08-06): 안의 위젯은 아무리 바꿔도 계산이 안 돌고, 🔍 조회를 눌러야 1번 계산 ──
     _all_min, _all_max = d["_판매일"].min().date(), d["_판매일"].max().date()
     with st.form("fs_form"):
-        f1, f2, f3 = st.columns([1, 2.0, 1.4])   # 항목30(261006): 당월누계 시작일 칸 추가
+        # 항목30(261006): 당월누계 시작일 칸 추가 · 항목32(261006): 기준기간을 시작일·종료일 두 칸으로 분리
+        f1, f2a, f2b, f3 = st.columns([0.8, 1.1, 1.5, 1.8])
         with f1:
             cy = st.selectbox("기준연도", years, index=0, key="fs_y")
         cur_all = d[d["_판매일"].dt.year == cy]
         dmin, dmax = cur_all["_판매일"].min().date(), cur_all["_판매일"].max().date()
-        with f2:
-            rng = st.date_input(f"기준기간 (전년 {cy-1} 동기간 자동)", value=(dmin, dmax),
-                                min_value=_all_min, max_value=_all_max,
-                                key="fs_rng")
+        rng = date_range_input("기준기간", (dmin, dmax), min_value=_all_min, max_value=_all_max,
+                               key="fs_rng", hint=f"전년 {cy-1} 동기간 자동", cols=(f2a, f2b))
         # ── 항목30(261006): '당월누계' 블록의 시작일 직접 지정 (주간현황 항목29와 같은 규칙) ──
         # · 기본값 = 기준기간 끝날짜가 속한 달의 1일(= 지금까지의 당월누계). 손대지 않으면 끝날짜를
         #   바꿔 조회할 때마다 그 달 1일로 따라가고, 직접 고치면 그 날짜가 유지된다. 다시 그 달 1일로
@@ -1563,7 +1591,7 @@ def render_flagship(df):
             st.session_state["fs_ms"] = _ms_val
         st.session_state["_fs_ms_auto"] = _ms_def
         with f3:
-            st.date_input("당월누계 시작일 (기본: 끝날짜가 속한 달 1일 · 수정 가능)",
+            st.date_input("당월누계 시작일 (기본: 종료일이 속한 달 1일 · 수정 가능)",
                           min_value=_all_min, max_value=_all_max, key="fs_ms")
         # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 · 빈칸=전체
         fb1, fb2, fb3 = st.columns(3)
@@ -1578,7 +1606,7 @@ def render_flagship(df):
         st.caption("※ 기준연도를 바꿨다면 기준기간 날짜도 그 연도로 맞춘 뒤 🔍 조회를 눌러 주세요. "
                    "(실제 집계는 기준기간 날짜를 따라요)  \n"
                    "※ **당월누계 시작일**을 앞 달로 당기면(예: 9/20) 모든 표의 '당월누계' 블록이 "
-                   "그 날짜부터 끝날짜까지의 '조회기간'으로 바뀌어요. 연간누계 블록은 기준기간 그대로예요.")
+                   "그 날짜부터 종료일까지의 '조회기간'으로 바뀌어요. 연간누계 블록은 기준기간 그대로예요.")
         run = st.form_submit_button("🔍 조회", type="primary")
     if _need_search("fs_go", run):
         # 2026-08-06: 조회 전에도 "이 화면이 뭘 보여주는 표인지" 헤더만 미리 보여줌 —
@@ -1611,7 +1639,7 @@ def render_flagship(df):
     if ms > e:                      # 방어: 폼 계산과 어긋난 경우(이론상 없음) 그 달 1일로
         ms, _ms_note = e.replace(day=1), True
     if _ms_note:
-        st.caption("⚠️ 당월누계 시작일이 기준기간 끝날짜보다 늦어서, 끝날짜가 속한 달의 1일로 되돌렸어요.")
+        st.caption("⚠️ 당월누계 시작일이 기준기간 종료일보다 늦어서, 종료일이 속한 달의 1일로 되돌렸어요.")
     cur_m = base[(base["_판매일"] >= ms) & (base["_판매일"] <= e)]
     prev_m = base[(base["_판매일"] >= ms - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
     _fs_multi = (ms.year, ms.month) != (e.year, e.month)      # 복수의 달 → '조회기간'
@@ -2824,8 +2852,8 @@ def render_channel_brand(df):
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 백만원 · 판가율=실판가÷최초가(가중) · 기본기간=최근 1주")
     # ── 조건 폼 (2026-08-06): 조건 변경 중엔 계산 안 함, 🔍 조회 때 1번만 ──
     with st.form("cb_form"):
-        rng = st.date_input("조회기간 (기본: 최근 1주)", value=(default_start, dmax),
-                            min_value=dmin, max_value=dmax, key="cb_rng")
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
+                               key="cb_rng", hint="기본: 최근 1주")
         # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 → 매장 담당 · 빈칸=전체
         cb1, cb2, cb3, cb4 = st.columns(4)
         brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
@@ -3529,8 +3557,8 @@ def render_category_mix(df):
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
     with st.form("cm_form"):
-        rng = st.date_input("조회기간 (시작일~종료일 직접 지정)", value=(default_start, dmax),
-                            min_value=dmin, max_value=dmax, key="cm_rng")
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
+                               key="cm_rng", hint="기본: 최근 1주")
         cm0, cm1, cm2, cm3, cm4 = st.columns([1.1, 1, 1, 1, 1])
         level = cm0.radio("카테고리 기준", CATMIX_CAT_LEVELS, horizontal=True, key="cm_level")
         # [수정7] 담당별 필터 추가 — 공통룰10(브랜드/연차/시즌) 4번째 필터, 빈칸=전체
@@ -7438,8 +7466,8 @@ def render_trend_weekly(df):
         smooth_tag = _trend_smooth_tag(smooth_key)
 
         default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=TREND_MAX_DAYS - 7), pd.to_datetime(dmin)).date()
-        rng = st.date_input(f"조회기간 (최대 1년 · 기본 = 최근 {TREND_MAX_WEEKS}주)",
-                            value=(default_start, dmax), min_value=dmin, max_value=dmax, key="tr_rng")
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
+                               key="tr_rng", hint=f"최대 1년 · 기본 = 최근 {TREND_MAX_WEEKS}주")
 
         o0, o1, o2, o3, o4 = st.columns([1.05, 0.95, 0.95, 1.5, 0.95])
         show_total = o0.checkbox("전체 실판가 배경선", value=True, key="tr_total",
@@ -8241,8 +8269,8 @@ def render_return_rate(df):
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=89), pd.to_datetime(dmin)).date()
     # ── 조건 폼 (2026-08-06): 조건 변경 중엔 계산 안 함, 🔍 조회 때 1번만 ──
     with st.form("rr_form"):
-        rng = st.date_input("조회기간 (기본: 최근 90일)", value=(default_start, dmax),
-                            min_value=dmin, max_value=dmax, key="rr_rng")
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
+                               key="rr_rng", hint="기본: 최근 90일")
         # 공통 필터 (빈칸=전체) — 브랜드 · 시즌 · 중카테고리(아이템그룹)
         f1, f2, f3 = st.columns(3)
         brands = sorted(d["브랜드명"].dropna().astype(str).unique()) if "브랜드명" in d.columns else []
@@ -8602,8 +8630,8 @@ def render_suitset(df):
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
     # ── 조건 폼 (2026-08-06): 조건 변경 중엔 계산 안 함, 🔍 조회 때 1번만 ──
     with st.form("ss_form"):
-        rng = st.date_input("조회기간 (기본: 최근 7일)", value=(default_start, dmax),
-                            min_value=dmin, max_value=dmax, key="ss_rng")
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
+                               key="ss_rng", hint="기본: 최근 7일")
         # 공통룰10: 브랜드·시즌 필터(빈칸=전체). 디자인키에 브랜드·시즌이 이미 포함되므로 매칭 조건과
         # 충돌 없이 미리 좁혀도 안전 — 세트를 이루는 자켓·하의는 항상 브랜드·시즌이 같기 때문.
         f1, f2 = st.columns(2)
