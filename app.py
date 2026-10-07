@@ -2666,8 +2666,8 @@ def _render_channel_trend(base, e, chan_mgr):
 #     아이템 칸이 비어 있으면 품번 2~3번째 글자(STCO 품번 규칙)로 보완.
 # 맨 윗줄 '합계'는 화면에 몇 개만 보여주든 **선택 조건 전체** 기준 — 유통 채널·필터를 비워두면
 # 실판가합계 합계가 A표 G.TOTAL(선택한 기간 블록)의 실판매금액과 같아야 정상(검증용).
-# 조건은 st.form으로 묶어 '🔍 BEST 상품 보기'를 눌러야 반영(조건을 고르는 동안 페이지 전체가
-# 매번 다시 계산되지 않게 — 260806 조회 버튼 구조와 같은 취지). 첫 화면은 기본 조건으로 바로 표시.
+# 조건은 폼 없이 **고르는 즉시 반영**(261007 수정 — A표의 정렬·금액 필터와 같은 방식). 처음엔
+# '🔍 BEST 상품 보기' 버튼 폼이었으나, 버튼을 안 누르면 선택칸과 표가 어긋나 보여 혼란을 줬다.
 _BEST_COLS = ["품번", "아이템", "판매수량", "택가합계", "실판가합계", "평균판매가", "평균할인율"]
 _BEST_SORTS = {"판매수량": ["q", "r"], "실판가합계": ["r", "q"]}
 
@@ -2764,20 +2764,21 @@ def _render_store_best(cur, cur_y, s, e, y_start):
 
     _pd_txt = {"조회기간": f"조회기간 ({s.month:02d}/{s.day:02d}~{e.month:02d}/{e.day:02d})",
                "연간누계": f"연간누계 ({y_start.month:02d}/{y_start.day:02d}~{e.month:02d}/{e.day:02d})"}
-    with st.form("cb_best_form"):
-        b1, b2, b3, b4 = st.columns([2.0, 2.2, 1.3, 0.8])
-        selch = b1.multiselect("유통 채널 (복수 선택 · 비우면 전체)", ch_opts, default=[],
-                               placeholder="전체", key="cb_best_ch")
-        selpd = b2.radio("기간", ["조회기간", "연간누계"], horizontal=True, key="cb_best_pd",
-                         format_func=lambda o: _pd_txt[o])
-        selsort = b3.radio("순위 기준", list(_BEST_SORTS), horizontal=True, key="cb_best_sort")
-        topn = b4.number_input("표시 개수", min_value=5, max_value=500, value=30, step=5, key="cb_best_n")
-        c1, c2, c3, c4 = st.columns(4)
-        seli = c1.multiselect("아이템(그룹)", grp_opts, default=[], placeholder="전체", key="cb_best_item")
-        sela = c2.multiselect("연차", age_opts, default=[], placeholder="전체", key="cb_best_age")
-        sels = c3.multiselect("시즌", sea_opts, default=[], placeholder="전체", key="cb_best_season")
-        selb = c4.multiselect("브랜드", br_opts, default=[], placeholder="전체", key="cb_best_brand")
-        st.form_submit_button("🔍 BEST 상품 보기", type="primary")
+    # 261007 수정: 조건을 st.form에서 꺼냈다 — 고르는 즉시 표에 반영된다(A표의 정렬·금액 필터와 같은 방식).
+    # 처음엔 '🔍 BEST 상품 보기' 버튼을 눌러야 반영되는 폼이었는데, 유통 채널을 골라 놓고 버튼을 안 누르면
+    # 선택칸엔 2개 매장이 보이는데 표는 여전히 전체 매장 기준이라 "선택이 안 먹는다"로 보였다(중태님 리포트).
+    b1, b2, b3, b4 = st.columns([2.0, 2.2, 1.3, 0.8])
+    selch = b1.multiselect("유통 채널 (복수 선택 · 비우면 전체)", ch_opts, default=[],
+                           placeholder="전체", key="cb_best_ch")
+    selpd = b2.radio("기간", ["조회기간", "연간누계"], horizontal=True, key="cb_best_pd",
+                     format_func=lambda o: _pd_txt[o])
+    selsort = b3.radio("순위 기준", list(_BEST_SORTS), horizontal=True, key="cb_best_sort")
+    topn = b4.number_input("표시 개수", min_value=5, max_value=500, value=30, step=5, key="cb_best_n")
+    c1, c2, c3, c4 = st.columns(4)
+    seli = c1.multiselect("아이템(그룹)", grp_opts, default=[], placeholder="전체", key="cb_best_item")
+    sela = c2.multiselect("연차", age_opts, default=[], placeholder="전체", key="cb_best_age")
+    sels = c3.multiselect("시즌", sea_opts, default=[], placeholder="전체", key="cb_best_season")
+    selb = c4.multiselect("브랜드", br_opts, default=[], placeholder="전체", key="cb_best_brand")
 
     src = cur if selpd == "조회기간" else cur_y
     if src is not None and not src.empty:
