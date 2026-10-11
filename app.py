@@ -3772,9 +3772,12 @@ def render_category_mix(df):
 
     h3, h4 = st.columns([4, 1])
     h3.markdown(f"### 담당별 전년대비 복종 비중 변화 (전년 동기간 비교 · {metric} 기준){_note}", unsafe_allow_html=True)
-    if prev_base.empty:
-        st.info(f"전년 동기간({ps.date()}~{pe.date()}) 매출 데이터가 없어서 전년대비 비교표를 만들 수 없어요.")
-        return
+    # 항목37(261011, 중태님): 올해 처음 생긴 브랜드 등 전년 동기간 데이터가 없어도 표를 멈추지 않고
+    # 전년 숫자를 모두 0으로 채워 올해 데이터만 보여준다(ㄴ증감은 '(신규)'로 표시).
+    _prev_empty = prev_base.empty
+    if _prev_empty:
+        st.caption(f"ℹ️ 전년 동기간({ps.date()} → {pe.date()})에는 이 조건의 판매가 없어서 전년 숫자를 모두 0으로 "
+                   "표시했어요 — 올해 실적만 확인하세요(ㄴ증감은 '신규').")
 
     prev_base = prev_base.assign(
         _복종=prev_base["아이템"].astype(str).str.strip().str.upper().map(cat_map).fillna("기타"))
@@ -3785,8 +3788,11 @@ def render_category_mix(df):
     shown_prev = shown_prev.sort_values("합계", ascending=False).reset_index(drop=True)
     shown_prev["순위"] = shown_prev.index + 1
     prev_rank_map = dict(zip(shown_prev["매장코드"], shown_prev["순위"]))
-    piv_prev = prev_base.pivot_table(index="매장코드", columns="_복종", values=VAL,
-                                      aggfunc="sum", fill_value=0.0).reindex(columns=cats, fill_value=0.0)
+    if _prev_empty:   # 항목37: 빈 데이터로 pivot_table을 돌리면 열이 없어 깨질 수 있어 0 피벗을 직접 만든다
+        piv_prev = pd.DataFrame(0.0, index=pd.Index([], name="매장코드"), columns=cats)
+    else:
+        piv_prev = prev_base.pivot_table(index="매장코드", columns="_복종", values=VAL,
+                                          aggfunc="sum", fill_value=0.0).reindex(columns=cats, fill_value=0.0)
 
     # 전년 데이터도 표1과 동일한 _row() 헬퍼로 조립 — 컬럼 순서·계산 방식(총액 0이면 %도 0) 일치 보장
     prev_rows = [_row(piv_prev.sum(axis=0), float(store_tot_prev["합계"].sum()), "", None)]
