@@ -1017,12 +1017,13 @@ MENU_FLAG = "📅 연차·아이템 세부분석"
 MENU_CHAN = "📈 유통별 세부 분석"
 MENU_CATMIX = "🧵 복종별 판매비중 분석"
 MENU_DAILY = "📆 일별 매출 추세"   # 항목34(261011) 신설 — Analysis 5번째
+MENU_MONTHLY = "🗓️ 월간 매출 현황"   # 항목35(261011) 신설 — Analysis 6번째
 MENU_INV  = "🏷️ 재고 가공"
 MENU_TRND = "📉 추세분석"
 MENU_RTN  = "🔄 반품률 분석"
 MENU_SET  = "🧩 SET/단품 판매 분석"
 MENU_PRICE = "💰 최저가 관리"   # 260820 신설 — 외부몰 최저가 행사 원장·캘린더·최저가 체크·네이버 체크
-MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY,
+MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY, MENU_MONTHLY,
          MENU_INV, MENU_TRND, MENU_RTN, MENU_SET, MENU_PRICE]
 
 # 사이드바 메뉴 3개 카테고리 구분 (2026-08-20, 중태님 확정 이미지 기준)
@@ -1030,7 +1031,7 @@ MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY,
 #   그룹별 radio 1개씩 두고, 선택은 세션 "nav_menu" 한 곳에만 보관(디스패치 로직은 기존 그대로).
 MENU_GROUPS = [
     (None,        [MENU_DASH]),
-    ("Analysis",  [MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY]),
+    ("Analysis",  [MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY, MENU_MONTHLY]),
     ("노가다 금지", [MENU_INV, MENU_PRICE]),
     ("궁금한 것",  [MENU_TRND, MENU_RTN, MENU_SET]),
 ]
@@ -5663,6 +5664,245 @@ def render_daily_trend(df):
                       legend=dict(orientation="h", y=1.12), yaxis_title="백만원")
     st.plotly_chart(fig, use_container_width=True)
     st.caption("※ 막대 = 그날 매출 · 선 = 시작일부터의 일평균. 막대에 마우스를 올리면 비교한 전년 날짜가 떠요.")
+
+
+# ==============================================================================
+# 🗓️ 월간 매출 현황 (항목35 · 261011, 중태님 요청 — Analysis 6번째 메뉴)
+# ==============================================================================
+# 중태님 '월간 매출 현황 Form' 그대로: 행 = 주간현황 메인 표와 같은 매장·브랜드 구분(_wk_rows) +
+# 채널 묶음 3줄, 열 = 연간 토탈 · 당월누계 · 1월~12월.
+#  · 위 표: 올해(26년) 값 + 바로 아래 '┗증감율'(전년 대비) / 아래 표: 전년(25년) 값.
+#  · 채널 묶음(중태님 확정 261011):
+#      자사채널            = 통합몰 + 네이버스토어
+#      외부몰(네이버제외)   = 전체 − 통합몰 − 네이버스토어
+#      외부몰(네이버포함)   = 전체 − 통합몰
+#  · 연간 토탈·당월누계 = 기준일까지(전년도 같은 기간) — 주간현황 연간누계·당월과 같은 기준.
+#  · 월 칸: 지난 달은 한 달 전체. 기준일이 속한 달(진행 중)은 올해=1일~기준일, 그 달 증감율은
+#    전년 같은 기간과 비교(=당월누계 증감율). 전년 표의 월 칸은 참고용으로 12개월 모두 한 달 전체.
+MS_MONTHS = [f"{m}월" for m in range(1, 13)]
+MS_YTD, MS_MTD = "연간 토탈", "당월누계"
+MS_RATE = "┗증감율"
+
+
+def _ms_rows():
+    """월간 매출 현황 행 정의 — 주간현황 _wk_rows()에 채널 묶음 3줄을 G.TOTAL 바로 아래에 끼운다."""
+    base = _wk_rows()
+    tm, nv = _CHANNEL_MASKS["통합몰"], _CHANNEL_MASKS["네이버스토어"]
+    groups = [
+        (("전체", "자사채널", "통합몰+네이버"), lambda x: tm(x) | nv(x)),
+        (("전체", "외부몰(네이버제외)", "전체−통합몰−네이버"), lambda x: ~(tm(x) | nv(x))),
+        (("전체", "외부몰(네이버포함)", "전체−통합몰"), lambda x: ~tm(x)),
+    ]
+    return base[:1] + groups + base[1:]
+
+
+def _ms_compute(d, asof, rows):
+    """행별 {cy: {열: 값}, py: {열: 값}} — 열 = 연간 토탈 · 당월누계 · 1~12월."""
+    cy, py = asof.year, asof.year - 1
+    asof_p = asof - pd.DateOffset(years=1)
+    m0 = asof.replace(day=1)
+    m0_p = m0 - pd.DateOffset(years=1)
+    end_excl = asof + pd.Timedelta(days=1)
+    endp_excl = asof_p + pd.Timedelta(days=1)
+    sl = d[(d["_판매일"] >= pd.Timestamp(py, 1, 1)) & (d["_판매일"] < pd.Timestamp(cy + 1, 1, 1))]
+    sl = sl[(sl["_판매일"].dt.year == py) | (sl["_판매일"] < end_excl)]   # 올해는 기준일까지만
+    out = {}
+    for key, mask in rows:
+        s = sl[mask(sl)] if len(sl) else sl
+        ym = s.groupby([s["_판매일"].dt.year, s["_판매일"].dt.month])["_매출액"].sum().to_dict()
+        c_ytd = float(s.loc[s["_판매일"].dt.year == cy, "_매출액"].sum())
+        p_ytd = float(s.loc[(s["_판매일"] >= pd.Timestamp(py, 1, 1)) & (s["_판매일"] < endp_excl), "_매출액"].sum())
+        c_mtd = float(s.loc[(s["_판매일"] >= m0) & (s["_판매일"] < end_excl), "_매출액"].sum())
+        p_mtd = float(s.loc[(s["_판매일"] >= m0_p) & (s["_판매일"] < endp_excl), "_매출액"].sum())
+        c = {MS_YTD: c_ytd, MS_MTD: c_mtd}
+        p = {MS_YTD: p_ytd, MS_MTD: p_mtd}
+        r = {MS_YTD: _dl_rate(c_ytd, p_ytd), MS_MTD: _dl_rate(c_mtd, p_mtd)}
+        for mth in range(1, 13):
+            lab = f"{mth}월"
+            p[lab] = float(ym.get((py, mth), 0.0))
+            if mth < asof.month:
+                c[lab] = float(ym.get((cy, mth), 0.0))
+                r[lab] = _dl_rate(c[lab], p[lab])
+            elif mth == asof.month:
+                c[lab] = c_mtd
+                r[lab] = _dl_rate(c_mtd, p_mtd)          # 진행 중인 달은 전년 같은 기간과 비교
+            else:
+                c[lab], r[lab] = None, None              # 아직 안 온 달
+        out[key] = {"cy": c, "py": p, "rate": r}
+    return out
+
+
+def _ms_money(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    return f"{v/1e6:,.1f}" if v else "–"
+
+
+def _ms_pct(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    v = round(v * 100, 1) + 0.0          # -0.0% 방지
+    return f"{v:+.1f}%" if v else "0.0%"
+
+
+def _ms_tables(res, rows, cy, py):
+    """(위 표 disp, 위 표 증감 부호 행렬, 아래 표 disp) — 화면·엑셀 공용."""
+    sc, sp = f"{str(cy)[-2:]}년", f"{str(py)[-2:]}년"
+    cols = [MS_YTD, MS_MTD] + MS_MONTHS
+    top_idx, top_rows, top_sign = [], [], []
+    bot_idx, bot_rows = [], []
+    for (sec, item, sub), _ in rows:
+        r = res[(sec, item, sub)]
+        top_idx.append((sec, item, sub, sc))
+        top_rows.append([_ms_money(r["cy"][c]) for c in cols])
+        top_sign.append([0] * len(cols))
+        top_idx.append((sec, item, sub, MS_RATE))
+        top_rows.append([_ms_pct(r["rate"][c]) for c in cols])
+        top_sign.append([(0 if r["rate"][c] is None else int(np.sign(round(r["rate"][c] * 100, 1))))
+                         for c in cols])
+        bot_idx.append((sec, item, sub, sp))
+        bot_rows.append([_ms_money(r["py"][c]) for c in cols])
+    names = ["구분", "항목", "세부", "연도"]
+    top = pd.DataFrame(top_rows, index=pd.MultiIndex.from_tuples(top_idx, names=names), columns=cols)
+    bot = pd.DataFrame(bot_rows, index=pd.MultiIndex.from_tuples(bot_idx, names=names), columns=cols)
+    return top, top_sign, bot
+
+
+_MS_GROUP_ITEMS = ("자사채널", "외부몰(네이버제외)", "외부몰(네이버포함)")
+
+
+def _ms_style(disp, sign=None):
+    """증감율 행 = 작은 글씨 + 빨강/초록 · 채널 묶음 3줄 = 하늘색 · 당월누계 뒤 굵은 경계선(룰12)."""
+    S = np.array(sign) if sign is not None else None
+
+    def _f(_):
+        css = pd.DataFrame("", index=disp.index, columns=disp.columns)
+        for i, ix in enumerate(disp.index):
+            row_css = []
+            if ix[1] in _MS_GROUP_ITEMS:
+                row_css.append("background:#eaf6fc")
+            if ix[3] == MS_RATE:
+                row_css.append("font-size:0.74rem")
+            for j in range(len(disp.columns)):
+                c = list(row_css)
+                if S is not None and ix[3] == MS_RATE:
+                    if S[i][j] < 0:
+                        c.append("color:#c62828;font-weight:600")
+                    elif S[i][j] > 0:
+                        c.append("color:#1f8a4c;font-weight:600")
+                css.iat[i, j] = ";".join(c)
+        return css
+    sty = disp.rename_axis([None] * disp.index.nlevels).style.apply(_f, axis=None)
+    sty = sty.set_properties(**{"text-align": "right"})
+    sty = sty.set_table_styles(
+        [{"selector": "th.col2", "props": [("border-left", "3px solid #555555")]},
+         {"selector": "td.col2", "props": [("border-left", "3px solid #555555")]}], overwrite=False)
+    return sty
+
+
+def _ms_excel_bytes(top, sign, bot, cy, py, asof):
+    """두 표를 양식처럼 한 시트에 위(올해+증감율)·아래(전년)로 쌓아 화면 서식 그대로 내려받기(룰11·13)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "월간 매출 현황"
+    thin, thick = Side(style="thin", color="D9D9D9"), Side(style="medium", color="555555")
+    head_fill = PatternFill("solid", fgColor="F4F4F6")
+    idx_fill = PatternFill("solid", fgColor="FAFAFA")
+    gt_fill = PatternFill("solid", fgColor="FFF2B8")
+    grp_fill = PatternFill("solid", fgColor="EAF6FC")
+    ws.cell(1, 1, f"월간 매출 현황 · 기준일 {asof.date()} · [금액: 백만원 / VAT+]").font = Font(bold=True, size=12)
+    r0 = 3
+
+    def put(df, sgn, start):
+        heads = ["구분", "항목", "세부", "연도"] + list(df.columns)
+        for k, h in enumerate(heads, 1):
+            c = ws.cell(start, k, h)
+            c.fill, c.font = head_fill, Font(bold=True, color="111111")
+            c.alignment = Alignment(horizontal="center", vertical="center")
+        for i, (ix, row) in enumerate(df.iterrows()):
+            r = start + 1 + i
+            is_gt = ix[1] == "G.TOTAL"
+            fill = gt_fill if is_gt else (grp_fill if ix[1] in _MS_GROUP_ITEMS else None)
+            lab = list(ix) if ix[3] != MS_RATE else ["", "", "", MS_RATE]
+            for k, v in enumerate(lab, 1):
+                c = ws.cell(r, k, v)
+                c.fill = fill or idx_fill
+                c.font = Font(bold=(ix[3] != MS_RATE), color="111111", size=(9 if ix[3] == MS_RATE else 11))
+            for j, v in enumerate(row.tolist()):
+                c = ws.cell(r, 5 + j, v)
+                c.alignment = Alignment(horizontal="right")
+                if fill:
+                    c.fill = fill
+                if ix[3] == MS_RATE and sgn is not None:
+                    s = sgn[i][j]
+                    c.font = Font(bold=True, size=9, color=("C62828" if s < 0 else ("1F8A4C" if s > 0 else "111111")))
+                elif is_gt:
+                    c.font = Font(bold=True)
+        last = start + len(df)
+        for r in range(start, last + 1):
+            for k in range(1, len(heads) + 1):
+                ws.cell(r, k).border = Border(left=(thick if k == 7 else thin), right=thin, top=thin, bottom=thin)
+        return last
+
+    end1 = put(top, sign, r0)
+    put(bot, None, end1 + 3)
+    for k in range(1, 4 + len(top.columns) + 1):
+        ws.column_dimensions[get_column_letter(k)].width = (18 if k == 2 else 12 if k <= 4 else 10)
+    ws.freeze_panes = "E4"
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def render_monthly_status(df):
+    st.subheader("🗓️ 월간 매출 현황 (월별 · 전년 비교)")
+    if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
+        st.info("데이터를 먼저 적재하세요.")
+        return
+    d = df.copy()
+    master = load_master()
+    if not master.empty and "채널스토리" in master.columns:
+        cs_map = dict(zip(master["매장코드"].astype(str).str.strip(), master["채널스토리"]))
+        d["_채널스토리"] = d["매장코드"].astype(str).str.strip().map(cs_map)
+    else:
+        d["_채널스토리"] = None
+        st.warning("매장 기준정보(채널스토리)가 없어 유통별 3개(원래직입점·웹뜰이관·웍스바이이관)는 0으로 나와요. "
+                   "사이드바 **매장 기준정보 업로드**에 마스터 파일을 올리면 채워져요.")
+    dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
+    c1, _c2 = st.columns([1, 2])
+    asof = c1.date_input("기준일 (연간 토탈·당월누계의 끝 날짜)", value=dmax, min_value=dmin, max_value=dmax,
+                         key="ms_asof")
+    asof = pd.to_datetime(asof)
+    cy, py = asof.year, asof.year - 1
+    rows = _ms_rows()
+    res = _ms_compute(d, asof, rows)
+    top, sign, bot = _ms_tables(res, rows, cy, py)
+
+    st.caption(f"매출=실판가(실매출, 백만원) · 연간 토탈 = {cy}-01-01 → {asof.date()} (전년 같은 기간과 비교) · "
+               f"당월누계 = {asof.replace(day=1).date()} → {asof.date()} · "
+               f"{asof.month}월(진행 중)은 1일~기준일, 증감율도 전년 같은 기간과 비교")
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(f"**{str(cy)[-2:]}년 월간 매출 + 전년 대비 증감율 · 기준일 {asof.date()}**" + _NOTE_FLOAT,
+                unsafe_allow_html=True)
+    h2.download_button("⬇ 엑셀", _ms_excel_bytes(top, sign, bot, cy, py, asof),
+                       file_name=f"월간매출현황_{asof.date()}.xlsx", mime=XLSX_MIME,
+                       key="ms_xls", use_container_width=True)
+    render_styled_table(_ms_style(top, sign))
+    st.caption("※ 자사채널 = 통합몰+네이버스토어 · 외부몰(네이버제외) = 전체−통합몰−네이버스토어 · "
+               "외부몰(네이버포함) = 전체−통합몰. 유통별 5개·브랜드별은 주간현황 분석과 같은 기준 "
+               "(S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음).")
+
+    st.markdown(f"**{str(py)[-2:]}년 월간 매출 (전년 · 참고)**" + _NOTE_FLOAT, unsafe_allow_html=True)
+    render_styled_table(_ms_style(bot))
+    st.caption(f"※ 전년 표의 월 칸은 한 달 전체 실적(참고용). 연간 토탈·당월누계 칸만 "
+               f"{asof_p_txt(asof)}까지의 같은 기간이에요.")
+
+
+def asof_p_txt(asof):
+    return str((asof - pd.DateOffset(years=1)).date())
 
 
 # ==============================================================================
@@ -10705,6 +10945,8 @@ def main():
         render_category_mix(df)
     elif menu == MENU_DAILY:
         render_daily_trend(df)
+    elif menu == MENU_MONTHLY:
+        render_monthly_status(df)
     elif menu == MENU_INV:
         render_inventory()
     elif menu == MENU_TRND:
