@@ -1016,12 +1016,13 @@ MENU_WEEK = "📋 주간현황 분석"   # 260820 명칭 변경 (구 '주간회�
 MENU_FLAG = "📅 연차·아이템 세부분석"
 MENU_CHAN = "📈 유통별 세부 분석"
 MENU_CATMIX = "🧵 복종별 판매비중 분석"
+MENU_DAILY = "📆 일별 매출 추세"   # 항목34(261011) 신설 — Analysis 5번째
 MENU_INV  = "🏷️ 재고 가공"
 MENU_TRND = "📉 추세분석"
 MENU_RTN  = "🔄 반품률 분석"
 MENU_SET  = "🧩 SET/단품 판매 분석"
 MENU_PRICE = "💰 최저가 관리"   # 260820 신설 — 외부몰 최저가 행사 원장·캘린더·최저가 체크·네이버 체크
-MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX,
+MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY,
          MENU_INV, MENU_TRND, MENU_RTN, MENU_SET, MENU_PRICE]
 
 # 사이드바 메뉴 3개 카테고리 구분 (2026-08-20, 중태님 확정 이미지 기준)
@@ -1029,7 +1030,7 @@ MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX,
 #   그룹별 radio 1개씩 두고, 선택은 세션 "nav_menu" 한 곳에만 보관(디스패치 로직은 기존 그대로).
 MENU_GROUPS = [
     (None,        [MENU_DASH]),
-    ("Analysis",  [MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX]),
+    ("Analysis",  [MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY]),
     ("노가다 금지", [MENU_INV, MENU_PRICE]),
     ("궁금한 것",  [MENU_TRND, MENU_RTN, MENU_SET]),
 ]
@@ -3031,22 +3032,22 @@ def render_channel_brand(df):
 #             고르면 표1·표2 모두 그 담당자 소관 매장만으로 줄어드는 드릴다운(2026-08-09). 구현:
 #             row-level(base/prev_base)에 _담당자 컬럼을 매장코드→담당자 매핑으로 미리 붙여두고
 #             selm(멀티셀렉트)을 다른 필터와 동일하게 .isin()으로 적용 — 이후 G.TOTAL/shown/piv/
-#             매장담당별 평균이 전부 자동으로 좁혀지므로 표1·표2 자체 로직은 수정 불필요.
+#             매장담당별 합계이 전부 자동으로 좁혀지므로 표1·표2 자체 로직은 수정 불필요.
 # ==============================================================================
 _CATMIX_SD065 = "SD065"
 _CATMIX_FLOOR = 1_000_000    # 원 단위 — 기간 합계매출 이 미만인 매장은 목록에서 제외(총계엔 포함)
 _CATMIX_GREEN = "background-color:#c8e6c9;font-weight:600"   # ② 아이템별 매출 top5
 _CATMIX_RED = "background-color:#ffcdd2;font-weight:600"     # ③ 복종 비중 상위5
 _CATMIX_BLUE = "background-color:#bbdefb;font-weight:600"    # ③ 복종 비중 하위5
-_CATMIX_MGR_BG = "#d6f0fa"    # 수정2: 매장담당별 평균 행 — 유통별 세부분석의 담당자별 TOTAL과 동일 색
+_CATMIX_MGR_BG = "#d6f0fa"    # 수정2: 매장담당별 합계 행 — 유통별 세부분석의 담당자별 TOTAL과 동일 색
 
 
 def _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=None, n_meta=3):
     """복종별 판매비중 표 전용 Styler — 아이템별 top5(녹색)·복종비중 상하위5(빨강/파랑)·SD065(주황)·
-    매장담당별 평균(하늘색, 수정2) · 복종 사이 진한 회색 구분선(수정3).
+    매장담당별 합계(하늘색, 수정2) · 복종 사이 진한 회색 구분선(수정3).
 
     disp=화면 표시용(포맷 문자열) DataFrame, num=랭킹 계산용 원본 숫자 DataFrame(동일 index·columns).
-    G.TOTAL·SD065·매장담당별 평균 행은 순위 경쟁(top5/bottom5/녹색)에서 제외한다.
+    G.TOTAL·SD065·매장담당별 합계 행은 순위 경쟁(top5/bottom5/녹색)에서 제외한다.
     n_meta=매장코드·합계·순위 등 복종 앞에 오는 메타 컬럼 수(복종 구분선 위치 계산용).
     """
     mgr_labels = mgr_labels or []
@@ -3078,7 +3079,7 @@ def _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=None, n_me
         sty = sty.apply(lambda s, c=col: _redblue(c), subset=pd.IndexSlice[:, [col]])
     _mgr_in = [lbl for lbl in mgr_labels if lbl in disp.index]
     if _mgr_in:
-        # 수정2: 매장담당별 평균 행 — 유통별 세부분석의 담당자별 TOTAL과 동일하게 하늘색만(볼드 없음)
+        # 수정2: 매장담당별 합계 행 — 유통별 세부분석의 담당자별 TOTAL과 동일하게 하늘색만(볼드 없음)
         sty = sty.set_properties(subset=pd.IndexSlice[_mgr_in, :], **{"background-color": _CATMIX_MGR_BG})
     if sd_label and sd_label in disp.index:
         sty = sty.set_properties(subset=pd.IndexSlice[[sd_label], :],
@@ -3113,7 +3114,7 @@ def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종�
         idx_fill = PatternFill("solid", fgColor="FAFAFA")
         gt_fill = PatternFill("solid", fgColor="FFF2B8")     # G.TOTAL 노랑
         sd_fill = PatternFill("solid", fgColor="FFE0B2")     # ① SD065 주황
-        mgr_fill = PatternFill("solid", fgColor="D6F0FA")    # 수정2: 매장담당별 평균 하늘색
+        mgr_fill = PatternFill("solid", fgColor="D6F0FA")    # 수정2: 매장담당별 합계 하늘색
         green_fill = PatternFill("solid", fgColor="C8E6C9")  # ② 아이템별 매출 top5
         red_fill = PatternFill("solid", fgColor="FFCDD2")    # ③ 복종비중 상위5
         blue_fill = PatternFill("solid", fgColor="BBDEFB")   # ③ 복종비중 하위5
@@ -3177,13 +3178,14 @@ def _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num, sheet="복종�
 
 
 # ── 담당별 전년대비 복종 비중 변화 (2026-08-09 신규, [수정5][수정6]) ──────────────
-# 표1(복종별 판매비중)과 같은 행 구성(G.TOTAL·매장담당별 평균·SD065·개별 매장)이되, 각 행을
+# 표1(복종별 판매비중)과 같은 행 구성(G.TOTAL·매장담당별 합계·SD065·개별 매장)이되, 각 행을
 # "{전년} {라벨}" / "{올해} {라벨}" / "ㄴ증감" 3개 행으로 쌓아 전년 동기간 대비 변화를 보여준다.
 # 전년 동기간 = 기존 앱 전역 관행과 동일(예: render_channel_brand)하게 s−1년~e−1년으로 계산.
 # ⚠ pandas Styler.apply/.map은 "인덱스(행 라벨)가 유일하지 않으면" 에러를 낸다(KeyError) — 그런데
 #   'ㄴ증감' 라벨은 매장/담당자 수만큼 반복돼 그 자체로는 유일하지 않다. 그래서 내부적으로는
 #   f"{_CATMIX_DIFF_PREFIX}{매장명}"처럼 매장명을 붙여 유일한 키로 쓰고, 화면 표시만
 #   format_index()로 "ㄴ증감"으로 통일해 보여준다(엑셀도 동일 방식으로 헤더 텍스트만 치환).
+_CATMIX_UNASSIGNED = "담당 미지정 합계"   # 261007: 담당자 없는 매장을 모은 행(담당별 합계 + 이 행 = G.TOTAL)
 _CATMIX_DIFF_LABEL = "ㄴ증감"
 _CATMIX_DIFF_PREFIX = "ㄴ증감__"
 
@@ -3193,7 +3195,7 @@ def _catmix_yoy_style(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_cols, 
 
     disp2=표시용(포맷 문자열), sign2=증감 부호 판정용 원본 숫자(ㄴ증감 행만 값 있음, 나머진 NaN).
     disp2.index의 ㄴ증감 행은 내부적으로 f"ㄴ증감__{매장명}"(유일 키) — 화면엔 format_index로
-    "ㄴ증감"만 보임. G.TOTAL/SD065/매장담당별 평균 행은 연도 쌍(전년·올해) 모두 표1과 동일 배경색,
+    "ㄴ증감"만 보임. G.TOTAL/SD065/매장담당별 합계 행은 연도 쌍(전년·올해) 모두 표1과 동일 배경색,
     ㄴ증감 행은 양수=초록/음수=빨강(이 앱의 기존 증감 색 관행과 동일) + 행 라벨 자체는 옅은 빨강
     이탤릭으로 구분.
     """
@@ -3238,7 +3240,7 @@ def _catmix_yoy_style(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_cols, 
 
 def _catmix_yoy_excel_bytes(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_cols, pct_cols,
                              sheet="복종비중YoY", n_meta=3):
-    """룰13: 화면 서식(G.TOTAL·SD065·담당별평균 배경 + ㄴ증감 행 +초록/-빨강 + 복종 구분 세로선 +
+    """룰13: 화면 서식(G.TOTAL·SD065·담당별합계 배경 + ㄴ증감 행 +초록/-빨강 + 복종 구분 세로선 +
     % 헤더 간결화) 그대로 엑셀 반영."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -3548,9 +3550,10 @@ def render_category_mix(df):
 
     st.caption("매장별로 어떤 복종(아이템군)의 판매 비중이 높고 낮은지 보여줘요. "
                "🟧 온라인통합몰(SD065)은 다른 매장이 참조하는 비교 기준선이라 항상 주황색으로 표시돼요. "
-               "🟦 G.TOTAL 바로 아래엔 매장담당별 평균(하늘색)이 담당자마다 한 행씩 나와요. "
-               "🟢 복종별 '금액' 열의 매출 상위 5개 매장(SD065·담당별평균 제외)은 녹색, "
-               "🔴🔵 '%' 열의 상위 5개는 빨간색·하위 5개는 파란색(둘 다 SD065·담당별평균 제외)으로 "
+               "🟦 G.TOTAL 바로 아래엔 매장담당별 합계(하늘색)가 담당자마다 한 행씩 나와요"
+               "(다 더하면 G.TOTAL). "
+               "🟢 복종별 '금액' 열의 매출 상위 5개 매장(SD065·담당별합계 제외)은 녹색, "
+               "🔴🔵 '%' 열의 상위 5개는 빨간색·하위 5개는 파란색(둘 다 SD065·담당별합계 제외)으로 "
                "표시돼요. 기간 합계매출 100만원 미만 매장은 총계엔 포함되지만 목록엔 표시하지 않아요. "
                "🔽 담당별 필터에서 담당자를 고르면 두 표(복종별 판매비중·전년대비 변화) 모두 그 "
                "담당자의 매장만으로 줄어들어요(드릴다운, 2026-08-09).")
@@ -3608,7 +3611,7 @@ def render_category_mix(df):
     shown = shown.sort_values("합계", ascending=False).reset_index(drop=True)
     shown["순위"] = shown.index + 1
 
-    # 수정2: 매장담당별 평균 — 매장 기준정보(담당자)와 매칭, 표시 대상(shown) 매장만 대상으로 그룹평균
+    # 매장 기준정보(담당자)와 매칭 — 표시 대상(shown) 매장의 담당자(가이드 엑셀 등에서 사용)
     # (담당자 맵은 위 [수정7]에서 이미 계산해둔 _mgr_map 재사용)
     shown["_담당자"] = shown["매장코드"].astype(str).str.strip().map(_mgr_map)
     shown["_담당자"] = shown["_담당자"].where(
@@ -3635,19 +3638,46 @@ def render_category_mix(df):
     rows.append(_row(piv.sum(axis=0), total_amt_all, "", None))
     index.append("G.TOTAL")
 
-    # 수정2: 매장담당별 평균 행 — G.TOTAL 바로 아래, 개별 매장행 위. 평균 합계 큰 순 정렬.
-    # mgr_avg_tot는 아래 "담당별 전년대비 복종 비중 변화" 표(2026-08-09 신규, 수정6)에서도 재사용
-    # 하므로 if 안이 아니라 항상(빈 Series라도) 계산해둔다 — 동작은 기존과 동일(빈 Series면 루프 무실행).
+    # 수정2(260808) → 261007 변경: 매장담당별 **합계** 행 — G.TOTAL 바로 아래, 개별 매장행 위. 합계 큰 순.
+    # 처음엔 "담당 매장 1곳당 평균"이었는데, 담당 행을 다 더해도 G.TOTAL과 안 맞아 혼란을 줬다(중태님
+    # 리포트, 261007). 그래서 **담당자가 맡은 모든 매장의 합계**로 바꿨다:
+    #   · 대상 = 그 담당자의 전 매장(목록에서 숨겨지는 100만원 미만 매장도 포함 — G.TOTAL과 같은 기준)
+    #   · 담당자가 없는 매장은 '담당 미지정 합계' 한 행으로 모음
+    #   → 하늘색 행(담당별 합계 + 담당 미지정 합계)을 모두 더하면 G.TOTAL과 정확히 같다.
+    #   · 비중(%)은 복종금액÷합계라서 평균이던 때와 값이 같다(금액 열만 '매장 수'배로 커짐).
+    # mgr_sum_tot·_mgr_of_code는 아래 "담당별 전년대비 복종 비중 변화" 표에서도 재사용한다.
+    def _mgr_of_code(code_series):
+        m = code_series.astype(str).str.strip().map(_mgr_map)
+        ok = m.notna() & m.astype(str).str.strip().ne("") & ~m.astype(str).str.lower().isin(["nan", "none"])
+        return m.where(ok, None)
+
+    def _mgr_sum_rows(tot_frame, pivot):
+        """매장별 합계표(tot_frame) → {담당자: (복종별 금액 합, 총합)} + 담당 미지정 (복종별 금액 합, 총합)."""
+        f = tot_frame[tot_frame["합계"] != 0]
+        mg = _mgr_of_code(f["매장코드"])
+        out = {}
+        for name in mg.dropna().unique():
+            sel = f[(mg == name).values]
+            codes = sel["매장코드"].drop_duplicates()
+            out[name] = (pivot.reindex(codes).fillna(0.0)[cats].sum(axis=0), float(sel["합계"].sum()))
+        un = f[mg.isna().values]
+        un_codes = un["매장코드"].drop_duplicates()
+        un_res = (pivot.reindex(un_codes).fillna(0.0)[cats].sum(axis=0), float(un["합계"].sum())) if len(un) else None
+        return out, un_res
+
     mgr_labels = []
-    mgr_avg_tot = (shown.groupby("_담당자")["합계"].mean().sort_values(ascending=False)
-                   if shown["_담당자"].notna().any() else pd.Series(dtype="float64"))
-    for mgr, avg_tot in mgr_avg_tot.items():
-        codes = shown.loc[shown["_담당자"] == mgr, "매장코드"]
-        cat_amt_avg = piv.reindex(codes).fillna(0.0)[cats].mean(axis=0)
-        lbl = f"{mgr} 평균"
-        rows.append(_row(cat_amt_avg, float(avg_tot), "", None))
+    _mgr_cur, _un_cur = _mgr_sum_rows(store_tot, piv)
+    mgr_sum_tot = pd.Series({k: v[1] for k, v in _mgr_cur.items()}, dtype="float64").sort_values(ascending=False)
+    for mgr, sum_tot in mgr_sum_tot.items():
+        lbl = f"{mgr} 합계"
+        rows.append(_row(_mgr_cur[mgr][0], float(sum_tot), "", None))
         index.append(lbl)
         mgr_labels.append(lbl)
+    _has_unassigned = bool(mgr_labels) and _un_cur is not None and abs(_un_cur[1]) >= 1
+    if _has_unassigned:
+        rows.append(_row(_un_cur[0], _un_cur[1], "", None))
+        index.append(_CATMIX_UNASSIGNED)
+        mgr_labels.append(_CATMIX_UNASSIGNED)
 
     for _, r in shown.iterrows():
         code = r["매장코드"]
@@ -3683,14 +3713,16 @@ def render_category_mix(df):
                        key="cm_guide_dl", use_container_width=True)
     sty = _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=mgr_labels, n_meta=n_meta)
     render_styled_table(sty)
-    _mgr_note = (f" · 매장담당별 평균 {len(mgr_labels)}명(하늘색, 표시된 매장 기준)" if mgr_labels
-                 else " · 매장 기준정보(담당자)가 없어 매장담당별 평균은 표시되지 않았어요")
+    _mgr_note = (f" · 하늘색 = 매장담당별 합계 {len(mgr_sum_tot)}명"
+                 + (" + 담당 미지정 합계" if _has_unassigned else "")
+                 + "(담당 매장 전체 합 — 100만원 미만 매장도 포함) → 하늘색 행을 모두 더하면 G.TOTAL과 같아요"
+                 if mgr_labels else " · 매장 기준정보(담당자)가 없어 매장담당별 합계는 표시되지 않았어요")
     st.caption(f"※ 매장 {len(shown)}개 표시(기간 합계매출 100만원 미만 {hidden_n}개 매장은 총계엔 "
                "포함되지만 목록에서는 제외) · 순위=표시된 매장 안에서 매출 큰 순 · "
                "복종 열은 총매출 큰 순으로 정렬돼요" + _mgr_note + ".")
 
     # ── [수정6] 담당별 전년대비 복종 비중 변화 (2026-08-09 신규) ──────────────
-    # 표1과 동일한 행 구성(G.TOTAL·매장담당별 평균·SD065·개별 매장)을 "{전년} 라벨"/"{올해} 라벨"/
+    # 표1과 동일한 행 구성(G.TOTAL·매장담당별 합계·SD065·개별 매장)을 "{전년} 라벨"/"{올해} 라벨"/
     # "ㄴ증감" 3행씩으로 쌓아 전년 동기간 대비 변화를 보여줌. 전년 동기간 계산은 이 앱의 기존 관행
     # (render_channel_brand 등)과 동일하게 조회기간을 그대로 1년 전으로 시프트.
     ps, pe = s - pd.DateOffset(years=1), e - pd.DateOffset(years=1)
@@ -3726,11 +3758,16 @@ def render_category_mix(df):
 
     # 전년 데이터도 표1과 동일한 _row() 헬퍼로 조립 — 컬럼 순서·계산 방식(총액 0이면 %도 0) 일치 보장
     prev_rows = [_row(piv_prev.sum(axis=0), float(store_tot_prev["합계"].sum()), "", None)]
-    for mgr, avg_tot in mgr_avg_tot.items():
-        codes = shown.loc[shown["_담당자"] == mgr, "매장코드"]
-        cat_amt_avg_prev = piv_prev.reindex(codes).fillna(0.0)[cats].mean(axis=0)
-        avg_tot_prev = float(pd.Series([prev_total_map.get(c, 0.0) for c in codes]).mean()) if len(codes) else 0.0
-        prev_rows.append(_row(cat_amt_avg_prev, avg_tot_prev, "", None))
+    # 261007: 담당별 평균 → 합계. 전년도 '그 담당자(현재 매장 기준정보 기준)의 전 매장 합계'로 계산 —
+    # 올해 행과 같은 기준이라 ㄴ증감이 담당자 전체 매출의 전년대비 증감이 된다.
+    _mgr_prev, _un_prev = _mgr_sum_rows(store_tot_prev, piv_prev)
+    _zero_cat = pd.Series(0.0, index=cats)
+    for mgr in mgr_sum_tot.index:
+        _pv = _mgr_prev.get(mgr, (_zero_cat, 0.0))
+        prev_rows.append(_row(_pv[0], _pv[1], "", None))
+    if _has_unassigned:
+        _pv = _un_prev if _un_prev is not None else (_zero_cat, 0.0)
+        prev_rows.append(_row(_pv[0], _pv[1], "", None))
     for _, r in shown.iterrows():
         code = r["매장코드"]
         cat_amt_prev = piv_prev.loc[code] if code in piv_prev.index else pd.Series(0.0, index=cats)
@@ -5371,6 +5408,261 @@ def render_weekly_report(df):
             imask = (lambda c: (lambda x: x["매장코드"].astype(str).str.strip() == c))(code)
             render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, isel, imask, cy, py, click_ns="d2",
                                          mon_label=mon_label, period_txt=_period_txt)
+
+
+# ==============================================================================
+# 📆 일별 매출 추세 (항목34 · 261011, 중태님 요청 — Analysis 5번째 메뉴)
+# ==============================================================================
+# 중태님 엑셀 양식(일자 · 요일(전년/금년) · 일자별 매출 · 월간 누계 매출 · 기간 일평균 매출 —
+# 각 블록 25년/26년/증감율)을 그대로 조회물로 옮긴 화면.
+#  (1) 비교 기준 선택: '일자기준' = 전년 같은 날짜(1년 전) / '요일기준' = 전년 같은 요일(364일 전 —
+#      52주 전이라 요일이 항상 같다. 예: 26/09/01(화) ↔ 25/09/02(화))
+#  (2) 조회 시작일 기본 = 종료일이 속한 달의 1일(월간 기준). 시작~종료가 여러 달에 걸치면
+#      누계 블록 이름이 '월간 누계 매출' → '기간 누계 매출'로 자동 전환 (주간현황 항목29와 같은 규칙).
+#  누계·일평균은 조회 시작일부터 그날까지(달이 바뀌어도 리셋하지 않음) — 일평균 = 누계 ÷ 경과 일수.
+DL_BASIS_DATE, DL_BASIS_DOW = "일자기준", "요일기준"
+DL_DAILY, DL_MON_CUM, DL_RANGE_CUM, DL_AVG = "일자별 매출", "월간 누계 매출", "기간 누계 매출", "기간 일평균 매출"
+_DL_DOW = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def _dl_cum_label(start, end):
+    """누계 블록 헤더 — 시작·종료가 같은 연·월이면 '월간 누계 매출', 여러 달에 걸치면 '기간 누계 매출'."""
+    return DL_MON_CUM if (start.year, start.month) == (end.year, end.month) else DL_RANGE_CUM
+
+
+def _dl_prev_date(ts, basis):
+    """비교할 전년 날짜 — 일자기준: 1년 전 같은 날짜 / 요일기준: 364일 전(같은 요일)."""
+    if basis == DL_BASIS_DOW:
+        return ts - pd.Timedelta(days=364)
+    return ts - pd.DateOffset(years=1)
+
+
+def _dl_day_label(ts, multi_year):
+    return (f"{str(ts.year)[-2:]}년 {ts.month}월 {ts.day}일" if multi_year
+            else f"{ts.month}월 {ts.day}일")
+
+
+def _dl_build(fd, start, end, basis):
+    """일별 표 원값(D, 숫자) 생성 — 행: '기간 합계' + 조회기간의 모든 날짜(매출 0인 날 포함)."""
+    days = pd.date_range(start, end, freq="D")
+    pdays = [_dl_prev_date(t, basis) for t in days]
+    daily = fd.groupby(fd["_판매일"].dt.normalize())["_매출액"].sum()
+    cur = np.array([float(daily.get(t, 0.0)) for t in days])
+    prv = np.array([float(daily.get(p, 0.0)) for p in pdays])
+    ccum, pcum = cur.cumsum(), prv.cumsum()
+    n = np.arange(1, len(days) + 1)
+    return days, pdays, cur, prv, ccum, pcum, n
+
+
+def _dl_weekend(v):
+    """요일 칸 값('토'·'일' 또는 '9/6 (토)')이 주말이면 '토'/'일', 아니면 ''."""
+    s = str(v).strip()
+    for w in ("토", "일"):
+        if s == w or s.endswith(f"({w})"):
+            return w
+    return ""
+
+
+def _dl_rate(c, p):
+    return ((c - p) / p) if p else None
+
+
+def _dl_excel_bytes(disp, sheet, block_starts):
+    """룰11·13: 화면 서식 그대로 엑셀 + 블록(요일|일자별|누계|일평균) 경계마다 두꺼운 세로선(룰12)."""
+    from openpyxl import load_workbook
+    from openpyxl.styles import Border, Side, Font
+    raw = styled_excel_bytes(disp, sheet, first_block_cols=block_starts[0])
+    wb = load_workbook(io.BytesIO(raw))
+    ws = wb.worksheets[0]
+    n_idx = disp.index.nlevels
+    thin = Side(style="thin", color="D9D9D9")
+    thick = Side(style="medium", color="555555")
+    for b in block_starts[1:]:
+        k = n_idx + b + 1
+        for r in range(1, ws.max_row + 1):
+            c = ws.cell(r, k)
+            c.border = Border(left=thick, right=thin, top=thin, bottom=thin)
+    # 주말 요일 색(토 파랑 · 일 빨강) — 화면과 동일
+    data_start = ws.max_row - len(disp) + 1
+    for ri in range(len(disp)):
+        for cj in range(2):
+            wd = _dl_weekend(disp.iat[ri, cj]) if ri > 0 else ""
+            if wd:
+                ws.cell(data_start + ri, n_idx + 1 + cj).font = Font(
+                    bold=True, color=("1F5FBF" if wd == "토" else "C62828"))
+    ws.column_dimensions["A"].width = 16
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def render_daily_trend(df):
+    _ttl = st.empty()
+    _ttl.subheader("📆 일별 매출 추세 (월간 기준 · 전년 비교)")
+    if df.empty or "_판매일" not in df.columns or df["_판매일"].notna().sum() == 0:
+        st.info("데이터를 먼저 적재하세요.")
+        return
+    d = df
+    dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
+
+    # ── 비교 기준 (1) — 일자기준 / 요일기준 ──
+    basis = st.radio("비교 기준", [DL_BASIS_DATE, DL_BASIS_DOW], horizontal=True, key="dl_basis",
+                     help="일자기준 = 전년 같은 날짜와 비교 · 요일기준 = 전년 같은 요일(364일 전)과 비교")
+
+    # ── 조회 시작일·종료일 (2) — 주간현황 항목29와 같은 규칙 ──
+    # 종료일 기본 = 최신 적재일. 시작일 기본 = 종료일이 속한 달의 1일 — 손대지 않으면 종료일을 바꿀 때
+    # 그 달 1일로 따라가고, 직접 고치면 유지(다시 그 달 1일로 맞추면 자동 따라가기 복귀).
+    dc1, dc2 = st.columns(2)
+    asof = dc2.date_input("조회 종료일", value=dmax, min_value=dmin, max_value=dmax, key="dl_asof")
+    _s_def = max(asof.replace(day=1), dmin)
+    _s_cur = st.session_state.get("dl_start")
+    _s_edited = st.session_state.pop("_dl_start_edited", False)
+    _s_auto = False if (_s_edited and _s_cur is not None) else st.session_state.get("_dl_start_auto", True)
+    _s_reset_note = False
+    if _s_auto or _s_cur is None:
+        _s_val = _s_def
+    elif _s_cur > asof or _s_cur < dmin:
+        _s_val, _s_reset_note = _s_def, True
+    else:
+        _s_val = _s_cur
+    st.session_state["dl_start"] = _s_val
+    st.session_state["_dl_start_auto"] = (_s_val == _s_def)
+
+    def _dl_start_touched():
+        st.session_state["_dl_start_edited"] = True
+
+    dc1.date_input("조회 시작일 (기본: 종료일이 속한 달의 1일 · 수정 가능)", min_value=dmin, max_value=dmax,
+                   key="dl_start", on_change=_dl_start_touched)
+    if _s_reset_note:
+        st.caption("⚠️ 시작일이 종료일보다 늦어서, 시작일을 종료일이 속한 달의 1일로 되돌렸어요.")
+    start, end = pd.to_datetime(_s_val), pd.to_datetime(asof)
+    cum_label = _dl_cum_label(start, end)
+    if cum_label == DL_RANGE_CUM:
+        _ttl.subheader("📆 일별 매출 추세 (조회기간 · 전년 비교)")
+
+    # ── 공통 필터 — 주간현황과 동일(브랜드별 → 연차별 → 시즌별) ──
+    fc1, fc2, fc3 = st.columns(3)
+    _brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
+    _ages = sorted(d["연차"].dropna().unique(), key=_age_sort_key) if "연차" in d.columns else []
+    _seasons = sorted(d["시즌명"].dropna().unique()) if "시즌명" in d.columns else []
+    selb = fc1.multiselect("브랜드별", _brands, default=[], placeholder="전체", key="dl_fb")
+    sela = fc2.multiselect("연차별", _ages, default=[], placeholder="전체", key="dl_fa")
+    sels = fc3.multiselect("시즌별", _seasons, default=[], placeholder="전체", key="dl_fs")
+
+    # 필요한 기간(금년 조회기간 + 전년 비교기간)만 잘라서 계산 — 메모리 절약
+    p_lo = min(_dl_prev_date(start, basis), start - pd.DateOffset(years=1))
+    m = ((d["_판매일"] >= start) & (d["_판매일"] < end + pd.Timedelta(days=1))) | \
+        ((d["_판매일"] >= p_lo) & (d["_판매일"] < _dl_prev_date(end, basis) + pd.Timedelta(days=2)))
+    fd = d.loc[m, ["_판매일", "_매출액"] + [c for c in ("브랜드명", "연차", "시즌명") if c in d.columns]]
+    if selb:
+        fd = fd[fd["브랜드명"].isin(selb)]
+    if sela:
+        fd = fd[fd["연차"].isin(sela)]
+    if sels:
+        fd = fd[fd["시즌명"].isin(sels)]
+
+    days, pdays, cur, prv, ccum, pcum, n = _dl_build(fd, start, end, basis)
+    multi_year = start.year != end.year
+    if multi_year:
+        ly, lc = "전년", "금년"
+    else:
+        ly, lc = f"{str(end.year - 1)[-2:]}년", f"{str(end.year)[-2:]}년"
+
+    # ── 표 구성 (중태님 양식 그대로: 요일 | 일자별 | 누계 | 일평균) ──
+    W = "요일" if basis == DL_BASIS_DATE else "비교일 · 요일"
+    cols = [(W, "전년"), (W, "금년"),
+            (DL_DAILY, ly), (DL_DAILY, lc), (DL_DAILY, "증감율"),
+            (cum_label, ly), (cum_label, lc), (cum_label, "증감율"),
+            (DL_AVG, ly), (DL_AVG, lc), (DL_AVG, "증감율")]
+    tot_c, tot_p, N = float(ccum[-1]), float(pcum[-1]), int(n[-1])
+    rows, idx = [], []
+    # 첫 행 = 기간 합계(룰6 노란 강조 — G.TOTAL 자리)
+    rows.append([f"{pdays[0].month}/{pdays[0].day}~{pdays[-1].month}/{pdays[-1].day}"
+                 if basis == DL_BASIS_DOW else "", f"{N}일",
+                 tot_p, tot_c, _dl_rate(tot_c, tot_p),
+                 tot_p, tot_c, _dl_rate(tot_c, tot_p),
+                 tot_p / N, tot_c / N, _dl_rate(tot_c, tot_p)])
+    idx.append("기간 합계")
+    for i, t in enumerate(days):
+        p = pdays[i]
+        pw = _DL_DOW[p.weekday()]
+        prev_txt = pw if basis == DL_BASIS_DATE else (
+            f"{str(p.year)[-2:]}.{p.month}.{p.day} ({pw})" if multi_year else f"{p.month}/{p.day} ({pw})")
+        rows.append([prev_txt, _DL_DOW[t.weekday()],
+                     prv[i], cur[i], _dl_rate(cur[i], prv[i]),
+                     pcum[i], ccum[i], _dl_rate(ccum[i], pcum[i]),
+                     pcum[i] / n[i], ccum[i] / n[i], _dl_rate(ccum[i], pcum[i])])
+        idx.append(_dl_day_label(t, multi_year))
+    D = pd.DataFrame(rows, index=pd.Index(idx, name="일자"), columns=pd.MultiIndex.from_tuples(cols))
+
+    disp = D.copy()
+    for c in D.columns:
+        if c[0] == W:
+            continue
+        if c[1] == "증감율":
+            disp[c] = ["–" if (v is None or pd.isna(v)) else f"{v*100:+.1f}%" for v in D[c]]
+        else:
+            disp[c] = [f"{v/1e6:,.1f}" if v else "–" for v in D[c]]   # 룰1: 백만원 · 소수1자리
+
+    def _color(col):
+        return ["color:#c62828;font-weight:600" if (v is not None and pd.notnull(v) and v < 0)
+                else ("color:#1f8a4c;font-weight:600" if (v is not None and pd.notnull(v) and v > 0) else "")
+                for v in D[col]]
+
+    def _dow_color(col):
+        out = []
+        for j, v in enumerate(disp[col]):
+            wd = _dl_weekend(v) if j > 0 else ""
+            out.append("" if not wd else
+                       ("color:#1f5fbf;font-weight:600" if wd == "토" else "color:#c62828;font-weight:600"))
+        return out
+
+    sty = disp.rename_axis(None).style   # 화면에선 '일자' 인덱스 이름 줄 생략(엑셀엔 유지)
+    for c in D.columns:
+        if c[1] == "증감율":
+            sty = sty.apply(lambda s, cc=c: _color(cc), subset=pd.IndexSlice[:, [c]])
+        elif c[0] == W:
+            sty = sty.apply(lambda s, cc=c: _dow_color(cc), subset=pd.IndexSlice[:, [c]])
+    sty = sty.set_properties(**{"text-align": "right"})
+    sty = sty.set_properties(subset=pd.IndexSlice[:, [(W, "전년"), (W, "금년")]], **{"text-align": "center"})
+    # 룰12: 블록 경계 두꺼운 세로선 — 요일(2) | 일자별(3) | 누계(3) | 일평균(3)
+    starts = [2, 5, 8]
+    sty = sty.set_table_styles(
+        [{"selector": f"th.col{k}", "props": [("border-left", "3px solid #555555")]} for k in starts] +
+        [{"selector": f"td.col{k}", "props": [("border-left", "3px solid #555555")]} for k in starts],
+        overwrite=False)
+
+    _basis_txt = ("전년 같은 날짜" if basis == DL_BASIS_DATE else "전년 같은 요일(364일 전)")
+    st.caption(f"비교: {_basis_txt} · 매출=실판가(실매출, 백만원) · 누계·일평균은 조회 시작일부터 그날까지 "
+               f"· 일평균=누계÷경과 일수")
+    if selb or sela or sels:
+        st.caption("🔎 필터 적용 중 — 표의 모든 숫자는 선택한 브랜드·연차·시즌 기준이에요.")
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(f"**일별 매출 · {start.date()} → {end.date()}** ({N}일 · {basis})" + _NOTE_FLOAT,
+                unsafe_allow_html=True)
+    _fn = f"일별매출추세_{basis}_{start.date()}_{end.date()}.xlsx"
+    h2.download_button("⬇ 엑셀", _dl_excel_bytes(disp, "일별 매출 추세", starts),
+                       file_name=_fn, mime=XLSX_MIME, key="dl_xls", use_container_width=True)
+    render_styled_table(sty)
+    if end.date() == dmax:
+        st.caption(f"※ 종료일({dmax})은 최신 적재일이에요 — 그날 매출이 하루치 전부 들어왔는지 확인해 주세요.")
+
+    # ── 추세 그래프: 일자별 매출(막대) + 기간 일평균(선) 전년 vs 금년 ──
+    xlab = [_dl_day_label(t, multi_year) + f"({_DL_DOW[t.weekday()]})" for t in days]
+    ptxt = [f"{p.date()} ({_DL_DOW[p.weekday()]})" for p in pdays]
+    fig = go.Figure()
+    fig.add_bar(x=xlab, y=prv / 1e6, name=f"{ly} 일매출", marker_color="#b8bec7",
+                customdata=ptxt, hovertemplate="%{customdata}<br>%{y:,.1f}백만<extra></extra>")
+    fig.add_bar(x=xlab, y=cur / 1e6, name=f"{lc} 일매출", marker_color="#2f6bb0",
+                hovertemplate="%{x}<br>%{y:,.1f}백만<extra></extra>")
+    fig.add_scatter(x=xlab, y=(pcum / n) / 1e6, name=f"{ly} 일평균", mode="lines",
+                    line=dict(color="#8a8f98", width=2, dash="dash"))
+    fig.add_scatter(x=xlab, y=(ccum / n) / 1e6, name=f"{lc} 일평균", mode="lines",
+                    line=dict(color="#0b3d78", width=2.5))
+    fig.update_layout(barmode="group", height=340, margin=dict(t=10, b=0, l=0, r=0),
+                      legend=dict(orientation="h", y=1.12), yaxis_title="백만원")
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("※ 막대 = 그날 매출 · 선 = 시작일부터의 일평균. 막대에 마우스를 올리면 비교한 전년 날짜가 떠요.")
 
 
 # ==============================================================================
@@ -10411,6 +10703,8 @@ def main():
         render_channel_brand(df)
     elif menu == MENU_CATMIX:
         render_category_mix(df)
+    elif menu == MENU_DAILY:
+        render_daily_trend(df)
     elif menu == MENU_INV:
         render_inventory()
     elif menu == MENU_TRND:
