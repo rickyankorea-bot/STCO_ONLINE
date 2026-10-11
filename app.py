@@ -1285,6 +1285,26 @@ def perf_table(cur, prev, dim, order_list, title, key, extra=None, season_rows=F
         render_styled_table(sty, extra_class=_tcls, extra_css=_css)   # 룰3·4 + G.TOTAL 노란강조
 
 
+def year_end_of(d):
+    """항목38(261011, 중태님): 기간 선택의 상한 = 최신 업로드일이 속한 해의 12/31.
+    모든 메뉴의 종료일을 연말까지 고를 수 있게 한다 — 전년은 선택한 기간 전체, 올해는 업로드된
+    마지막 날짜까지의 실적으로 비교된다(올해 미래 날짜엔 데이터가 없으므로 자연히 0/빈칸)."""
+    return pd.Timestamp(pd.Timestamp(d).year, 12, 31).date()
+
+
+def beyond_upload_note(e, dmax, yoy=True):
+    """종료일이 최신 업로드일보다 뒤일 때 한 줄 안내(항목38). yoy=False면 전년 비교 문구 생략."""
+    e, dm = pd.Timestamp(e), pd.Timestamp(dmax)
+    if e <= dm:
+        return
+    msg = (f"📌 종료일({e.date()})이 최신 업로드일({dm.date()})보다 뒤예요 — **올해는 {dm.date()}까지 업로드된 실적**")
+    if yoy:
+        msg += ", **전년은 선택한 기간 전체**로 비교해요."
+    else:
+        msg += "만 집계돼요."
+    st.caption(msg)
+
+
 def date_range_input(label, value, min_value=None, max_value=None, key=None, hint="", cols=None):
     """공통 기간 입력 (항목32 · 261006, 중태님 요청) — **시작일·종료일을 각각 별도 칸으로** 받는다.
 
@@ -1567,7 +1587,7 @@ def render_flagship(df):
             cy = st.selectbox("기준연도", years, index=0, key="fs_y")
         cur_all = d[d["_판매일"].dt.year == cy]
         dmin, dmax = cur_all["_판매일"].min().date(), cur_all["_판매일"].max().date()
-        rng = date_range_input("기준기간", (dmin, dmax), min_value=_all_min, max_value=_all_max,
+        rng = date_range_input("기준기간", (dmin, dmax), min_value=_all_min, max_value=year_end_of(_all_max),
                                key="fs_rng", hint=f"전년 {cy-1} 동기간 자동", cols=(f2a, f2b))
         # ── 항목30(261006): '당월누계' 블록의 시작일 직접 지정 (주간현황 항목29와 같은 규칙) ──
         # · 기본값 = 기준기간 끝날짜가 속한 달의 1일(= 지금까지의 당월누계). 손대지 않으면 끝날짜를
@@ -1594,7 +1614,7 @@ def render_flagship(df):
         st.session_state["_fs_ms_auto"] = _ms_def
         with f3:
             st.date_input("당월누계 시작일 (기본: 종료일이 속한 달 1일 · 수정 가능)",
-                          min_value=_all_min, max_value=_all_max, key="fs_ms")
+                          min_value=_all_min, max_value=year_end_of(_all_max), key="fs_ms")
         # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 · 빈칸=전체
         fb1, fb2, fb3 = st.columns(3)
         brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
@@ -1624,6 +1644,7 @@ def render_flagship(df):
         st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
         return
     s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    beyond_upload_note(e, _all_max)   # 항목38
     base = d.copy()
     if selb and "브랜드명" in base:
         base = base[base["브랜드명"].isin(selb)]
@@ -2855,7 +2876,7 @@ def render_channel_brand(df):
     st.caption("올해 vs 전년 '동기간'(같은 날짜범위) 비교 · 금액 백만원 · 판가율=실판가÷최초가(가중) · 기본기간=최근 1주")
     # ── 조건 폼 (2026-08-06): 조건 변경 중엔 계산 안 함, 🔍 조회 때 1번만 ──
     with st.form("cb_form"):
-        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=year_end_of(dmax),
                                key="cb_rng", hint="기본: 최근 1주")
         # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 → 매장 담당 · 빈칸=전체
         cb1, cb2, cb3, cb4 = st.columns(4)
@@ -2900,6 +2921,7 @@ def render_channel_brand(df):
         st.info("기간(시작~끝)을 선택하세요.")
         return
     s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    beyond_upload_note(e, dmax)   # 항목38
     cy_cb = int(e.year)   # 2026-08-07 버그수정: 표 연도 라벨을 조회기간 종료일 기준으로 동적 계산
     base = d
     if selb and "브랜드명" in base.columns:
@@ -2990,7 +3012,8 @@ def render_channel_brand(df):
     _render_store_best(cur, cur_y, s, e, y_start)
 
     # ── 260831(중태님 요청): C. 채널별 추세 분석(구 B) — 261006 재번호, 브랜드별은 D ──
-    _render_channel_trend(base, e, chan_mgr)
+    # 항목38: 추세 분석의 주/월 구간은 실제 데이터가 있는 마지막 날짜까지만(미래 빈 구간이 0으로 잡혀 추세가 꺾이지 않게)
+    _render_channel_trend(base, min(e, pd.Timestamp(dmax)), chan_mgr)
 
     st.markdown("### D. 브랜드별")
     perf_table(cur, prev, "브랜드명", None, "브랜드별 매출현황", "cb_br", cy=cy_cb)
@@ -3569,7 +3592,7 @@ def render_category_mix(df):
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
     # 항목36(261011): 종료일을 올해 마지막 날(12/31)까지 고를 수 있게 — 전년은 그 기간 전체(예: 1년 토탈),
     # 올해는 업로드된 마지막 날짜까지만 실적이 잡힌다.
-    _year_end = pd.Timestamp(dmax.year, 12, 31).date()
+    _year_end = year_end_of(dmax)
     with st.form("cm_form"):
         rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=_year_end,
                                key="cm_rng", hint=f"기본: 최근 1주 · {dmax.year}-12-31까지 선택 가능")
@@ -5292,7 +5315,7 @@ def render_weekly_report(df):
     # · 화면 배치는 시작일(왼쪽)·종료일(오른쪽)이지만, 시작일 기본값이 종료일에 달려 있어 종료일
     #   위젯을 먼저 만든다. 시작일 값은 매 실행 세션에 직접 넣어준 뒤 위젯을 만든다(value 인자 미사용).
     dc1, dc2 = st.columns(2)
-    asof = dc2.date_input("조회 종료일 (조회기간·누계의 끝 날짜)", value=dmax, min_value=dmin, max_value=dmax,
+    asof = dc2.date_input("조회 종료일 (조회기간·누계의 끝 날짜)", value=dmax, min_value=dmin, max_value=year_end_of(dmax),
                           key="wk_asof")
     _s_def = max(asof.replace(day=1), dmin)          # 기본 시작일(종료일이 속한 달 1일, 데이터 시작일 이전이면 보정)
     _s_cur = st.session_state.get("wk_start")
@@ -5311,10 +5334,11 @@ def render_weekly_report(df):
     def _wk_start_touched():
         st.session_state["_wk_start_edited"] = True
 
-    dc1.date_input("조회 시작일 (기본: 종료일이 속한 달의 1일 · 수정 가능)", min_value=dmin, max_value=dmax,
+    dc1.date_input("조회 시작일 (기본: 종료일이 속한 달의 1일 · 수정 가능)", min_value=dmin, max_value=year_end_of(dmax),
                    key="wk_start", on_change=_wk_start_touched)
     if _s_reset_note:
         st.caption("⚠️ 시작일이 종료일보다 늦어서, 시작일을 종료일이 속한 달의 1일로 되돌렸어요.")
+    beyond_upload_note(asof, dmax)   # 항목38
     asof = pd.to_datetime(asof)
     m_start = pd.to_datetime(_s_val)
     mon_label = _wk_mon_label(m_start, asof)          # "당월 실적" 또는 (복수의 달이면) "조회기간"
@@ -5484,14 +5508,19 @@ def _dl_day_label(ts, multi_year):
             else f"{ts.month}월 {ts.day}일")
 
 
-def _dl_build(fd, start, end, basis):
-    """일별 표 원값(D, 숫자) 생성 — 행: '기간 합계' + 조회기간의 모든 날짜(매출 0인 날 포함)."""
+def _dl_build(fd, start, end, basis, last_day=None):
+    """일별 표 원값(D, 숫자) 생성 — 행: '기간 합계' + 조회기간의 모든 날짜(매출 0인 날 포함).
+    last_day(항목38): 최신 업로드일. 그 뒤 날짜의 올해 값·누계는 NaN(=아직 데이터 없음, 화면 빈칸)."""
     days = pd.date_range(start, end, freq="D")
     pdays = [_dl_prev_date(t, basis) for t in days]
     daily = fd.groupby(fd["_판매일"].dt.normalize())["_매출액"].sum()
     cur = np.array([float(daily.get(t, 0.0)) for t in days])
     prv = np.array([float(daily.get(p, 0.0)) for p in pdays])
     ccum, pcum = cur.cumsum(), prv.cumsum()
+    if last_day is not None:
+        fut = np.array([t > pd.Timestamp(last_day) for t in days])
+        cur = np.where(fut, np.nan, cur)
+        ccum = np.where(fut, np.nan, ccum)
     n = np.arange(1, len(days) + 1)
     return days, pdays, cur, prv, ccum, pcum, n
 
@@ -5555,7 +5584,7 @@ def render_daily_trend(df):
     # 종료일 기본 = 최신 적재일. 시작일 기본 = 종료일이 속한 달의 1일 — 손대지 않으면 종료일을 바꿀 때
     # 그 달 1일로 따라가고, 직접 고치면 유지(다시 그 달 1일로 맞추면 자동 따라가기 복귀).
     dc1, dc2 = st.columns(2)
-    asof = dc2.date_input("조회 종료일", value=dmax, min_value=dmin, max_value=dmax, key="dl_asof")
+    asof = dc2.date_input("조회 종료일", value=dmax, min_value=dmin, max_value=year_end_of(dmax), key="dl_asof")
     _s_def = max(asof.replace(day=1), dmin)
     _s_cur = st.session_state.get("dl_start")
     _s_edited = st.session_state.pop("_dl_start_edited", False)
@@ -5573,7 +5602,7 @@ def render_daily_trend(df):
     def _dl_start_touched():
         st.session_state["_dl_start_edited"] = True
 
-    dc1.date_input("조회 시작일 (기본: 종료일이 속한 달의 1일 · 수정 가능)", min_value=dmin, max_value=dmax,
+    dc1.date_input("조회 시작일 (기본: 종료일이 속한 달의 1일 · 수정 가능)", min_value=dmin, max_value=year_end_of(dmax),
                    key="dl_start", on_change=_dl_start_touched)
     if _s_reset_note:
         st.caption("⚠️ 시작일이 종료일보다 늦어서, 시작일을 종료일이 속한 달의 1일로 되돌렸어요.")
@@ -5603,7 +5632,8 @@ def render_daily_trend(df):
     if sels:
         fd = fd[fd["시즌명"].isin(sels)]
 
-    days, pdays, cur, prv, ccum, pcum, n = _dl_build(fd, start, end, basis)
+    days, pdays, cur, prv, ccum, pcum, n = _dl_build(fd, start, end, basis, last_day=dmax)
+    beyond_upload_note(end, dmax)   # 항목38
     multi_year = start.year != end.year
     if multi_year:
         ly, lc = "전년", "금년"
@@ -5616,14 +5646,18 @@ def render_daily_trend(df):
             (DL_DAILY, ly), (DL_DAILY, lc), (DL_DAILY, "증감율"),
             (cum_label, ly), (cum_label, lc), (cum_label, "증감율"),
             (DL_AVG, ly), (DL_AVG, lc), (DL_AVG, "증감율")]
-    tot_c, tot_p, N = float(ccum[-1]), float(pcum[-1]), int(n[-1])
+    tot_p, N = float(pcum[-1]), int(n[-1])
+    # 항목38: 올해는 업로드된 날까지만 — 합계·일평균의 올해 분모는 실제 데이터가 있는 일수
+    _ok = ~np.isnan(ccum)
+    tot_c = float(ccum[_ok][-1]) if _ok.any() else 0.0
+    N_c = int(_ok.sum())
     rows, idx = [], []
     # 첫 행 = 기간 합계(룰6 노란 강조 — G.TOTAL 자리)
     rows.append([f"{pdays[0].month}/{pdays[0].day}~{pdays[-1].month}/{pdays[-1].day}"
-                 if basis == DL_BASIS_DOW else "", f"{N}일",
+                 if basis == DL_BASIS_DOW else "", (f"{N}일" if N_c == N else f"{N_c}/{N}일"),
                  tot_p, tot_c, _dl_rate(tot_c, tot_p),
                  tot_p, tot_c, _dl_rate(tot_c, tot_p),
-                 tot_p / N, tot_c / N, _dl_rate(tot_c, tot_p)])
+                 tot_p / N, (tot_c / N_c if N_c else 0.0), _dl_rate(tot_c / N_c if N_c else 0.0, tot_p / N)])
     idx.append("기간 합계")
     for i, t in enumerate(days):
         p = pdays[i]
@@ -5642,9 +5676,9 @@ def render_daily_trend(df):
         if c[0] == W:
             continue
         if c[1] == "증감율":
-            disp[c] = ["–" if (v is None or pd.isna(v)) else f"{v*100:+.1f}%" for v in D[c]]
-        else:
-            disp[c] = [f"{v/1e6:,.1f}" if v else "–" for v in D[c]]   # 룰1: 백만원 · 소수1자리
+            disp[c] = ["–" if v is None else ("" if pd.isna(v) else f"{v*100:+.1f}%") for v in D[c]]
+        else:   # 룰1: 백만원 · 소수1자리 / 항목38: NaN(업로드 이후 날짜의 올해 값) = 빈칸
+            disp[c] = ["" if (v is not None and pd.isna(v)) else (f"{v/1e6:,.1f}" if v else "–") for v in D[c]]
 
     def _color(col):
         return ["color:#c62828;font-weight:600" if (v is not None and pd.notnull(v) and v < 0)
@@ -5745,7 +5779,7 @@ def _ms_close_month(asof):
     return asof.month if (asof + pd.Timedelta(days=1)).month != asof.month else asof.month - 1
 
 
-def _ms_compute(d, asof, rows):
+def _ms_compute(d, asof, rows, last_day=None):
     """행별 {cy: {열: 값}, py: {열: 값}} — 열 = 연간 토탈 · 당월누계 · 1~12월."""
     cy, py = asof.year, asof.year - 1
     asof_p = asof - pd.DateOffset(years=1)
@@ -5778,7 +5812,9 @@ def _ms_compute(d, asof, rows):
         for mth in range(1, 13):
             lab = f"{mth}월"
             p[lab] = float(ym.get((py, mth), 0.0))
-            if mth <= _ms_close_month(asof):
+            if last_day is not None and pd.Timestamp(cy, mth, 1) > pd.Timestamp(last_day):
+                c[lab], r[lab] = None, None              # 항목38: 업로드일 이후의 달 = 아직 데이터 없음(빈칸)
+            elif mth <= _ms_close_month(asof):
                 c[lab] = float(ym.get((cy, mth), 0.0))
                 r[lab] = _dl_rate(c[lab], p[lab])
             elif mth == asof.month:
@@ -5977,12 +6013,13 @@ def render_monthly_status(df):
     if vat == "VAT-":
         d["_매출액"] = d["_매출액"] / 1.1
     _note = _NOTE_FLOAT.replace("VAT+", vat)
-    asof = c1.date_input("기준일 (연간 토탈의 끝 날짜 · 당월누계는 직전 월마감까지)", value=dmax, min_value=dmin, max_value=dmax,
+    asof = c1.date_input("기준일 (연간 토탈의 끝 날짜 · 당월누계는 직전 월마감까지)", value=dmax, min_value=dmin, max_value=year_end_of(dmax),
                          key="ms_asof")
     asof = pd.to_datetime(asof)
     cy, py = asof.year, asof.year - 1
+    beyond_upload_note(asof, dmax)   # 항목38
     rows = _ms_rows()
-    res = _ms_compute(d, asof, rows)
+    res = _ms_compute(d, asof, rows, last_day=dmax)
     top, sign, bot = _ms_tables(res, rows, cy, py)
 
     _k = _ms_close_month(asof)
@@ -8107,7 +8144,7 @@ def render_trend_weekly(df):
         smooth_tag = _trend_smooth_tag(smooth_key)
 
         default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=TREND_MAX_DAYS - 7), pd.to_datetime(dmin)).date()
-        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=year_end_of(dmax),
                                key="tr_rng", hint=f"최대 1년 · 기본 = 최근 {TREND_MAX_WEEKS}주")
 
         o0, o1, o2, o3, o4 = st.columns([1.05, 0.95, 0.95, 1.5, 0.95])
@@ -8910,7 +8947,7 @@ def render_return_rate(df):
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=89), pd.to_datetime(dmin)).date()
     # ── 조건 폼 (2026-08-06): 조건 변경 중엔 계산 안 함, 🔍 조회 때 1번만 ──
     with st.form("rr_form"):
-        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=year_end_of(dmax),
                                key="rr_rng", hint="기본: 최근 90일")
         # 공통 필터 (빈칸=전체) — 브랜드 · 시즌 · 중카테고리(아이템그룹)
         f1, f2, f3 = st.columns(3)
@@ -8933,6 +8970,7 @@ def render_return_rate(df):
     if e < s:
         st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
         return
+    beyond_upload_note(e, dmax, yoy=False)   # 항목38
 
     # 카테고리 파생(중카테고리는 load_db가 이미 만들어 둔 '아이템그룹' 그대로 사용, 소카테고리는
     # 추세분석과 동일한 아이템 마스터 기준 맵(_trend_cat_maps)을 그대로 재사용 — 단일 소스 유지)
@@ -9271,7 +9309,7 @@ def render_suitset(df):
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
     # ── 조건 폼 (2026-08-06): 조건 변경 중엔 계산 안 함, 🔍 조회 때 1번만 ──
     with st.form("ss_form"):
-        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=year_end_of(dmax),
                                key="ss_rng", hint="기본: 최근 7일")
         # 공통룰10: 브랜드·시즌 필터(빈칸=전체). 디자인키에 브랜드·시즌이 이미 포함되므로 매칭 조건과
         # 충돌 없이 미리 좁혀도 안전 — 세트를 이루는 자켓·하의는 항상 브랜드·시즌이 같기 때문.
@@ -9292,6 +9330,7 @@ def render_suitset(df):
     if e < s:
         st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
         return
+    beyond_upload_note(e, dmax, yoy=False)   # 항목38
 
     lb_start = s - pd.Timedelta(days=_SUITSET_LOOKBACK_DAYS)
     uni = d[(d["_판매일"] >= lb_start) & (d["_판매일"] <= e)].copy()
