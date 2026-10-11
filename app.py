@@ -3037,6 +3037,11 @@ def render_channel_brand(df):
 # ==============================================================================
 _CATMIX_SD065 = "SD065"
 _CATMIX_FLOOR = 1_000_000    # 원 단위 — 기간 합계매출 이 미만인 매장은 목록에서 제외(총계엔 포함)
+# 항목36(261011, 중태님): 비교 기준 선택 — 판매금액(기존) / 판매수량(신규).
+#   합계 열 이름: 금액 = "합계(백만)" / 수량 = "합계(수량)". 표시 대상 매장(100만원 이상)은
+#   두 기준 모두 **판매금액**으로 거른다 → 기준을 바꿔도 같은 매장 목록이 나온다(순위·정렬은 선택 기준).
+CATMIX_METRICS = ["판매금액", "판매수량"]
+_CATMIX_TOT_COLS = ("합계(백만)", "합계(수량)")
 _CATMIX_GREEN = "background-color:#c8e6c9;font-weight:600"   # ② 아이템별 매출 top5
 _CATMIX_RED = "background-color:#ffcdd2;font-weight:600"     # ③ 복종 비중 상위5
 _CATMIX_BLUE = "background-color:#bbdefb;font-weight:600"    # ③ 복종 비중 하위5
@@ -3214,7 +3219,8 @@ def _catmix_yoy_style(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_cols, 
                 out.append("color:#c62828;font-weight:700")
         return out
 
-    for col in ["합계(백만)"] + amt_cols + pct_cols:
+    _tot = [c for c in _CATMIX_TOT_COLS if c in disp2.columns]   # 항목36: 금액/수량 기준 공용
+    for col in _tot + amt_cols + pct_cols:
         sty = sty.apply(lambda s, c=col: _delta_color(c), subset=pd.IndexSlice[:, [col]])
     if gt_labels:
         sty = sty.set_properties(subset=pd.IndexSlice[gt_labels, :],
@@ -3260,7 +3266,7 @@ def _catmix_yoy_excel_bytes(disp2, sign2, gt_labels, sd_labels, mgr_labels, amt_
         sd_fill = PatternFill("solid", fgColor="FFE0B2")
         mgr_fill = PatternFill("solid", fgColor="D6F0FA")
         gt_set, sd_set, mgr_set = set(gt_labels or []), set(sd_labels or []), set(mgr_labels or [])
-        delta_cols = set(["합계(백만)"] + amt_cols + pct_cols)
+        delta_cols = set([c for c in _CATMIX_TOT_COLS if c in disp2.columns] + amt_cols + pct_cols)
         pct_set = set(pct_cols)
         bcols = {n_idx + (n_meta + 2 * i) + 1 for i in range(len(amt_cols))}
 
@@ -3561,10 +3567,14 @@ def render_category_mix(df):
 
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
     default_start = max(pd.to_datetime(dmax) - pd.Timedelta(days=6), pd.to_datetime(dmin)).date()
+    # 항목36(261011): 종료일을 올해 마지막 날(12/31)까지 고를 수 있게 — 전년은 그 기간 전체(예: 1년 토탈),
+    # 올해는 업로드된 마지막 날짜까지만 실적이 잡힌다.
+    _year_end = pd.Timestamp(dmax.year, 12, 31).date()
     with st.form("cm_form"):
-        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=dmax,
-                               key="cm_rng", hint="기본: 최근 1주")
-        cm0, cm1, cm2, cm3, cm4 = st.columns([1.1, 1, 1, 1, 1])
+        rng = date_range_input("조회기간", (default_start, dmax), min_value=dmin, max_value=_year_end,
+                               key="cm_rng", hint=f"기본: 최근 1주 · {dmax.year}-12-31까지 선택 가능")
+        cmx, cm0, cm1, cm2, cm3, cm4 = st.columns([0.9, 1.1, 1, 1, 1, 1])
+        metric = cmx.radio("비교 기준", CATMIX_METRICS, horizontal=True, key="cm_metric")
         level = cm0.radio("카테고리 기준", CATMIX_CAT_LEVELS, horizontal=True, key="cm_level")
         # [수정7] 담당별 필터 추가 — 공통룰10(브랜드/연차/시즌) 4번째 필터, 빈칸=전체
         brands = sorted(d["브랜드명"].dropna().unique()) if "브랜드명" in d.columns else []
@@ -3586,6 +3596,20 @@ def render_category_mix(df):
     if e < s:
         st.error("종료일이 시작일보다 앞서요. 기간을 다시 선택해 주세요.")
         return
+    # 항목36: 기준별 값 컬럼·단위·표기
+    _qty = (metric == "판매수량")
+    VAL = "_수량" if _qty else "_매출액"
+    if _qty and "_수량" not in d.columns:
+        st.info("판매수량 컬럼이 없어 수량 기준으로 볼 수 없어요.")
+        return
+    DIV = 1.0 if _qty else 1e6
+    TOT = "합계(수량)" if _qty else "합계(백만)"
+    _vfmt = (lambda v: f"{v:,.0f}") if _qty else (lambda v: f"{v:,.1f}")
+    _note = (_NOTE_FLOAT.replace("금액: 백만원 / VAT+", "수량: 개") if _qty else _NOTE_FLOAT)
+    _e_cur = min(e, pd.to_datetime(dmax))       # 올해 실적이 실제로 잡히는 끝 날짜
+    if e > pd.to_datetime(dmax):
+        st.caption(f"📌 종료일({e.date()})이 최신 업로드일({dmax})보다 뒤예요 — **올해는 {dmax}까지 업로드된 실적**, "
+                   f"**전년은 {(s - pd.DateOffset(years=1)).date()} → {(e - pd.DateOffset(years=1)).date()} 전체**로 비교해요.")
 
     base = d[(d["_판매일"] >= s) & (d["_판매일"] <= e)]
     if selb and "브랜드명" in base.columns:
@@ -3603,8 +3627,10 @@ def render_category_mix(df):
     cat_map = get_itemgroup_map() if level == "중카테고리" else get_itemgroup_map_small()
     base = base.assign(_복종=base["아이템"].astype(str).str.strip().str.upper().map(cat_map).fillna("기타"))
 
-    store_tot = base.groupby(["매장코드", "매장명"])["_매출액"].sum().rename("합계").reset_index()
-    shown = store_tot[store_tot["합계"] >= _CATMIX_FLOOR].copy()
+    store_tot = base.groupby(["매장코드", "매장명"])[VAL].sum().rename("합계").reset_index()
+    # 표시 매장 = 판매금액 100만원 이상(항목36: 수량 기준이어도 같은 매장 목록)
+    _amt_by_store = base.groupby("매장코드")["_매출액"].sum()
+    shown = store_tot[store_tot["매장코드"].map(_amt_by_store).fillna(0.0) >= _CATMIX_FLOOR].copy()
     hidden_n = len(store_tot) - len(shown)
     if shown.empty:
         st.info("기간 합계매출 100만원 이상인 매장이 없어요.")
@@ -3619,18 +3645,18 @@ def render_category_mix(df):
         shown["_담당자"].notna() & shown["_담당자"].astype(str).str.strip().ne("")
         & ~shown["_담당자"].astype(str).str.lower().isin(["nan", "none"]), None)
 
-    piv = base.pivot_table(index="매장코드", columns="_복종", values="_매출액", aggfunc="sum", fill_value=0.0)
+    piv = base.pivot_table(index="매장코드", columns="_복종", values=VAL, aggfunc="sum", fill_value=0.0)
     cats = piv.sum(axis=0).sort_values(ascending=False).index.tolist()
     piv = piv.reindex(columns=cats, fill_value=0.0)
     amt_cols = list(cats)              # 수정1: "{복종} 금액(백만)" → "{복종}"으로 간결화
     pct_cols = [f"{c} %" for c in cats]
-    n_meta = 3    # 매장코드·합계(백만)·순위 — 복종 구분선(수정3) 위치 계산용
+    n_meta = 3    # 매장코드·합계(백만|수량)·순위 — 복종 구분선(수정3) 위치 계산용
 
     def _row(cat_amt, total, code_disp, rank_val):
-        out = {"매장코드": code_disp, "합계(백만)": total / 1e6, "순위": rank_val}
+        out = {"매장코드": code_disp, TOT: total / DIV, "순위": rank_val}
         for c in cats:
             a = float(cat_amt.get(c, 0.0))
-            out[c] = a / 1e6
+            out[c] = a / DIV
             out[f"{c} %"] = (a / total * 100) if total else 0.0
         return out
 
@@ -3692,26 +3718,30 @@ def render_category_mix(df):
     sd_label = sd_row.iloc[0]["매장명"] if not sd_row.empty else None
 
     disp = num.copy()
-    disp["합계(백만)"] = num["합계(백만)"].map(lambda v: f"{v:,.1f}")
+    disp[TOT] = num[TOT].map(_vfmt)
     disp["순위"] = num["순위"].map(lambda v: "–" if pd.isna(v) else f"{int(v)}")
     for c in amt_cols:
-        disp[c] = num[c].map(lambda v: f"{v:,.1f}")
+        disp[c] = num[c].map(_vfmt)
     for c in pct_cols:
         disp[c] = num[c].map(lambda v: f"{v:.1f}%")
 
     h1, h2, h2g = st.columns([3.4, 1, 1])
-    h1.markdown(f"### 매장별 복종({level}) 판매비중{_NOTE_FLOAT}", unsafe_allow_html=True)
+    h1.markdown(f"### 매장별 복종({level}) 판매비중 · {metric} 기준{_note}", unsafe_allow_html=True)
     h2.download_button("⬇ 엑셀", _catmix_excel_bytes(disp, sd_label, amt_cols, pct_cols, num,
-                                                       sheet=f"복종별판매비중_{level}",
+                                                       sheet=f"복종별판매비중_{level}_{metric}",
                                                        mgr_labels=mgr_labels, n_meta=n_meta),
-                       file_name=f"복종별판매비중_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
+                       file_name=f"복종별판매비중_{level}_{metric}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
                        key="cm_dl", use_container_width=True)
     # [수정8, 2026-08-09] 매장별 가이드(시트3 v2 이관) — 표1과 같은 조회조건(shown/piv/store_tot)을
     # 그대로 재사용해 강점/약점·전사평균·비교매장·기회금액·코칭멘트를 엑셀로 내려받음(화면 표는 없음).
-    h2g.download_button("⬇ 매장별 가이드", _catmix_guide_excel_bytes(shown, piv, store_tot, cats,
-                                                                     sheet=f"매장별가이드_{level}"),
-                       file_name=f"매장별가이드_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
-                       key="cm_guide_dl", use_container_width=True)
+    # 항목36: 가이드는 '기회금액' 등 금액 전용 지표라 판매금액 기준일 때만 제공.
+    if not _qty:
+        h2g.download_button("⬇ 매장별 가이드", _catmix_guide_excel_bytes(shown, piv, store_tot, cats,
+                                                                         sheet=f"매장별가이드_{level}"),
+                           file_name=f"매장별가이드_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
+                           key="cm_guide_dl", use_container_width=True)
+    else:
+        h2g.caption("매장별 가이드는 판매금액 기준에서 내려받을 수 있어요.")
     sty = _catmix_style(disp, num, sd_label, amt_cols, pct_cols, mgr_labels=mgr_labels, n_meta=n_meta)
     render_styled_table(sty)
     _mgr_note = (f" · 하늘색 = 매장담당별 합계 {len(mgr_sum_tot)}명"
@@ -3741,20 +3771,21 @@ def render_category_mix(df):
     py2, cy2 = (cy - 1) % 100, cy % 100
 
     h3, h4 = st.columns([4, 1])
-    h3.markdown(f"### 담당별 전년대비 복종 비중 변화 (전년 동기간 비교){_NOTE_FLOAT}", unsafe_allow_html=True)
+    h3.markdown(f"### 담당별 전년대비 복종 비중 변화 (전년 동기간 비교 · {metric} 기준){_note}", unsafe_allow_html=True)
     if prev_base.empty:
         st.info(f"전년 동기간({ps.date()}~{pe.date()}) 매출 데이터가 없어서 전년대비 비교표를 만들 수 없어요.")
         return
 
     prev_base = prev_base.assign(
         _복종=prev_base["아이템"].astype(str).str.strip().str.upper().map(cat_map).fillna("기타"))
-    store_tot_prev = prev_base.groupby(["매장코드", "매장명"])["_매출액"].sum().rename("합계").reset_index()
+    store_tot_prev = prev_base.groupby(["매장코드", "매장명"])[VAL].sum().rename("합계").reset_index()
     prev_total_map = dict(zip(store_tot_prev["매장코드"], store_tot_prev["합계"]))
-    shown_prev = store_tot_prev[store_tot_prev["합계"] >= _CATMIX_FLOOR].copy()
+    _amt_prev = prev_base.groupby("매장코드")["_매출액"].sum()     # 항목36: 표시 기준은 항상 판매금액
+    shown_prev = store_tot_prev[store_tot_prev["매장코드"].map(_amt_prev).fillna(0.0) >= _CATMIX_FLOOR].copy()
     shown_prev = shown_prev.sort_values("합계", ascending=False).reset_index(drop=True)
     shown_prev["순위"] = shown_prev.index + 1
     prev_rank_map = dict(zip(shown_prev["매장코드"], shown_prev["순위"]))
-    piv_prev = prev_base.pivot_table(index="매장코드", columns="_복종", values="_매출액",
+    piv_prev = prev_base.pivot_table(index="매장코드", columns="_복종", values=VAL,
                                       aggfunc="sum", fill_value=0.0).reindex(columns=cats, fill_value=0.0)
 
     # 전년 데이터도 표1과 동일한 _row() 헬퍼로 조립 — 컬럼 순서·계산 방식(총액 0이면 %도 0) 일치 보장
@@ -3780,27 +3811,28 @@ def render_category_mix(df):
     prev_num.index.name = "매장명"
 
     def _fmt_row2(r):
-        out = {"매장코드": r["매장코드"], "합계(백만)": f"{r['합계(백만)']:,.1f}",
+        out = {"매장코드": r["매장코드"], TOT: _vfmt(r[TOT]),
                "순위": "–" if pd.isna(r["순위"]) else f"{int(r['순위'])}"}
         for c in cats:
-            out[c] = f"{r[c]:,.1f}"
+            out[c] = _vfmt(r[c])
             out[f"{c} %"] = f"{r[f'{c} %']:.1f}%"
         return out
 
     def _yoy_amt(cv, pv):
         # 중태님 확인(2026-08-09): 증감액(절대값, 백만원)과 증감율(%) 둘 다 함께 표기.
         diff = cv - pv
+        _d = f"{diff:+,.0f}" if _qty else f"{diff:+,.1f}"     # 항목36: 수량은 정수
         if pv == 0:
-            return (f"{diff:+,.1f} (신규)" if diff else "–"), diff
-        return f"{diff:+,.1f} ({diff / pv * 100:+.1f}%)", diff
+            return (f"{_d} (신규)" if diff else "–"), diff
+        return f"{_d} ({diff / pv * 100:+.1f}%)", diff
 
     def _yoy_pct(cv, pv):
         diff = cv - pv
         return f"{diff:+.1f}%p", diff
 
     def _diff_row2(cur_r, prev_r):
-        out, sig = {"매장코드": "", "합계(백만)": None, "순위": "–"}, {}
-        out["합계(백만)"], sig["합계(백만)"] = _yoy_amt(cur_r["합계(백만)"], prev_r["합계(백만)"])
+        out, sig = {"매장코드": "", TOT: None, "순위": "–"}, {}
+        out[TOT], sig[TOT] = _yoy_amt(cur_r[TOT], prev_r[TOT])
         for c in cats:
             out[c], sig[c] = _yoy_amt(cur_r[c], prev_r[c])
             pc = f"{c} %"
@@ -3831,14 +3863,17 @@ def render_category_mix(df):
     h4.download_button(
         "⬇ 엑셀",
         _catmix_yoy_excel_bytes(disp2, sign2, gt_labels2, sd_labels2, mgr_labels2, amt_cols, pct_cols,
-                                 sheet=f"복종비중YoY_{level}", n_meta=n_meta),
-        file_name=f"담당별_전년대비_복종비중변화_{level}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
+                                 sheet=f"복종비중YoY_{level}_{metric}", n_meta=n_meta),
+        file_name=f"담당별_전년대비_복종비중변화_{level}_{metric}_{s.date()}_{e.date()}.xlsx", mime=XLSX_MIME,
         key="cm_yoy_dl", use_container_width=True)
     sty2 = _catmix_yoy_style(disp2, sign2, gt_labels2, sd_labels2, mgr_labels2, amt_cols, pct_cols,
                               n_meta=n_meta)
     render_styled_table(sty2)
-    st.caption(f"※ {py2}년={ps.date()}~{pe.date()}(전년 동기간) · {cy2}년={s.date()}~{e.date()}(조회기간, "
-               "위 표와 동일 대상) · ㄴ증감 행 — 합계·복종 금액 열: 증감액(백만) (증감율%), "
+    _cur_txt = (f"{s.date()} → {_e_cur.date()}(조회기간 중 업로드된 날짜까지" if e > _e_cur
+                else f"{s.date()} → {e.date()}(조회기간")
+    st.caption(f"※ {py2}년={ps.date()} → {pe.date()}(전년 동기간) · {cy2}년={_cur_txt}, "
+               "위 표와 동일 대상) · ㄴ증감 행 — 합계·복종 " + ("수량 열: 증감 수량" if _qty else "금액 열: 증감액(백만)")
+               + " (증감율%), "
                "% 열: %p 차이 · 초록=증가 빨강=감소 · 순위는 각 연도 자체 매출 100만원 이상 매장 "
                "모집단 안에서 따로 계산(연도별로 달라질 수 있어요, 전년에 없던 매장은 \"–\").")
 
