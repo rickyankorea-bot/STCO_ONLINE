@@ -1023,8 +1023,9 @@ MENU_TRND = "📉 추세분석"
 MENU_RTN  = "🔄 반품률 분석"
 MENU_SET  = "🧩 SET/단품 판매 분석"
 MENU_PRICE = "💰 최저가 관리"   # 260820 신설 — 외부몰 최저가 행사 원장·캘린더·최저가 체크·네이버 체크
+MENU_ADSIM = "🧮 자사몰 광고비 시뮬레이션"   # 항목39(261011) 신설 — 궁금한 것 4번째(매출 DB와 무관한 계산기)
 MENUS = [MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY, MENU_MONTHLY,
-         MENU_INV, MENU_TRND, MENU_RTN, MENU_SET, MENU_PRICE]
+         MENU_INV, MENU_TRND, MENU_RTN, MENU_SET, MENU_PRICE, MENU_ADSIM]
 
 # 사이드바 메뉴 3개 카테고리 구분 (2026-08-20, 중태님 확정 이미지 기준)
 #   대시보드는 최상단 단독 → 📁 Analysis / 📁 노가다 금지 / 📁 궁금한 것
@@ -1033,7 +1034,7 @@ MENU_GROUPS = [
     (None,        [MENU_DASH]),
     ("Analysis",  [MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY, MENU_MONTHLY]),
     ("노가다 금지", [MENU_INV, MENU_PRICE]),
-    ("궁금한 것",  [MENU_TRND, MENU_RTN, MENU_SET]),
+    ("궁금한 것",  [MENU_TRND, MENU_RTN, MENU_SET, MENU_ADSIM]),
 ]
 
 
@@ -10872,6 +10873,540 @@ def render_user_admin():
             st.rerun()
 
 
+# ==============================================================================
+# 🧮 자사몰 광고비 시뮬레이션 — '궁금한 것' 4번째 메뉴 (중태님 요청)
+#    항목39 (261011) 신설 · 항목39-2 (261011) 평균 원가율 슬라이더 + 순증 가정 추가
+# ==============================================================================
+# 질문: 자사몰 광고비 비중을 몇 %까지 올려도 되는가?
+#  · 자사몰 유통수수료 = 카드수수료(3%) + 광고비(14%) = 17% / 외부몰 평균 = 30% / 매출 비중 자사몰 40 : 외부몰 60
+#    / 평균 원가율 35~40%(매출 대비).
+#  · 단순 계산("30−17 = 13%p 더 써도 같다")은 틀리다 — 광고비 '비중'을 올리면 새로 생긴 매출뿐 아니라
+#    이미 나오던 자사몰 매출에도 오른 비중이 적용되기 때문(매출 증가와 무관한 광고비 증가).
+#  · 이익 = 자사몰매출 × (1 − 원가율 − 카드 − 광고비) + 외부몰매출 × (1 − 원가율 − 외부몰수수료)   ← 판정 기준(금액)
+#  · 자사몰 매출이 늘어나는 방식 2가지(lam):
+#      이동(lam=1): 외부몰에서 팔던 매출이 자사몰로 옮겨온다(총매출 그대로) → 늘어난 1원의 몫 v = 외부몰 − 카드
+#                   (어느 채널에서 팔든 원가는 같아서 원가율은 한도에 영향 없음 — 이익 금액·이익률만 달라진다)
+#      순증(lam=0): 외부몰 매출은 그대로, 자사몰 매출만 새로 는다(총매출 증가) → v = 1 − 원가율 − 카드
+#  · 광고비 한도(손익분기) = v − (v − 현재 광고비) ÷ (자사몰 매출 배수)
+#    증분 광고비율 = (목표 광고비액 − 현재 광고비액) ÷ (늘어난 자사몰 매출)  → v 이하면 유리
+#  · 매출 DB와 무관한 계산기라 매출 데이터가 없어도 열린다. 비율 인자는 전부 0~1 소수.
+_ADSIM_EPS = 1e-9
+ADSIM_MODE_SHIFT = "외부몰 → 자사몰 이동 (총매출 그대로)"
+ADSIM_MODE_GROW = "자사몰 순증 (외부몰 매출 그대로)"
+
+
+def adsim_fee_rate(s, a, c, f):
+    """전체 유통수수료율 — s=자사몰 매출비중, a=자사몰 광고비 비중, c=카드수수료, f=외부몰 수수료."""
+    return s * (c + a) + (1.0 - s) * f
+
+
+def adsim_unit_value(k, c, f, lam=1.0):
+    """늘어난 자사몰 매출 1원이 (광고비를 쓰기 전) 남기는 몫 v — k=원가율.
+    이동(lam=1): 외부몰 수수료 f가 줄고 카드 c가 생긴다 → f − c (원가율과 무관)
+    순증(lam=0): 원가 k와 카드 c를 뺀 나머지 → 1 − k − c"""
+    return (1.0 - k - c) - lam * (1.0 - k - f)
+
+
+def adsim_own_ratio(s1, s0, lam=1.0):
+    """자사몰 비중이 s0→s1이 될 때의 자사몰 매출 배수(목표 ÷ 현재). 만들 수 없는 비중이면 None
+    (예: 순증 가정에서는 외부몰 매출이 그대로라 비중 100%가 될 수 없다)."""
+    den = s0 * (1.0 - s1 * (1.0 - lam))
+    if s0 <= 0 or den <= _ADSIM_EPS:
+        return None
+    r = 1.0 + (s1 - s0) / den
+    return r if r > _ADSIM_EPS else None
+
+
+def adsim_share_from_ratio(r, s0, lam=1.0):
+    """자사몰 매출이 r배가 될 때의 자사몰 비중. 옮겨올 외부몰 매출이 모자라면 None."""
+    own = s0 * r
+    ext = (1.0 - s0) - lam * s0 * (r - 1.0)
+    if r <= 0 or ext < -_ADSIM_EPS:
+        return None
+    return own / (own + max(ext, 0.0))
+
+
+def adsim_breakeven_ad(s1, s0, a0, c, f, k=0.0, lam=1.0):
+    """자사몰 비중이 s0→s1로 바뀔 때, 이익 금액이 현재와 같아지는 광고비 비중(올릴 수 있는 최대치)."""
+    r = adsim_own_ratio(s1, s0, lam)
+    if r is None:
+        return None
+    v = adsim_unit_value(k, c, f, lam)
+    return v - (v - a0) / r
+
+
+def adsim_required_share(a1, s0, a0, c, f, k=0.0, lam=1.0):
+    """광고비 비중 a1을 쓸 때 이익이 현재와 같아지는 자사몰 비중(최소 필요 비중). 어떻게 해도 안 되면 None."""
+    v = adsim_unit_value(k, c, f, lam)
+    if v - a1 <= _ADSIM_EPS:
+        return None
+    return adsim_share_from_ratio((v - a0) / (v - a1), s0, lam)
+
+
+def _adsim_floor2(v):
+    """한도 표기는 반올림이 아니라 내림(소수 2자리) — '표시된 한도까지는 항상 유리'가 되게."""
+    return math.floor(v * 100.0 + 1e-6) / 100.0
+
+
+def _adsim_excel_bytes(disp, sheet, tags=None, first_row_total=True, hl_rows=None, tint=False):
+    """공용 styled_excel_bytes(룰13) 결과에 이 메뉴 전용 서식만 덧칠 — 유리(초록)/불리(빨강)·강조행·컬럼 폭.
+
+    tags = disp와 같은 모양의 DataFrame("g"=초록 / "r"=빨강 / ""=그대로).
+    hl_rows = 노란 강조할 행 번호(0부터) — 첫 행이 합계가 아닌 표(현재 vs 시나리오)용.
+    tint = True면 글자색에 더해 칸 배경도 연초록/연빨강(D 매트릭스 — 화면과 동일).
+    """
+    from openpyxl import load_workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    wb = load_workbook(io.BytesIO(styled_excel_bytes(disp, sheet, first_row_total=first_row_total)))
+    ws = wb.worksheets[0]
+    n_idx = disp.index.nlevels
+    r0 = ws.max_row - len(disp) + 1
+    yellow = PatternFill("solid", fgColor="FFF2B8")
+    fills = {"g": PatternFill("solid", fgColor="EAF6EE"), "r": PatternFill("solid", fgColor="FDECEA")}
+    fonts = {"g": "1F8A4C", "r": "C62828"}
+    for ri in range(len(disp)):
+        hl = bool(hl_rows) and ri in hl_rows
+        if hl:
+            for kk in range(1, n_idx + 1):
+                ws.cell(r0 + ri, kk).fill = yellow
+        for cj in range(len(disp.columns)):
+            cell = ws.cell(r0 + ri, n_idx + 1 + cj)
+            tag = tags.iat[ri, cj] if tags is not None else ""
+            if hl:
+                cell.fill = yellow
+                cell.font = Font(bold=True, color=fonts.get(tag, "111111"))
+            elif tag in fonts:
+                cell.font = Font(bold=True, color=fonts[tag])
+                if tint and not (ri == 0 and first_row_total):
+                    cell.fill = fills[tag]
+    # 한글 헤더가 길어서 공용 폭(10.5)으로는 잘림 → 글자 수 기준으로 넓힘
+    _w = lambda s: sum(2 if ord(ch) > 0x2E80 else 1 for ch in str(s)) + 3
+    ws.column_dimensions[get_column_letter(1)].width = max(
+        [14] + [_w(x) for x in disp.index] + [_w(disp.index.name or "")])
+    for cj, col in enumerate(disp.columns):
+        ws.column_dimensions[get_column_letter(n_idx + 1 + cj)].width = max(10.5, _w(col))
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+# '현재 vs 시나리오' 표 전용 CSS — 공용 룰6(첫 행 노란 강조)을 끄고, 맨 아래 이익·이익률 두 행(12·13번째)을 강조
+_ADSIM_CMP_CSS = """
+<style>
+div.erp-wrap table.erp-adsim-cmp tbody tr:first-child th{background:#fbfbfd !important;font-weight:600;}
+div.erp-wrap table.erp-adsim-cmp tbody tr:first-child td{background:#fff !important;font-weight:400;}
+div.erp-wrap table.erp-adsim-cmp tbody tr:nth-child(12) th, div.erp-wrap table.erp-adsim-cmp tbody tr:nth-child(12) td,
+div.erp-wrap table.erp-adsim-cmp tbody tr:nth-child(13) th, div.erp-wrap table.erp-adsim-cmp tbody tr:nth-child(13) td{
+    background:#fff4cc !important;font-weight:700;}
+</style>
+"""
+_ADSIM_G = "color:#1f8a4c;font-weight:600"
+_ADSIM_R = "color:#c62828;font-weight:600"
+
+
+def render_ad_sim():
+    """🧮 자사몰 광고비 시뮬레이션 — 자사몰·외부몰 매출 비중, 자사몰 광고비 비중, 평균 원가율을 바꿔 보며
+    이익(매출 − 원가 − 유통수수료)이 현재보다 좋아지는지/나빠지는지 본다."""
+    st.subheader("🧮 자사몰 광고비 시뮬레이션")
+    st.caption("자사몰 광고비 비중을 얼마까지 올려도 되는지 — 자사몰·외부몰 매출 비중, 광고비 비중, 원가율을 바꿔 가며 "
+               "이익(매출 − 원가 − 유통수수료)이 어떻게 달라지는지 봐요. (매출 데이터와 무관한 계산기예요)")
+
+    # ── ① 현재 조건 ──────────────────────────────────────────────────────────
+    st.markdown("##### ① 현재 조건")
+    i1, i2, i3, i4, i5 = st.columns(5)
+    tot = i1.number_input("기준 총매출 (백만원)", min_value=1.0, value=10000.0, step=100.0, format="%.0f",
+                          key="as_total", help="금액 환산용이에요. 비율(%) 결과는 총매출과 상관없이 같아요.")
+    s0p = i2.number_input("현재 자사몰 매출 비중 (%)", min_value=1.0, max_value=100.0, value=40.0, step=1.0,
+                          format="%.1f", key="as_s0", help="외부몰 비중 = 100 − 자사몰 비중")
+    a0p = i3.number_input("현재 자사몰 광고비 비중 (%)", min_value=0.0, max_value=50.0, value=14.0, step=0.5,
+                          format="%.1f", key="as_a0", help="자사몰 매출 대비 광고비")
+    ccp = i4.number_input("자사몰 카드수수료 (%)", min_value=0.0, max_value=50.0, value=3.0, step=0.1,
+                          format="%.1f", key="as_card")
+    fp = i5.number_input("외부몰 평균 수수료 (%)", min_value=0.0, max_value=100.0, value=30.0, step=0.5,
+                         format="%.1f", key="as_ext")
+    s0, a0, c, f = s0p / 100.0, a0p / 100.0, ccp / 100.0, fp / 100.0
+    dec = 0 if tot >= 1000 else 1        # 금액(백만원) 소수 자리
+
+    def _m(x):
+        x = round(float(x), dec)
+        return f"{(0.0 if x == 0 else x):,.{dec}f}"
+
+    def _ms(x):
+        x = round(float(x), dec)
+        return "0" if x == 0 else f"{x:+,.{dec}f}"
+
+    def _pc(x):                          # 40.0 → "40%", 37.5 → "37.5%"
+        return f"{float(x):.1f}".rstrip("0").rstrip(".") + "%"
+
+    cond_slot = st.container()           # 현재 조건 요약 — 아래 원가율·가정을 읽은 뒤 채운다
+
+    # ── ② 시나리오 ───────────────────────────────────────────────────────────
+    st.markdown("##### ② 시나리오 — 자사몰 매출 비중·광고비 비중·원가율을 바꿔 보세요")
+    mode = st.radio("자사몰 매출이 늘어나는 방식", [ADSIM_MODE_SHIFT, ADSIM_MODE_GROW], horizontal=True, key="as_mode",
+                    help="이동 = 외부몰에서 팔던 매출이 자사몰로 옮겨와요(총매출 그대로). "
+                         "순증 = 외부몰 매출은 그대로이고 자사몰 매출만 새로 늘어요(총매출 증가).")
+    grow = (mode == ADSIM_MODE_GROW)
+    lam = 0.0 if grow else 1.0
+    s1_max = 99 if grow else 100         # 순증에서는 외부몰 매출이 남아 있어 자사몰 비중 100%가 될 수 없다
+    if "as_s1" not in st.session_state:  # 첫 렌더: 세션값으로 초기화(위젯 value 인자와 충돌 경고 방지)
+        st.session_state["as_s1"] = int(min(s1_max, round(s0p) + 10))
+    if "as_a1" not in st.session_state:
+        st.session_state["as_a1"] = float(min(50.0, round(a0p * 2) / 2 + 2.0))
+    if "as_cost" not in st.session_state:
+        st.session_state["as_cost"] = 37.5
+    v1, v2, v3 = st.columns(3)
+    # ※ max_value를 가정에 따라 바꾸면 위젯이 새로 만들어져 값이 초기화된다 → 범위는 1~100 고정, 순증의 100은 99로 계산
+    s1p = v1.slider("목표 자사몰 매출 비중 (%)", min_value=1, max_value=100, step=1, key="as_s1",
+                    help="이동 가정: 총매출은 그대로, 외부몰 매출이 자사몰로 옮겨와요. "
+                         "순증 가정: 외부몰 매출은 그대로, 자사몰 매출이 이 비중이 될 때까지 늘어요.")
+    a1p = v2.slider("목표 자사몰 광고비 비중 (%)", min_value=0.0, max_value=50.0, step=0.5, format="%.1f",
+                    key="as_a1", help="올린 광고비 비중은 자사몰 매출 전체(기존 매출 포함)에 적용돼요.")
+    kp = v3.slider("평균 원가율 (%)", min_value=25.0, max_value=50.0, step=0.5, format="%.1f", key="as_cost",
+                   help="매출 대비 상품 원가예요. 자사몰·외부몰에 같은 원가율을 적용해요.")
+    _s1_capped = s1p > s1_max
+    s1p = min(s1p, s1_max)
+    s1, a1, k = s1p / 100.0, a1p / 100.0, kp / 100.0
+    v = adsim_unit_value(k, c, f, lam)   # 늘어난 자사몰 매출 1원의 몫(광고비 쓰기 전) = 증분 광고비율 한도
+    g0 = v - a0
+    _v_how = "100 − 원가 − 카드" if grow else "외부몰 − 카드"
+    O0, E0 = tot * s0, tot * (1.0 - s0)
+    own_m0, ext_m = 1.0 - k - c - a0, 1.0 - k - f           # 현재 채널별 이익률
+    P0 = O0 * own_m0 + E0 * ext_m
+    fee0 = adsim_fee_rate(s0, a0, c, f)
+    pr0 = P0 / tot
+
+    with cond_slot:
+        st.caption(f"현재 자사몰 유통수수료 **{(c + a0) * 100:.1f}%** (카드 {ccp:.1f} + 광고비 {a0p:.1f}) · "
+                   f"외부몰 **{fp:.1f}%** → 전체 유통수수료율 **{fee0 * 100:.2f}%** · 원가율 {kp:.1f}%를 빼면 이익률 "
+                   f"자사몰 **{own_m0 * 100:.1f}%** / 외부몰 **{ext_m * 100:.1f}%** / 전체 **{pr0 * 100:.2f}%** "
+                   f"(이익 {_m(P0)}백만원)")
+        if g0 <= _ADSIM_EPS and grow:
+            st.warning(f"현재 조건에서는 자사몰 매출 1원에서 원가·카드수수료·광고비를 빼면 남는 게 없어요"
+                       f"(100 − 원가 {kp:.1f} − 카드 {ccp:.1f} − 광고비 {a0p:.1f} = {own_m0 * 100:.1f}%) — "
+                       "광고비 비중을 낮추지 않는 한 자사몰 매출이 늘수록 불리한 구조예요.")
+        elif g0 <= _ADSIM_EPS:
+            st.warning(f"현재 조건에서는 자사몰 유통수수료(카드+광고비 {(c + a0) * 100:.1f}%)가 외부몰({fp:.1f}%)보다 "
+                       "높거나 같아요 — 광고비 비중을 낮추지 않는 한 자사몰 비중을 늘릴수록 불리한 구조예요.")
+        elif grow:
+            st.info(f"💡 순증 매출 1원에서 원가와 카드수수료를 빼면 **{v * 100:.1f}%**(100 − 원가 {kp:.1f} − 카드 {ccp:.1f})가 "
+                    f"남으니 광고비를 그만큼 써도 될 것 같지만, 그건 **추가로 생긴 매출에 추가로 쓴 광고비**에만 맞는 숫자예요. "
+                    f"광고비 비중을 올리면 이미 나오던 자사몰 매출에도 오른 비중이 적용돼서, 자사몰 매출이 2배가 되어도 "
+                    f"실제 한도는 **{_adsim_floor2((v - g0 / 2.0) * 100):.2f}%예요**.")
+        elif s0 < 1.0 - _ADSIM_EPS:
+            _be100 = adsim_breakeven_ad(1.0, s0, a0, c, f, k, lam)
+            st.info(f"💡 단순 계산으로는 광고비를 **{v * 100:.1f}%**(외부몰 {fp:.1f}% − 카드 {ccp:.1f}%)까지 써도 될 것 같지만, "
+                    f"그건 **추가로 생긴 매출에 추가로 쓴 광고비**에만 맞는 숫자예요. 광고비 비중을 올리면 이미 나오던 자사몰 "
+                    f"매출에도 오른 비중이 적용돼서, 자사몰 비중이 100%가 되더라도 실제 한도는 "
+                    f"**{_adsim_floor2(_be100 * 100):.2f}%예요**.")
+
+    if grow and s0p > 98.0:
+        st.warning("순증 가정은 외부몰 매출이 있어야 자사몰 비중으로 시나리오를 만들 수 있어요 — "
+                   "현재 자사몰 매출 비중을 98% 이하로 넣어 주세요.")
+        return
+
+    r1 = adsim_own_ratio(s1, s0, lam)                       # 자사몰 매출 배수
+    O1 = O0 * r1
+    E1 = max(E0 - lam * (O1 - O0), 0.0)
+    T1 = O1 + E1
+    ad0, ad1 = O0 * a0, O1 * a1
+    P1 = O1 * (1.0 - k - c - a1) + E1 * ext_m
+    fee1 = (O1 * (c + a1) + E1 * f) / T1
+    pr1 = P1 / T1
+    dP, dfee = P1 - P0, fee1 - fee0                         # 판정 기준 = 이익 금액 증감
+    verdict = "same" if abs(dP) <= 1e-9 * tot else ("good" if dP > 0 else "bad")
+    be1 = adsim_breakeven_ad(s1, s0, a0, c, f, k, lam)      # 이 비중에서 올릴 수 있는 최대 광고비
+    marg = ((ad1 - ad0) / (O1 - O0)) if (O1 - O0) > 1e-9 * tot else None   # 증분 광고비율
+
+    v1.caption(f"자사몰 {_pc(s0p)} → **{s1p}%** · 자사몰 매출 {_m(O0)} → **{_m(O1)}** · "
+               f"외부몰 매출 {_m(E0)} → **{_m(E1)}** · 총매출 {_m(tot)} → **{_m(T1)}**"
+               + (" · 순증 가정에서는 외부몰 매출이 남아 있어 100%가 될 수 없어서 99%로 계산했어요" if _s1_capped else ""))
+    v2.caption(f"광고비 {a0p:.1f}% → **{a1p:.1f}%** · 자사몰 유통수수료 {(c + a0) * 100:.1f}% → **{(c + a1) * 100:.1f}%**")
+    if grow:
+        v3.caption(f"순증 매출 1원의 몫 = 100 − 원가 {kp:.1f} − 카드 {ccp:.1f} = **{v * 100:.1f}%** · "
+                   "원가율이 낮을수록 광고비 한도가 올라가요")
+    else:
+        v3.caption("이동 가정에서는 원가율이 광고비 한도를 바꾸지 않아요(어느 채널에서 팔든 원가는 같아요) · "
+                   "이익 금액과 이익률만 달라져요")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("이익(백만)", _m(P1), f"{_ms(dP)} vs 현재 {_m(P0)}",
+              delta_color=("off" if verdict == "same" else "normal"))
+    k1.caption(f"이익률 {pr0 * 100:.2f}% → {pr1 * 100:.2f}% · 이익 = 매출 − 원가 − 유통수수료")
+    k2.metric("전체 유통수수료율", f"{fee1 * 100:.2f}%", f"{dfee * 100:+.2f}%p vs 현재 {fee0 * 100:.2f}%",
+              delta_color=("off" if (grow or abs(dfee) < 5e-5) else "inverse"))
+    k2.caption(f"유통수수료 {_m(tot * fee0)} → {_m(T1 * fee1)}백만원"
+               + (" · 순증에서는 이익 금액으로 판단해요" if grow else ""))
+    _has_be = be1 is not None and be1 >= 0
+    if _has_be:
+        _be_show = _adsim_floor2(be1 * 100)
+        k3.metric(f"자사몰 {s1p}%일 때 광고비 한도", f"{_be_show:.2f}%",
+                  f"{_be_show - a1p:+.2f}%p (목표 {a1p:.1f}% 대비 여유)")
+    else:
+        k3.metric(f"자사몰 {s1p}%일 때 광고비 한도", "불가")
+    k3.caption("이 비중에서 이익이 현재와 같아지는 광고비 — 여기까지는 올려도 돼요")
+    if marg is None:
+        k4.metric("증분 광고비율", "–")
+        k4.caption("자사몰 매출이 늘지 않는 시나리오예요")
+    else:
+        k4.metric("증분 광고비율", f"{marg * 100:.1f}%",
+                  f"{(v - marg) * 100:+.1f}%p (한도 {v * 100:.1f}% 대비 여유)")
+        if marg > _ADSIM_EPS and v > _ADSIM_EPS:
+            k4.caption(f"추가 광고비 ÷ 추가 자사몰 매출 · 증분 ROAS {100 / marg:,.0f}% "
+                       f"(기준 {100 / v:,.0f}% 이상이면 유리)")
+        else:
+            k4.caption("추가 광고비 ÷ 추가 자사몰 매출")
+
+    _d_own = round(O1 - O0, dec)
+    _grow_txt = ("" if (not grow or _d_own == 0) else
+                 f"(자사몰 매출 {_ms(O1 - O0)}백만원" + (" 순증)" if _d_own > 0 else ")"))
+    _chg = (f"자사몰 비중 {_pc(s0p)}→{s1p}%{_grow_txt}, 광고비 {a0p:.1f}%→{a1p:.1f}%면 이익이 "
+            f"{_m(P0)} → {_m(P1)}백만원으로")
+    _sub = (f"(이익률 {pr0 * 100:.2f}% → {pr1 * 100:.2f}%, 전체 유통수수료율 {fee0 * 100:.2f}% → {fee1 * 100:.2f}%)")
+    _lim_good = (f" 자사몰 비중 {s1p}%에서는 광고비를 **{_adsim_floor2(be1 * 100):.2f}%까지** 써도 현재보다 불리하지 않아요."
+                 if _has_be else "")
+    _lim_bad = (f" 자사몰 비중 {s1p}%에서 광고비 한도는 **{_adsim_floor2(be1 * 100):.2f}%예요**." if _has_be else "")
+    if verdict == "good":
+        st.success(f"✅ **현재보다 유리해요** — {_chg} **{_m(dP)}백만원 늘어요** {_sub}.{_lim_good}")
+    elif verdict == "bad":
+        if g0 <= _ADSIM_EPS:
+            _how = ""
+        else:
+            need = adsim_required_share(a1, s0, a0, c, f, k, lam)
+            if need is None and grow:
+                _how = (f" 광고비 {a1p:.1f}%는 순증 매출 1원의 몫({v * 100:.1f}%)보다 커서, 자사몰 매출이 아무리 늘어도 "
+                        "현재보다 불리해요.")
+            elif need is None:
+                _how = (f" 광고비 {a1p:.1f}%는 자사몰 비중을 100%까지 올려도 현재보다 불리해요"
+                        f"(100%일 때 한도 {_adsim_floor2(adsim_breakeven_ad(1.0, s0, a0, c, f, k, lam) * 100):.2f}%).")
+            else:
+                _need_up = (g0 / (v - a1) - 1.0) * 100
+                _up = f"(자사몰 매출 {_need_up:+.1f}% 순증)" if (grow and _need_up >= 0.05) else ""
+                _how = (f" 광고비 {a1p:.1f}%를 쓰려면 자사몰 비중이 최소 **{math.ceil(need * 1000 - 1e-6) / 10:.1f}%는** "
+                        f"되어야{_up} 현재와 같아져요.")
+        st.error(f"⚠️ **현재보다 불리해요** — {_chg} **{_m(-dP)}백만원 줄어요** {_sub}.{_lim_bad}{_how}")
+    else:
+        st.info(f"➖ **현재와 같아요** — {_chg} 그대로예요. 지금 광고비가 이 비중에서의 한도예요.")
+
+    # ── A. 현재 vs 시나리오 (왼쪽) · B. 손익분기 그래프 (오른쪽) ─────────────────
+    _css_map = {"g": _ADSIM_G, "r": _ADSIM_R, "": ""}
+    left, right = st.columns([5, 7])
+    with left:
+        A = []                           # (구분, 현재, 시나리오, 증감, 색 태그)
+
+        def _tag(d, good, nd):           # good: "high"=늘면 좋음 / "low"=줄면 좋음 / ""=색 없음
+            d = round(d, nd)
+            if not good or d == 0:
+                return ""
+            return "g" if (d > 0) == (good == "high") else "r"
+
+        def _amt(label, x0, x1, good=""):
+            A.append((label, _m(x0), _m(x1), _ms(x1 - x0), _tag(x1 - x0, good, dec)))
+
+        def _pct(label, x0, x1, nd, good=""):
+            A.append((label, f"{x0:.{nd}f}%", f"{x1:.{nd}f}%", f"{x1 - x0:+.{nd}f}%p", _tag(x1 - x0, good, nd)))
+
+        _fee_good = "" if grow else "low"   # 순증에서는 매출이 늘어 수수료도 같이 늘므로 색으로 좋고 나쁨을 말하지 않는다
+        _pct("자사몰 매출 비중", s0p, float(s1p), 1)
+        _pct("자사몰 광고비 비중", a0p, a1p, 1)
+        _amt("총매출", tot, T1)
+        _amt("자사몰 매출", O0, O1)
+        _amt("외부몰 매출", E0, E1)
+        _amt(f"상품 원가 ({kp:.1f}%)", tot * k, T1 * k)
+        _amt("자사몰 카드수수료", O0 * c, O1 * c)
+        _amt("자사몰 광고비", ad0, ad1)
+        _amt("외부몰 수수료", E0 * f, E1 * f)
+        _amt("유통수수료 합계", tot * fee0, T1 * fee1, _fee_good)
+        _pct("전체 유통수수료율", fee0 * 100, fee1 * 100, 2, _fee_good)
+        _amt("이익 (매출−원가−수수료)", P0, P1, "high")
+        _pct("이익률", pr0 * 100, pr1 * 100, 2, "high")
+        cmp_disp = pd.DataFrame([r[1:4] for r in A], index=[r[0] for r in A], columns=["현재", "시나리오", "증감"])
+        cmp_disp.index.name = "구분"
+        cmp_tags = pd.DataFrame("", index=cmp_disp.index, columns=cmp_disp.columns)
+        cmp_tags["증감"] = [r[4] for r in A]
+        h1, h2 = st.columns([3, 1])
+        h1.markdown("**A. 현재 vs 시나리오**" + _NOTE_FLOAT, unsafe_allow_html=True)
+        h2.download_button("⬇ 엑셀", _adsim_excel_bytes(cmp_disp, "현재 vs 시나리오", cmp_tags,
+                                                       first_row_total=False, hl_rows=[11, 12]),
+                           file_name="광고비시뮬레이션_현재vs시나리오.xlsx", mime=XLSX_MIME,
+                           key="as_xls_cmp", use_container_width=True)
+        sty = cmp_disp.rename_axis(None).style.apply(lambda _: cmp_tags.replace(_css_map), axis=None)
+        sty = sty.set_properties(**{"text-align": "right"})
+        render_styled_table(sty, extra_class="erp-adsim-cmp", extra_css=_ADSIM_CMP_CSS)
+        if grow:
+            st.caption("※ 외부몰 매출은 그대로, 자사몰 매출만 새로 늘어난다고 본 계산이에요(총매출 증가). "
+                       "증감 색 = 초록이면 현재보다 유리, 빨강이면 불리.")
+        else:
+            st.caption("※ 총매출은 그대로, 외부몰 매출이 자사몰로 옮겨온다고 본 계산이에요. "
+                       "증감 색 = 초록이면 현재보다 유리, 빨강이면 불리.")
+
+    with right:
+        st.markdown("**B. 자사몰 매출 비중별 광고비 한도** (선 아래 = 현재보다 유리 · 선 위 = 불리)")
+        x_lo = max(1.0, math.floor(min(s0p, s1p) / 5.0) * 5.0 - 5.0)
+        x_hi = float(s1_max)
+        xs = np.linspace(x_lo, x_hi, 200)
+        be_curve = np.array([adsim_breakeven_ad(x / 100.0, s0, a0, c, f, k, lam) * 100.0 for x in xs])
+        y_hi = max(v * 100.0, a1p, a0p) + 2.0
+        y_lo = max(0.0, min(a0p, a1p, float(be_curve.min())) - 2.0)
+        yc = np.clip(be_curve, y_lo, y_hi)
+        fig = go.Figure()
+        fig.add_scatter(x=xs, y=np.full_like(xs, y_lo), mode="lines", line=dict(width=0),
+                        showlegend=False, hoverinfo="skip")
+        fig.add_scatter(x=xs, y=yc, mode="lines", name="광고비 한도(손익분기)",
+                        line=dict(color="#0b3d78", width=2.5), fill="tonexty",
+                        fillcolor="rgba(31,138,76,0.10)", customdata=be_curve,
+                        hovertemplate="자사몰 %{x:.0f}%<br>광고비 한도 %{customdata:.2f}%<extra></extra>")
+        fig.add_scatter(x=xs, y=np.full_like(xs, y_hi), mode="lines", line=dict(width=0), fill="tonexty",
+                        fillcolor="rgba(198,40,40,0.07)", showlegend=False, hoverinfo="skip")
+        fig.add_hline(y=a0p, line=dict(color="#8a8f98", width=1.5, dash="dash"),
+                      annotation_text=f"현재 광고비 {a0p:.1f}%", annotation_position="bottom right",
+                      annotation_font=dict(size=11, color="#555"))
+        if g0 > _ADSIM_EPS:
+            fig.add_hline(y=v * 100.0, line=dict(color="#8a8f98", width=1.5, dash="dot"),
+                          annotation_text=f"단순 계산 상한 {v * 100:.1f}% ({_v_how})",
+                          annotation_position="top left", annotation_font=dict(size=11, color="#555"))
+        fig.add_scatter(x=[s0p], y=[a0p], mode="markers", name="현재",
+                        marker=dict(size=12, color="#1d1d1f", line=dict(color="#fff", width=2)),
+                        hovertemplate=f"현재<br>자사몰 {_pc(s0p)} · 광고비 {a0p:.1f}%<br>"
+                                      f"이익 {_m(P0)}백만원 (이익률 {pr0 * 100:.2f}%)<extra></extra>")
+        _vtxt = {"good": "유리", "bad": "불리", "same": "동일"}[verdict]
+        _vcol = {"good": "#1f8a4c", "bad": "#c62828", "same": "#8a8f98"}[verdict]
+        fig.add_scatter(x=[s1p], y=[a1p], mode="markers", name=f"시나리오 ({_vtxt})",
+                        marker=dict(size=15, color=_vcol, symbol="diamond", line=dict(color="#fff", width=2)),
+                        hovertemplate=f"시나리오 ({_vtxt})<br>자사몰 {s1p}% · 광고비 {a1p:.1f}%<br>"
+                                      f"이익 {_m(P1)}백만원 ({_ms(dP)})<extra></extra>")
+        # 점 이름표 — 선·점선 위에 겹쳐도 읽히게 반투명 흰 바탕. 유리(선 아래)면 점 아래, 그 외는 점 위에 둔다
+        _lab = dict(showarrow=False, font=dict(size=12, color="#1d1d1f"), bgcolor="rgba(255,255,255,0.85)", borderpad=2)
+        if not (s1p == s0p and abs(a1p - a0p) < 1e-9):
+            fig.add_annotation(x=s0p, y=a0p, text="현재", yshift=17, **_lab)
+        fig.add_annotation(x=s1p, y=a1p, text=f"시나리오 · {_vtxt}", yshift=(-21 if verdict == "good" else 21), **_lab)
+        fig.add_annotation(xref="paper", yref="paper", x=0.985, y=0.03, xanchor="right", yanchor="bottom",
+                           text="유리 — 현재보다 이익 ↑", showarrow=False,
+                           font=dict(size=12, color="#1d1d1f"))
+        fig.add_annotation(xref="paper", yref="paper", x=0.015, y=0.76, xanchor="left", yanchor="top",
+                           text="불리 — 현재보다 이익 ↓", showarrow=False,
+                           font=dict(size=12, color="#1d1d1f"))
+        fig.update_layout(height=470, margin=dict(t=10, b=0, l=0, r=0),
+                          legend=dict(orientation="h", y=1.1), plot_bgcolor="#fff",
+                          xaxis=dict(title="자사몰 매출 비중", ticksuffix="%", range=[x_lo, x_hi + 0.5],
+                                     dtick=10, gridcolor="#f0f0f3"),
+                          yaxis=dict(title="자사몰 광고비 비중", ticksuffix="%", range=[y_lo, y_hi],
+                                     gridcolor="#f0f0f3"))
+        st.plotly_chart(fig, use_container_width=True, key="as_chart")
+        st.caption("※ 파란 선 = 그 자사몰 비중에서 이익이 현재와 같아지는 광고비. "
+                   "자사몰 비중이 커질수록 한도가 올라가지만 단순 계산 상한에는 닿지 않아요."
+                   + (" 순증 가정이라 원가율 슬라이더를 움직이면 선이 같이 움직여요." if grow else ""))
+
+    # ── C. 자사몰 매출 비중별 광고비 한도 (표) ──────────────────────────────────
+    shares = [s0p] + [float(x) for x in range(5, (91 if grow else 101), 5) if x > s0p + 1e-9]
+    c_rows, c_tags = [], []
+    for i, sp in enumerate(shares):
+        rr = adsim_own_ratio(sp / 100.0, s0, lam)
+        be = adsim_breakeven_ad(sp / 100.0, s0, a0, c, f, k, lam)
+        Ox = O0 * rr
+        Tx = Ox + max(E0 - lam * (Ox - O0), 0.0)
+        if be is None or be < 0:
+            be_txt, room_txt, amt_txt, tag = "불가", "–", "–", "r"
+        else:
+            bes = _adsim_floor2(be * 100)
+            room = bes - a0p
+            room_txt = "0.00%p" if (i == 0 or abs(room) < 0.005) else f"{room:+.2f}%p"
+            be_txt, amt_txt = f"{bes:.2f}%", _m(Ox * be)
+            tag = "" if room_txt == "0.00%p" else ("g" if room > 0 else "r")
+        c_rows.append((_pc(sp) + (" (현재)" if i == 0 else ""), _m(Tx), _m(Ox), _ms(Ox - O0),
+                       be_txt, room_txt, amt_txt, _ms((Ox - O0) * v)))
+        c_tags.append(tag)
+    c_cols = ["총매출", "자사몰 매출", "자사몰 매출 증가", "광고비 한도", "현재 대비 여유",
+              "한도 광고비 금액", "추가로 쓸 수 있는 광고비"]
+    c_disp = pd.DataFrame([r[1:] for r in c_rows], index=[r[0] for r in c_rows], columns=c_cols)
+    c_disp.index.name = "자사몰 비중"
+    c_tagdf = pd.DataFrame("", index=c_disp.index, columns=c_disp.columns)
+    c_tagdf["현재 대비 여유"] = c_tags
+    h1, h2 = st.columns([5, 1])
+    h1.markdown("**C. 자사몰 매출 비중별 — 광고비를 어디까지 올려도 되나**" + _NOTE_FLOAT, unsafe_allow_html=True)
+    h2.download_button("⬇ 엑셀", _adsim_excel_bytes(c_disp, "비중별 광고비 한도", c_tagdf),
+                       file_name="광고비시뮬레이션_비중별광고비한도.xlsx", mime=XLSX_MIME,
+                       key="as_xls_be", use_container_width=True)
+    sty = c_disp.rename_axis(None).style.apply(lambda _: c_tagdf.replace(_css_map), axis=None)
+    render_styled_table(sty.set_properties(**{"text-align": "right"}))
+    st.caption(f"※ 광고비 한도 = 그 비중에서 이익이 현재({_m(P0)}백만원)와 같아지는 광고비 비중(소수 셋째 자리에서 내림). "
+               f"추가로 쓸 수 있는 광고비 = 자사몰 매출 증가 × {v * 100:.1f}%({_v_how}).")
+
+    # ── D. 자사몰 비중 × 광고비 비중 매트릭스 ────────────────────────────────────
+    mx_mode = st.radio("D표 보기", ["이익 증감(백만원)", "이익률 증감(%p)"], horizontal=True,
+                       key="as_mx_mode", label_visibility="collapsed")
+    _amt_view = mx_mode.startswith("이익 증감")
+    m_shares = [s0p] + [float(x) for x in range(10, (91 if grow else 101), 10) if x > s0p + 1e-9]
+    _top = max(v * 100.0, a0p + 6.0) if g0 > _ADSIM_EPS else a0p + 6.0
+    _span = _top - a0p
+    _step = 1.0 if _span <= 14 else (2.0 if _span <= 28 else 5.0)
+    m_ads = [a0p]
+    _x = math.floor(a0p / _step + 1e-9) * _step + _step
+    while _x <= _top + 1e-9 and len(m_ads) < 24:
+        m_ads.append(_x)
+        _x += _step
+    m_idx = [f"광고비 {_pc(ap)}" + (" (현재)" if i == 0 else "") for i, ap in enumerate(m_ads)]
+    m_cols = [f"자사몰 {_pc(sp)}" + (" (현재)" if j == 0 else "") for j, sp in enumerate(m_shares)]
+    m_disp = pd.DataFrame("", index=m_idx, columns=m_cols)
+    m_tags = pd.DataFrame("", index=m_idx, columns=m_cols)
+    for j, sp in enumerate(m_shares):
+        rr = adsim_own_ratio(sp / 100.0, s0, lam)
+        Ox = O0 * rr
+        Ex = max(E0 - lam * (Ox - O0), 0.0)
+        for i, ap in enumerate(m_ads):
+            Px = Ox * (1.0 - k - c - ap / 100.0) + Ex * ext_m
+            if _amt_view:
+                val = round(Px - P0, dec)
+                txt = "0" if val == 0 else f"{val:+,.{dec}f}"
+            else:
+                val = round((Px / (Ox + Ex) - pr0) * 100.0, 2)
+                txt = "0.00" if val == 0 else f"{val:+.2f}"
+            m_disp.iat[i, j] = txt
+            m_tags.iat[i, j] = "" if val == 0 else ("g" if val > 0 else "r")
+    m_disp.index.name = "광고비 비중 ＼ 자사몰 비중"
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(f"**D. 자사몰 비중 × 광고비 비중 — 현재 대비 {mx_mode}** "
+                f"<span style='color:#888;font-weight:400;font-size:0.85rem;'>(+ 초록 = 증가 · − 빨강 = 감소)</span>"
+                + (_NOTE_FLOAT if _amt_view else ""), unsafe_allow_html=True)
+    h2.download_button("⬇ 엑셀", _adsim_excel_bytes(m_disp, "비중x광고비 매트릭스", m_tags, tint=True),
+                       file_name=f"광고비시뮬레이션_매트릭스_{'이익증감' if _amt_view else '이익률증감'}.xlsx",
+                       mime=XLSX_MIME, key="as_xls_mx", use_container_width=True)
+    _mx_css = {"g": _ADSIM_G + ";background-color:#eaf6ee !important",
+               "r": _ADSIM_R + ";background-color:#fdecea !important", "": ""}
+    sty = m_disp.rename_axis(None).style.apply(lambda _: m_tags.replace(_mx_css), axis=None)
+    render_styled_table(sty.set_properties(**{"text-align": "right"}))
+    st.caption(f"※ 각 칸 = 현재(자사몰 {_pc(s0p)} · 광고비 {a0p:.1f}%) 대비 "
+               + ("이익이 얼마나 늘거나 줄어드는지(백만원). " if _amt_view else "이익률이 얼마나 오르내리는지(%p). ")
+               + "가로 = 자사몰 매출 비중, 세로 = 자사몰 광고비 비중."
+               + (" 초록과 빨강의 경계가 손익분기예요." if (_amt_view or not grow) else
+                  " 순증 가정에서는 이익률이 내려가도 이익 금액은 늘 수 있어요 — 유리·불리는 '이익 증감(백만원)'으로 보세요."))
+
+    with st.expander("🧠 계산 방식 — 왜 단순히 '13%p 더 써도 된다'가 아닌가요?"):
+        _v_shift = adsim_unit_value(k, c, f, 1.0)
+        _v_grow = adsim_unit_value(k, c, f, 0.0)
+        st.markdown(
+            f"- **이익** = 자사몰 매출 × (100% − 원가율 − 카드수수료 − 광고비) + 외부몰 매출 × (100% − 원가율 − 외부몰 수수료)  \n"
+            f"  현재: {_m(O0)} × {own_m0 * 100:.1f}% + {_m(E0)} × {ext_m * 100:.1f}% = **{_m(P0)}백만원** "
+            f"(이익률 {pr0 * 100:.2f}%)\n"
+            f"- **이동 가정**(총매출 그대로): 외부몰에서 팔던 매출이 자사몰로 옮겨와요. 자사몰 매출이 1원 늘 때 외부몰 수수료 "
+            f"{fp:.1f}%가 줄고 카드수수료 {ccp:.1f}%가 생겨서, 늘어난 매출 1원당 광고비를 **{_v_shift * 100:.1f}%까지** 더 써도 "
+            f"본전이에요. 어느 채널에서 팔든 원가는 같아서 원가율은 한도에 영향이 없어요.\n"
+            f"- **순증 가정**(외부몰 매출 그대로): 자사몰 매출만 새로 늘어요. 늘어난 매출 1원에서 원가 {kp:.1f}%와 카드수수료 "
+            f"{ccp:.1f}%를 빼면 {_v_grow * 100:.1f}%가 남아서, 늘어난 매출 1원당 광고비를 **{_v_grow * 100:.1f}%까지** 더 써도 "
+            f"본전이에요. 원가율이 낮을수록 한도가 올라가요.\n"
+            f"- **함정**: 광고비 '비중'을 올리면 새로 생긴 매출뿐 아니라 **이미 나오던 자사몰 매출({_m(O0)}백만원)에도** "
+            f"오른 비중이 적용돼요. 이 부분은 매출 증가 없이 광고비만 늘어난 거예요.\n"
+            f"- **광고비 한도** = 늘어난 1원의 몫 − (늘어난 1원의 몫 − 현재 광고비) ÷ 자사몰 매출 배수  \n"
+            f"  지금 선택({'순증' if grow else '이동'} · 자사몰 {_pc(s0p)} → {s1p}% = 자사몰 매출 {r1:.2f}배): "
+            f"{v * 100:.1f} − ({v * 100:.1f} − {a0p:.1f}) ÷ {r1:.2f} = **{_adsim_floor2(be1 * 100):.2f}%**\n"
+            f"- **증분 광고비율** = (목표 광고비 금액 − 현재 광고비 금액) ÷ 늘어난 자사몰 매출. "
+            f"이 값이 늘어난 1원의 몫(지금 {v * 100:.1f}%) 이하면 현재보다 유리해요"
+            + (f"(증분 ROAS {100 / v:,.0f}% 이상)." if v > _ADSIM_EPS else ".") + "\n"
+            f"- 실제로는 두 가정의 중간이에요. 광고로 늘어난 자사몰 매출의 일부는 새로 생긴 매출이고, "
+            f"일부는 외부몰에서 샀을 고객이 옮겨온 매출이에요.\n"
+            f"- 원가율은 자사몰·외부몰에 똑같이 적용했고, 인건비·물류비·외부몰 광고비 같은 다른 비용은 넣지 않았어요.")
+
+
 def main():
     st.set_page_config(page_title="온라인팀 미니 ERP", page_icon="📊", layout="wide")
     # 전역 여백 축소 + Apple 스타일 테마(2026-08-05) — 배경/폰트/버튼/사이드바 메뉴
@@ -11072,9 +11607,11 @@ def main():
     if df.empty:
         st.info("👈 사이드바에서 매출 로우데이터를 업로드하고 [DB에 적재하기]를 눌러 시작하세요."
                 "  (🏷️ 재고 가공은 매출 데이터 없이도 바로 쓸 수 있어요)")
-        # 재고 가공·최저가 관리는 매출 DB와 무관하므로 매출 데이터가 없어도 사용 가능하게 유지
+        # 재고 가공·최저가 관리·광고비 시뮬레이션은 매출 DB와 무관하므로 매출 데이터가 없어도 사용 가능하게 유지
         if menu == MENU_PRICE:
             render_price_mgmt()
+        elif menu == MENU_ADSIM:
+            render_ad_sim()
         else:
             render_inventory()
         return
@@ -11104,6 +11641,8 @@ def main():
         render_suitset(df)
     elif menu == MENU_PRICE:
         render_price_mgmt()
+    elif menu == MENU_ADSIM:
+        render_ad_sim()
     else:
         render_dashboard(df)
     gc.collect()   # 260922: rerun마다 남는 임시 프레임(d, disp 등) 즉시 회수 — 메모리 피크 억제
