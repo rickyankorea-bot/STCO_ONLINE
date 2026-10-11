@@ -5676,9 +5676,12 @@ def render_daily_trend(df):
 #      자사채널            = 통합몰 + 네이버스토어
 #      외부몰(네이버제외)   = 전체 − 통합몰 − 네이버스토어
 #      외부몰(네이버포함)   = 전체 − 통합몰
-#  · 연간 토탈·당월누계 = 기준일까지(전년도 같은 기간) — 주간현황 연간누계·당월과 같은 기준.
+#  · 연간 토탈 = 1/1~기준일(전년 같은 기간과 비교) — 주간현황 연간누계와 같은 기준.
+#  · 당월누계(261011 정의 수정, 중태님) = **월마감 기준 1월~마감된 마지막 달 말일** 합계, 전년 1월~같은 달 말일과
+#    비교. 예: 기준일 10/8 → 마감월 9월 → 26년 1~9월 vs 25년 1~9월. 기준일이 그 달 말일이면 그 달까지 마감으로
+#    본다(10/31 → 1~10월). 1월 중 조회(마감월 없음)면 빈칸.
 #  · 월 칸: 지난 달은 한 달 전체. 기준일이 속한 달(진행 중)은 올해=1일~기준일, 그 달 증감율은
-#    전년 같은 기간과 비교(=당월누계 증감율). 전년 표의 월 칸은 참고용으로 12개월 모두 한 달 전체.
+#    전년 같은 기간과 비교. 전년 표의 월 칸은 참고용으로 12개월 모두 한 달 전체.
 MS_MONTHS = [f"{m}월" for m in range(1, 13)]
 MS_YTD, MS_MTD = "연간 토탈", "당월누계"
 MS_RATE = "┗증감율"
@@ -5689,11 +5692,16 @@ def _ms_rows():
     base = _wk_rows()
     tm, nv = _CHANNEL_MASKS["통합몰"], _CHANNEL_MASKS["네이버스토어"]
     groups = [
-        (("전체", "자사채널", "통합몰+네이버"), lambda x: tm(x) | nv(x)),
-        (("전체", "외부몰(네이버제외)", "전체−통합몰−네이버"), lambda x: ~(tm(x) | nv(x))),
-        (("전체", "외부몰(네이버포함)", "전체−통합몰"), lambda x: ~tm(x)),
+        (("전체", "자사채널", ""), lambda x: tm(x) | nv(x)),             # 정의는 표 아래 캡션에
+        (("전체", "외부몰(네이버제외)", ""), lambda x: ~(tm(x) | nv(x))),
+        (("전체", "외부몰(네이버포함)", ""), lambda x: ~tm(x)),
     ]
     return base[:1] + groups + base[1:]
+
+
+def _ms_close_month(asof):
+    """월마감 기준 마지막 마감월(1~12). 기준일이 그 달 말일이면 그 달, 아니면 전달. 1월 중이면 0(마감월 없음)."""
+    return asof.month if (asof + pd.Timedelta(days=1)).month != asof.month else asof.month - 1
 
 
 def _ms_compute(d, asof, rows):
@@ -5712,15 +5720,24 @@ def _ms_compute(d, asof, rows):
         ym = s.groupby([s["_판매일"].dt.year, s["_판매일"].dt.month])["_매출액"].sum().to_dict()
         c_ytd = float(s.loc[s["_판매일"].dt.year == cy, "_매출액"].sum())
         p_ytd = float(s.loc[(s["_판매일"] >= pd.Timestamp(py, 1, 1)) & (s["_판매일"] < endp_excl), "_매출액"].sum())
+        # 진행 중인 달(기준일이 속한 달)의 1일~기준일 — 월 칸 전용
         c_mtd = float(s.loc[(s["_판매일"] >= m0) & (s["_판매일"] < end_excl), "_매출액"].sum())
         p_mtd = float(s.loc[(s["_판매일"] >= m0_p) & (s["_판매일"] < endp_excl), "_매출액"].sum())
-        c = {MS_YTD: c_ytd, MS_MTD: c_mtd}
-        p = {MS_YTD: p_ytd, MS_MTD: p_mtd}
-        r = {MS_YTD: _dl_rate(c_ytd, p_ytd), MS_MTD: _dl_rate(c_mtd, p_mtd)}
+        # 당월누계 = 월마감 기준 1월~마감월 말일 (261011 정의 수정)
+        k = _ms_close_month(asof)
+        if k:
+            c_cls = float(sum(ym.get((cy, m), 0.0) for m in range(1, k + 1)))
+            p_cls = float(sum(ym.get((py, m), 0.0) for m in range(1, k + 1)))
+            r_cls = _dl_rate(c_cls, p_cls)
+        else:
+            c_cls = p_cls = r_cls = None
+        c = {MS_YTD: c_ytd, MS_MTD: c_cls}
+        p = {MS_YTD: p_ytd, MS_MTD: p_cls}
+        r = {MS_YTD: _dl_rate(c_ytd, p_ytd), MS_MTD: r_cls}
         for mth in range(1, 13):
             lab = f"{mth}월"
             p[lab] = float(ym.get((py, mth), 0.0))
-            if mth < asof.month:
+            if mth <= _ms_close_month(asof):
                 c[lab] = float(ym.get((cy, mth), 0.0))
                 r[lab] = _dl_rate(c[lab], p[lab])
             elif mth == asof.month:
@@ -5800,7 +5817,7 @@ def _ms_style(disp, sign=None):
     return sty
 
 
-def _ms_excel_bytes(top, sign, bot, cy, py, asof):
+def _ms_excel_bytes(top, sign, bot, cy, py, asof, vat="VAT+"):
     """두 표를 양식처럼 한 시트에 위(올해+증감율)·아래(전년)로 쌓아 화면 서식 그대로 내려받기(룰11·13)."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -5813,7 +5830,7 @@ def _ms_excel_bytes(top, sign, bot, cy, py, asof):
     idx_fill = PatternFill("solid", fgColor="FAFAFA")
     gt_fill = PatternFill("solid", fgColor="FFF2B8")
     grp_fill = PatternFill("solid", fgColor="EAF6FC")
-    ws.cell(1, 1, f"월간 매출 현황 · 기준일 {asof.date()} · [금액: 백만원 / VAT+]").font = Font(bold=True, size=12)
+    ws.cell(1, 1, f"월간 매출 현황 · 기준일 {asof.date()} · [금액: 백만원 / {vat}]").font = Font(bold=True, size=12)
     r0 = 3
 
     def put(df, sgn, start):
@@ -5842,9 +5859,12 @@ def _ms_excel_bytes(top, sign, bot, cy, py, asof):
                 elif is_gt:
                     c.font = Font(bold=True)
         last = start + len(df)
+        sec_rows = {start + n for n in _ms_section_starts(df.index)}   # 35-4: 대분류 경계 굵은 검정 선
+        black = Side(style="thick", color="000000")
         for r in range(start, last + 1):
             for k in range(1, len(heads) + 1):
-                ws.cell(r, k).border = Border(left=(thick if k == 7 else thin), right=thin, top=thin, bottom=thin)
+                ws.cell(r, k).border = Border(left=(thick if k == 7 else thin), right=thin,
+                                              top=(black if r in sec_rows else thin), bottom=thin)
         return last
 
     end1 = put(top, sign, r0)
@@ -5855,6 +5875,43 @@ def _ms_excel_bytes(top, sign, bot, cy, py, asof):
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+# 35-3(261011, 중태님): 올해 표·전년 표의 칸 너비를 똑같이 고정 — 위아래 번갈아 볼 때 칸이 어긋나지 않게.
+# 내용 길이에 따라 자동으로 늘어나던 너비를 <colgroup> + table-layout:fixed로 두 표 공통 값에 묶는다.
+_MS_COL_W = [72, 132, 60, 78] + [84, 84] + [66] * 12      # 구분·항목·세부·연도 | 연간 토탈·당월누계 | 1~12월 (합 1,302px)
+_MS_TBL_CSS = """
+<style>
+table.ms-tbl{table-layout:fixed;}
+table.ms-tbl th, table.ms-tbl td{overflow:hidden;text-overflow:ellipsis;padding:4px 6px;}
+</style>
+"""
+
+
+def _ms_section_starts(index):
+    """대분류(전체·유통별·브랜드별)가 바뀌는 행 번호(1부터) — 첫 대분류는 제외."""
+    out, prev = [], None
+    for i, ix in enumerate(index, 1):
+        if prev is not None and ix[0] != prev:
+            out.append(i)
+        prev = ix[0]
+    return out
+
+
+def _ms_render(sty, disp, tag):
+    """월간 매출 현황 표 렌더.
+    · 35-3: 칸 너비 고정(_MS_COL_W) + 표 폭 고정 → 올해·전년 표의 세로 칸이 위아래로 정확히 일치.
+    · 35-4: 대분류(전체 / 유통별 / 브랜드별)가 바뀌는 줄 위에 굵은 검정 선."""
+    cls = f"ms-tbl ms-{tag}"
+    html = sty.set_table_attributes(f'class="erp-tbl {cls}" style="width:{sum(_MS_COL_W)}px"').to_html()
+    cg = "<colgroup>" + "".join(f'<col style="width:{w}px">' for w in _MS_COL_W) + "</colgroup>"
+    i = html.index(">", html.index("<table")) + 1
+    html = html[:i] + cg + html[i:]
+    sel = ",".join(f"table.ms-{tag} tbody tr:nth-child({n}) th, table.ms-{tag} tbody tr:nth-child({n}) td"
+                   for n in _ms_section_starts(disp.index))
+    sec_css = f"<style>{sel}{{border-top:2.5px solid #000 !important;}}</style>" if sel else ""
+    st.markdown(_TBL_CSS + _MS_TBL_CSS + sec_css + f'<div class="erp-wrap">{html}</div>',
+                unsafe_allow_html=True)
 
 
 def render_monthly_status(df):
@@ -5872,8 +5929,14 @@ def render_monthly_status(df):
         st.warning("매장 기준정보(채널스토리)가 없어 유통별 3개(원래직입점·웹뜰이관·웍스바이이관)는 0으로 나와요. "
                    "사이드바 **매장 기준정보 업로드**에 마스터 파일을 올리면 채워져요.")
     dmin, dmax = d["_판매일"].min().date(), d["_판매일"].max().date()
-    c1, _c2 = st.columns([1, 2])
-    asof = c1.date_input("기준일 (연간 토탈·당월누계의 끝 날짜)", value=dmax, min_value=dmin, max_value=dmax,
+    c1, c2, _c3 = st.columns([1, 1, 1])
+    # 35-5(261011, 중태님): 금액 기준 선택 — 기본 VAT+(로우데이터 실판가 그대로), VAT-는 ÷1.1
+    vat = c2.radio("금액 기준", ["VAT+", "VAT-"], horizontal=True, key="ms_vat",
+                   help="VAT+ = 부가세 포함(로우데이터 실판가 그대로) · VAT- = 부가세 제외(실판가 ÷ 1.1)")
+    if vat == "VAT-":
+        d["_매출액"] = d["_매출액"] / 1.1
+    _note = _NOTE_FLOAT.replace("VAT+", vat)
+    asof = c1.date_input("기준일 (연간 토탈의 끝 날짜 · 당월누계는 직전 월마감까지)", value=dmax, min_value=dmin, max_value=dmax,
                          key="ms_asof")
     asof = pd.to_datetime(asof)
     cy, py = asof.year, asof.year - 1
@@ -5881,24 +5944,28 @@ def render_monthly_status(df):
     res = _ms_compute(d, asof, rows)
     top, sign, bot = _ms_tables(res, rows, cy, py)
 
-    st.caption(f"매출=실판가(실매출, 백만원) · 연간 토탈 = {cy}-01-01 → {asof.date()} (전년 같은 기간과 비교) · "
-               f"당월누계 = {asof.replace(day=1).date()} → {asof.date()} · "
-               f"{asof.month}월(진행 중)은 1일~기준일, 증감율도 전년 같은 기간과 비교")
+    _k = _ms_close_month(asof)
+    _mtd_txt = (f"당월누계(월마감) = 1–{_k}월 ({cy}·{py} 각각 1/1 → {_k}월 말일)" if _k
+                else "당월누계(월마감) = 아직 마감된 달이 없어 빈칸")
+    _prog = (f" · {asof.month}월(진행 중)은 1일–기준일, 증감율도 전년 같은 기간과 비교"
+             if _k != asof.month else "")
+    st.caption(f"매출=실판가(실매출, 백만원 · {'부가세 포함' if vat == 'VAT+' else '부가세 제외 = 실판가÷1.1'}) · 연간 토탈 = {cy}-01-01 → {asof.date()} (전년 같은 기간과 비교) · "
+               f"{_mtd_txt}{_prog}")
     h1, h2 = st.columns([5, 1])
-    h1.markdown(f"**{str(cy)[-2:]}년 월간 매출 + 전년 대비 증감율 · 기준일 {asof.date()}**" + _NOTE_FLOAT,
+    h1.markdown(f"**{str(cy)[-2:]}년 월간 매출 + 전년 대비 증감율 · 기준일 {asof.date()}**" + _note,
                 unsafe_allow_html=True)
-    h2.download_button("⬇ 엑셀", _ms_excel_bytes(top, sign, bot, cy, py, asof),
-                       file_name=f"월간매출현황_{asof.date()}.xlsx", mime=XLSX_MIME,
+    h2.download_button("⬇ 엑셀", _ms_excel_bytes(top, sign, bot, cy, py, asof, vat),
+                       file_name=f"월간매출현황_{asof.date()}_{vat}.xlsx", mime=XLSX_MIME,
                        key="ms_xls", use_container_width=True)
-    render_styled_table(_ms_style(top, sign))
+    _ms_render(_ms_style(top, sign), top, "top")
     st.caption("※ 자사채널 = 통합몰+네이버스토어 · 외부몰(네이버제외) = 전체−통합몰−네이버스토어 · "
                "외부몰(네이버포함) = 전체−통합몰. 유통별 5개·브랜드별은 주간현황 분석과 같은 기준 "
                "(S/D/L 신상=신상+내년신상, 4년차↑는 합계엔 포함되나 별도 행 없음).")
 
-    st.markdown(f"**{str(py)[-2:]}년 월간 매출 (전년 · 참고)**" + _NOTE_FLOAT, unsafe_allow_html=True)
-    render_styled_table(_ms_style(bot))
-    st.caption(f"※ 전년 표의 월 칸은 한 달 전체 실적(참고용). 연간 토탈·당월누계 칸만 "
-               f"{asof_p_txt(asof)}까지의 같은 기간이에요.")
+    st.markdown(f"**{str(py)[-2:]}년 월간 매출 (전년 · 참고)**" + _note, unsafe_allow_html=True)
+    _ms_render(_ms_style(bot), bot, "bot")
+    st.caption(f"※ 전년 표의 월 칸은 한 달 전체 실적(참고용). 연간 토탈은 {asof_p_txt(asof)}까지의 같은 기간, "
+               f"당월누계는 1월–마감월 말일까지예요.")
 
 
 def asof_p_txt(asof):
