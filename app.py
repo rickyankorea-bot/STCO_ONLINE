@@ -5492,8 +5492,33 @@ def render_weekly_report(df):
 #      조회 시작일 이전 날짜도 창에 들어간다(예: 10/1의 값 = 9/25~10/1). 전년 칸 = 비교일 기준 최근 7일.
 DL_BASIS_DATE, DL_BASIS_DOW = "일자기준", "요일기준"
 DL_DAILY, DL_MON_CUM, DL_RANGE_CUM, DL_AVG = "일자별 매출", "월간 누계 매출", "기간 누계 매출", "기간 일평균 매출"
+#  (4) 항목42(261012, 중태님): 조회 조건에 '유통별'·'매장별' 추가 — 유통별은 주간현황의 유통별 5개
+#      (_CHANNEL_MASKS) + 월간 매출 현황의 채널 묶음 3개와 같은 기준, 매장별은 매장명(_채널).
+#      같은 칸에서 여러 개 고르면 합쳐서(OR), 서로 다른 칸끼리는 모두 만족하는 것만(AND) 집계한다.
 DL_MA_N = 7
 DL_MA = f"{DL_MA_N}일 이동평균"
+DL_CH_BASE = ["통합몰", "네이버스토어", "원래직입점", "웹뜰이관", "웍스바이이관"]      # = _CHANNEL_MASKS 키
+DL_CH_GROUPS = ["자사채널", "외부몰(네이버제외)", "외부몰(네이버포함)"]               # = 월간 매출 현황 채널 묶음
+DL_CH_OPTS = DL_CH_BASE + DL_CH_GROUPS
+_DL_CH_STORY = ("원래직입점", "웹뜰이관", "웍스바이이관")   # 매장 기준정보의 '채널스토리'가 있어야 구분되는 3개
+
+
+def _dl_channel_mask(x, names):
+    """유통별 선택(names)에 해당하는 행 — 여러 개면 합집합. x에는 '매장코드'·'_채널스토리' 컬럼이 있어야 한다.
+    묶음 정의는 월간 매출 현황(_ms_rows)과 동일: 자사채널 = 통합몰+네이버스토어 /
+    외부몰(네이버제외) = 전체−통합몰−네이버스토어 / 외부몰(네이버포함) = 전체−통합몰."""
+    tm, nv = _CHANNEL_MASKS["통합몰"](x), _CHANNEL_MASKS["네이버스토어"](x)
+    out = pd.Series(False, index=x.index)
+    for nm in names:
+        if nm == "자사채널":
+            out |= (tm | nv)
+        elif nm == "외부몰(네이버제외)":
+            out |= ~(tm | nv)
+        elif nm == "외부몰(네이버포함)":
+            out |= ~tm
+        elif nm in _CHANNEL_MASKS:
+            out |= _CHANNEL_MASKS[nm](x)
+    return out
 _DL_DOW = ["월", "화", "수", "목", "금", "토", "일"]
 
 
@@ -5644,6 +5669,27 @@ def render_daily_trend(df):
     selb = fc1.multiselect("브랜드별", _brands, default=[], placeholder="전체", key="dl_fb")
     sela = fc2.multiselect("연차별", _ages, default=[], placeholder="전체", key="dl_fa")
     sels = fc3.multiselect("시즌별", _seasons, default=[], placeholder="전체", key="dl_fs")
+    # 항목42: 유통별 · 매장별 (빈칸 = 전체)
+    _has_code, _has_store = "매장코드" in d.columns, "_채널" in d.columns
+    _stores = []
+    if _has_store:
+        # 매장 선택지 = 매장명, 전체 기간 실판매금액 큰 순(유통별 세부 분석의 유통 채널 선택지와 같은 방식)
+        _rev = d.groupby(d["_채널"].astype(str), observed=True)["_매출액"].sum().sort_values(ascending=False)
+        _stores = [c for c in _rev.index if c not in ("", "nan", "None")]
+    # 데이터가 바뀌어 선택지에서 사라진 매장이 세션에 남아 있으면 미리 걸러낸다(위젯 오류 방지)
+    _v = st.session_state.get("dl_fst")
+    if _v:
+        _keep = [x for x in _v if x in set(_stores)]
+        if len(_keep) != len(_v):
+            st.session_state["dl_fst"] = _keep
+    fu1, fu2 = st.columns([1, 2])
+    selu = fu1.multiselect("유통별", DL_CH_OPTS if _has_code else [], default=[], placeholder="전체", key="dl_fu",
+                           help="주간현황 분석의 유통별 5개 + 월간 매출 현황의 채널 묶음 3개와 같은 기준이에요. "
+                                "자사채널 = 통합몰+네이버스토어 · 외부몰(네이버제외) = 전체−통합몰−네이버스토어 · "
+                                "외부몰(네이버포함) = 전체−통합몰. 여러 개 고르면 합쳐서 보여줘요.")
+    selst = fu2.multiselect("매장별", _stores, default=[], placeholder="전체", key="dl_fst",
+                            help="매장(채널) 이름 — 매출이 큰 순서로 나와요. 여러 개 고르면 합쳐서 보여줘요. "
+                                 "유통별과 함께 고르면 둘 다에 해당하는 매출만 집계돼요.")
 
     # 필요한 기간(금년 조회기간 + 전년 비교기간)만 잘라서 계산 — 메모리 절약
     # 항목40: 7일 이동평균은 조회 시작일 앞 6일의 매출도 필요 → 두 구간 모두 앞쪽으로 (DL_MA_N-1)일 넓힌다.
@@ -5651,13 +5697,29 @@ def render_daily_trend(df):
     p_lo = min(_dl_prev_date(start, basis), start - pd.DateOffset(years=1))
     m = ((d["_판매일"] >= start - _ma_back) & (d["_판매일"] < end + pd.Timedelta(days=1))) | \
         ((d["_판매일"] >= p_lo - _ma_back) & (d["_판매일"] < _dl_prev_date(end, basis) + pd.Timedelta(days=2)))
-    fd = d.loc[m, ["_판매일", "_매출액"] + [c for c in ("브랜드명", "연차", "시즌명") if c in d.columns]]
+    fd = d.loc[m, ["_판매일", "_매출액"] + [c for c in ("브랜드명", "연차", "시즌명") if c in d.columns]
+               + ([c for c in ("매장코드", "_채널") if c in d.columns] if (selu or selst) else [])]
     if selb:
         fd = fd[fd["브랜드명"].isin(selb)]
     if sela:
         fd = fd[fd["연차"].isin(sela)]
     if sels:
         fd = fd[fd["시즌명"].isin(sels)]
+    if selst:
+        fd = fd[fd["_채널"].astype(str).isin(selst)]
+    if selu:
+        # ⚠️ df(=d)는 st.cache_resource로 모든 세션이 공유하는 객체 → 컬럼을 직접 붙이지 않고,
+        #    기간으로 잘라낸 사본(fd)에만 채널스토리를 붙인다(assign = 새 프레임).
+        _cs_map = {}
+        if any(u in _DL_CH_STORY for u in selu):
+            master = load_master()
+            if not master.empty and "채널스토리" in master.columns:
+                _cs_map = dict(zip(master["매장코드"].astype(str).str.strip(), master["채널스토리"]))
+            else:
+                st.warning("매장 기준정보(채널스토리)가 없어 유통별 3개(원래직입점·웹뜰이관·웍스바이이관)는 0으로 나와요. "
+                           "사이드바 **매장 기준정보 업로드**에 마스터 파일을 올리면 채워져요.")
+        fd = fd.assign(_채널스토리=fd["매장코드"].astype(str).str.strip().map(_cs_map))
+        fd = fd[_dl_channel_mask(fd, selu)]
 
     days, pdays, cur, prv, ccum, pcum, n = _dl_build(fd, start, end, basis, last_day=dmax)
     # 항목40: 7일 이동평균 — 금년은 그날 기준, 전년은 비교일 기준 최근 7일
@@ -5754,8 +5816,10 @@ def render_daily_trend(df):
     st.caption(f"{DL_MA} = 그날 포함 최근 {DL_MA_N}일 매출 합계 ÷ {DL_MA_N} — 조회 시작일 이전 날짜도 계산에 들어가요"
                f"(예: {start.month}/{start.day}의 값 = {(start - _ma_back).month}/{(start - _ma_back).day}"
                f"~{start.month}/{start.day} 평균). 기간 합계 행에는 가장 최근 날짜의 값이 표시돼요.")
-    if selb or sela or sels:
-        st.caption("🔎 필터 적용 중 — 표의 모든 숫자는 선택한 브랜드·연차·시즌 기준이에요.")
+    if selb or sela or sels or selu or selst:
+        _ftxt = " · ".join(f"{k}: {', '.join(map(str, v))}" for k, v in
+                           (("유통", selu), ("매장", selst), ("브랜드", selb), ("연차", sela), ("시즌", sels)) if v)
+        st.caption(f"🔎 필터 적용 중 — 표·그래프의 모든 숫자는 선택한 조건 기준이에요. ({_ftxt})")
     h1, h2 = st.columns([5, 1])
     h1.markdown(f"**일별 매출 · {start.date()} → {end.date()}** ({N}일 · {basis})" + _NOTE_FLOAT,
                 unsafe_allow_html=True)
@@ -5766,22 +5830,43 @@ def render_daily_trend(df):
     if end.date() == dmax:
         st.caption(f"※ 종료일({dmax})은 최신 적재일이에요 — 그날 매출이 하루치 전부 들어왔는지 확인해 주세요.")
 
-    # ── 추세 그래프: 일자별 매출(막대) + 기간 일평균(선) 전년 vs 금년 ──
+    # ── 추세 그래프 (항목41 · 261012, 중태님) ──
+    #  주축(왼쪽): 일매출 막대 + 7일 이동평균(빨강 · 가장 굵게) + 기간 일평균(검정)
+    #  보조축(오른쪽): 누계 매출(반투명 회색 · 조금 굵게) — 일매출보다 단위가 훨씬 커서 축을 따로 쓴다.
+    #  금년 = 실선, 전년 = 같은 색의 가는 점선. 누계는 맨 먼저 그려 다른 선·막대 뒤에 깔리게 한다.
     xlab = [_dl_day_label(t, multi_year) + f"({_DL_DOW[t.weekday()]})" for t in days]
     ptxt = [f"{p.date()} ({_DL_DOW[p.weekday()]})" for p in pdays]
+    _cum_nm = "누계"
+    _hv = "%{x}<br>%{fullData.name}: %{y:,.1f}백만<extra></extra>"
     fig = go.Figure()
-    fig.add_bar(x=xlab, y=prv / 1e6, name=f"{ly} 일매출", marker_color="#b8bec7",
+    # 주축 trace는 y2(왼쪽 · 위 레이어), 누계는 y(오른쪽 · 아래 레이어) — 화면상 왼쪽이 주축, 오른쪽이 보조축.
+    fig.add_scatter(x=xlab, y=pcum / 1e6, name=f"{ly} {_cum_nm}(오른쪽 축)", mode="lines", yaxis="y",
+                    line=dict(color="rgba(120,124,130,0.45)", width=2.5, dash="dot"), hovertemplate=_hv)
+    fig.add_scatter(x=xlab, y=ccum / 1e6, name=f"{lc} {_cum_nm}(오른쪽 축)", mode="lines", yaxis="y",
+                    line=dict(color="rgba(120,124,130,0.50)", width=5), hovertemplate=_hv)
+    fig.add_bar(x=xlab, y=prv / 1e6, name=f"{ly} 일매출", marker_color="#c9ced6", yaxis="y2",
                 customdata=ptxt, hovertemplate="%{customdata}<br>%{y:,.1f}백만<extra></extra>")
-    fig.add_bar(x=xlab, y=cur / 1e6, name=f"{lc} 일매출", marker_color="#2f6bb0",
+    fig.add_bar(x=xlab, y=cur / 1e6, name=f"{lc} 일매출", marker_color="#8fb4dc", yaxis="y2",
                 hovertemplate="%{x}<br>%{y:,.1f}백만<extra></extra>")
-    fig.add_scatter(x=xlab, y=(pcum / n) / 1e6, name=f"{ly} 일평균", mode="lines",
-                    line=dict(color="#8a8f98", width=2, dash="dash"))
-    fig.add_scatter(x=xlab, y=(ccum / n) / 1e6, name=f"{lc} 일평균", mode="lines",
-                    line=dict(color="#0b3d78", width=2.5))
-    fig.update_layout(barmode="group", height=340, margin=dict(t=10, b=0, l=0, r=0),
-                      legend=dict(orientation="h", y=1.12), yaxis_title="백만원")
+    fig.add_scatter(x=xlab, y=(pcum / n) / 1e6, name=f"{ly} 기간 일평균", mode="lines", yaxis="y2",
+                    line=dict(color="#111111", width=1.3, dash="dash"), hovertemplate=_hv)
+    fig.add_scatter(x=xlab, y=(ccum / n) / 1e6, name=f"{lc} 기간 일평균", mode="lines", yaxis="y2",
+                    line=dict(color="#111111", width=2.2), hovertemplate=_hv)
+    fig.add_scatter(x=xlab, y=pma / 1e6, name=f"{ly} {DL_MA}", mode="lines", yaxis="y2",
+                    line=dict(color="#d62728", width=1.6, dash="dash"), hovertemplate=_hv)
+    fig.add_scatter(x=xlab, y=cma / 1e6, name=f"{lc} {DL_MA}", mode="lines", yaxis="y2",
+                    line=dict(color="#d62728", width=4.5), hovertemplate=_hv)
+    fig.update_layout(
+        barmode="group", height=400, margin=dict(t=10, b=0, l=0, r=0),
+        legend=dict(orientation="h", y=1.16, traceorder="reversed"),
+        yaxis=dict(title=f"{_cum_nm} (백만원)", side="right", showgrid=False, rangemode="tozero",
+                   zeroline=False, tickformat=",.0f"),
+        yaxis2=dict(title="일매출 · 평균 (백만원)", side="left", overlaying="y", rangemode="tozero",
+                    tickformat=",.0f"))
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("※ 막대 = 그날 매출 · 선 = 시작일부터의 일평균. 막대에 마우스를 올리면 비교한 전년 날짜가 떠요.")
+    st.caption(f"※ 막대 = 그날 매출 · **빨간 선 = {DL_MA}** · 검정 선 = 시작일부터의 일평균 · "
+               f"회색 굵은 선 = 누계(오른쪽 축) · 실선 = {lc}, 점선 = {ly}. "
+               "범례의 이름을 누르면 그 선만 숨기거나 다시 볼 수 있어요. 막대에 마우스를 올리면 비교한 전년 날짜가 떠요.")
 
 
 # ==============================================================================
