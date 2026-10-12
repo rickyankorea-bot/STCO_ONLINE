@@ -5584,6 +5584,47 @@ def _dl_weekend(v):
     return ""
 
 
+DL_Y_MAX = 80   # 항목43(261012, 중태님): 그래프 주축(7일 이동평균·기간 일평균)의 기본 최대값 — 백만원
+
+
+def _dl_axis_range(arrs, base=DL_Y_MAX):
+    """그래프 주축 범위 [아래, 위] (백만원). 기본은 0~base(80).
+    · 선이 base에 닿거나 넘으면(성수기·긴 기간) 잘리지 않게 선 최대값의 1.15배로 올린다.
+    · 선이 base의 절반에도 못 미치면(매장·브랜드를 좁혀 조회한 경우) 변동이 보이도록 선 최대값의 1.25배로 낮춘다.
+    · 음수(반품이 매출보다 큰 구간)가 있으면 아래쪽도 그만큼 연다."""
+    vals = np.concatenate([np.asarray(a, dtype=float).ravel() for a in arrs]) if arrs else np.array([])
+    vals = vals[np.isfinite(vals)]
+    hi_v = float(vals.max()) if len(vals) else 0.0
+    lo_v = float(vals.min()) if len(vals) else 0.0
+
+    def _nice(x):   # 보기 좋은 눈금으로 올림: 53.9 → 55, 4.3 → 4.5, 130 → 150
+        step = 10 ** math.floor(math.log10(x)) / 2
+        return math.ceil(x / step - 1e-9) * step
+
+    if hi_v <= 0:
+        hi = float(base)
+    elif hi_v > base * 0.95:
+        hi = _nice(hi_v * 1.15)
+    elif hi_v < base * 0.5:
+        hi = _nice(hi_v * 1.25)
+    else:
+        hi = float(base)
+    lo = -_nice(-lo_v * 1.15) if lo_v < 0 else 0.0
+    return [lo, hi]
+
+
+def _dl_axis_dtick(rng):
+    """주축 눈금 간격 — 범위를 5칸 안팎으로 나누는 1·2·5 단위(0~80 → 20, 0~15 → 5, 0~150 → 50)."""
+    raw = (rng[1] - rng[0]) / 5
+    if raw <= 0:
+        return 1.0
+    mag = 10 ** math.floor(math.log10(raw))
+    for k in (1, 2, 5, 10):
+        if k * mag >= raw - 1e-12:
+            return k * mag
+    return 10 * mag
+
+
 def _dl_rate(c, p):
     return ((c - p) / p) if p else None
 
@@ -5830,43 +5871,50 @@ def render_daily_trend(df):
     if end.date() == dmax:
         st.caption(f"※ 종료일({dmax})은 최신 적재일이에요 — 그날 매출이 하루치 전부 들어왔는지 확인해 주세요.")
 
-    # ── 추세 그래프 (항목41 · 261012, 중태님) ──
-    #  주축(왼쪽): 일매출 막대 + 7일 이동평균(빨강 · 가장 굵게) + 기간 일평균(검정)
-    #  보조축(오른쪽): 누계 매출(반투명 회색 · 조금 굵게) — 일매출보다 단위가 훨씬 커서 축을 따로 쓴다.
-    #  금년 = 실선, 전년 = 같은 색의 가는 점선. 누계는 맨 먼저 그려 다른 선·막대 뒤에 깔리게 한다.
+    # ── 추세 그래프 (항목41 · 261012 → 항목43 · 261012, 중태님) ──
+    #  주축(왼쪽): 7일 이동평균(빨강 · 가장 굵게) + 기간 일평균(검정)
+    #  보조축(오른쪽): 누계 매출(반투명 회색 · 조금 굵게) — 평균보다 단위가 훨씬 커서 축을 따로 쓴다.
+    #  금년 = 실선, 전년 = 같은 색의 가는 점선. 누계는 맨 먼저 그려 다른 선 뒤에 깔리게 한다.
+    #  항목43: 일매출 막대는 전부 뺐다(막대가 주축 최대값을 키워 두 평균선의 변동이 안 보였음 — 일매출은 위 표에 있음).
+    #          주축 최대값은 기본 DL_Y_MAX(80백만), 선이 그 범위를 벗어나면 _dl_axis_range가 자동 조정.
     xlab = [_dl_day_label(t, multi_year) + f"({_DL_DOW[t.weekday()]})" for t in days]
     ptxt = [f"{p.date()} ({_DL_DOW[p.weekday()]})" for p in pdays]
     _cum_nm = "누계"
     _hv = "%{x}<br>%{fullData.name}: %{y:,.1f}백만<extra></extra>"
+    _hvp = "%{x} ↔ %{customdata}<br>%{fullData.name}: %{y:,.1f}백만<extra></extra>"   # 전년 선: 비교한 전년 날짜도 표시
+    _avg_p, _avg_c = (pcum / n) / 1e6, (ccum / n) / 1e6
     fig = go.Figure()
     # 주축 trace는 y2(왼쪽 · 위 레이어), 누계는 y(오른쪽 · 아래 레이어) — 화면상 왼쪽이 주축, 오른쪽이 보조축.
     fig.add_scatter(x=xlab, y=pcum / 1e6, name=f"{ly} {_cum_nm}(오른쪽 축)", mode="lines", yaxis="y",
-                    line=dict(color="rgba(120,124,130,0.45)", width=2.5, dash="dot"), hovertemplate=_hv)
+                    line=dict(color="rgba(120,124,130,0.45)", width=2.5, dash="dot"),
+                    customdata=ptxt, hovertemplate=_hvp)
     fig.add_scatter(x=xlab, y=ccum / 1e6, name=f"{lc} {_cum_nm}(오른쪽 축)", mode="lines", yaxis="y",
                     line=dict(color="rgba(120,124,130,0.50)", width=5), hovertemplate=_hv)
-    fig.add_bar(x=xlab, y=prv / 1e6, name=f"{ly} 일매출", marker_color="#c9ced6", yaxis="y2",
-                customdata=ptxt, hovertemplate="%{customdata}<br>%{y:,.1f}백만<extra></extra>")
-    fig.add_bar(x=xlab, y=cur / 1e6, name=f"{lc} 일매출", marker_color="#8fb4dc", yaxis="y2",
-                hovertemplate="%{x}<br>%{y:,.1f}백만<extra></extra>")
-    fig.add_scatter(x=xlab, y=(pcum / n) / 1e6, name=f"{ly} 기간 일평균", mode="lines", yaxis="y2",
-                    line=dict(color="#111111", width=1.3, dash="dash"), hovertemplate=_hv)
-    fig.add_scatter(x=xlab, y=(ccum / n) / 1e6, name=f"{lc} 기간 일평균", mode="lines", yaxis="y2",
+    fig.add_scatter(x=xlab, y=_avg_p, name=f"{ly} 기간 일평균", mode="lines", yaxis="y2",
+                    line=dict(color="#111111", width=1.3, dash="dash"), customdata=ptxt, hovertemplate=_hvp)
+    fig.add_scatter(x=xlab, y=_avg_c, name=f"{lc} 기간 일평균", mode="lines", yaxis="y2",
                     line=dict(color="#111111", width=2.2), hovertemplate=_hv)
     fig.add_scatter(x=xlab, y=pma / 1e6, name=f"{ly} {DL_MA}", mode="lines", yaxis="y2",
-                    line=dict(color="#d62728", width=1.6, dash="dash"), hovertemplate=_hv)
+                    line=dict(color="#d62728", width=1.6, dash="dash"), customdata=ptxt, hovertemplate=_hvp)
     fig.add_scatter(x=xlab, y=cma / 1e6, name=f"{lc} {DL_MA}", mode="lines", yaxis="y2",
                     line=dict(color="#d62728", width=4.5), hovertemplate=_hv)
+    _yr = _dl_axis_range([_avg_p, _avg_c, pma / 1e6, cma / 1e6])
+    _ytick = _dl_axis_dtick(_yr)
     fig.update_layout(
-        barmode="group", height=400, margin=dict(t=10, b=0, l=0, r=0),
+        height=400, margin=dict(t=10, b=0, l=0, r=0),
         legend=dict(orientation="h", y=1.16, traceorder="reversed"),
         yaxis=dict(title=f"{_cum_nm} (백만원)", side="right", showgrid=False, rangemode="tozero",
                    zeroline=False, tickformat=",.0f"),
-        yaxis2=dict(title="일매출 · 평균 (백만원)", side="left", overlaying="y", rangemode="tozero",
-                    tickformat=",.0f"))
+        # 눈금은 직접 지정(tickmode=linear) — 자동에 맡기면 겹친 오른쪽 축에 맞춰 19·38·56처럼 어중간한 숫자가 찍힌다.
+        yaxis2=dict(title=f"{DL_MA} · 일평균 (백만원)", side="left", overlaying="y", range=_yr,
+                    tickmode="linear", tick0=0, dtick=_ytick,
+                    tickformat=(",.0f" if _ytick >= 1 else (",.1f" if _ytick >= 0.1 else ",.2f"))))
     st.plotly_chart(fig, use_container_width=True)
-    st.caption(f"※ 막대 = 그날 매출 · **빨간 선 = {DL_MA}** · 검정 선 = 시작일부터의 일평균 · "
-               f"회색 굵은 선 = 누계(오른쪽 축) · 실선 = {lc}, 점선 = {ly}. "
-               "범례의 이름을 누르면 그 선만 숨기거나 다시 볼 수 있어요. 막대에 마우스를 올리면 비교한 전년 날짜가 떠요.")
+    _yr_txt = (f"왼쪽 축은 0~{DL_Y_MAX}백만 고정" if _yr == [0.0, float(DL_Y_MAX)]
+               else f"왼쪽 축은 선 크기에 맞춰 {_yr[0]:,.4g}~{_yr[1]:,.4g}백만으로 자동 조정(기본 0~{DL_Y_MAX})")
+    st.caption(f"※ **빨간 선 = {DL_MA}** · 검정 선 = 시작일부터의 일평균 · "
+               f"회색 굵은 선 = 누계(오른쪽 축) · 실선 = {lc}, 점선 = {ly}. {_yr_txt}. "
+               "범례의 이름을 누르면 그 선만 숨기거나 다시 볼 수 있어요. 점선에 마우스를 올리면 비교한 전년 날짜가 떠요.")
 
 
 # ==============================================================================
