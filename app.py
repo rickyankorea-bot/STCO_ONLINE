@@ -5487,8 +5487,13 @@ def render_weekly_report(df):
 #  (2) 조회 시작일 기본 = 종료일이 속한 달의 1일(월간 기준). 시작~종료가 여러 달에 걸치면
 #      누계 블록 이름이 '월간 누계 매출' → '기간 누계 매출'로 자동 전환 (주간현황 항목29와 같은 규칙).
 #  누계·일평균은 조회 시작일부터 그날까지(달이 바뀌어도 리셋하지 않음) — 일평균 = 누계 ÷ 경과 일수.
+#  (3) 항목40(261012, 중태님): 맨 오른쪽에 '7일 이동평균' 블록 — 그날 포함 최근 7일(달력일) 매출 합계 ÷ 7.
+#      요일을 한 바퀴 다 담으므로 요일별 매출 편차가 지워진 실제 추세가 보인다. 누계·일평균과 달리
+#      조회 시작일 이전 날짜도 창에 들어간다(예: 10/1의 값 = 9/25~10/1). 전년 칸 = 비교일 기준 최근 7일.
 DL_BASIS_DATE, DL_BASIS_DOW = "일자기준", "요일기준"
 DL_DAILY, DL_MON_CUM, DL_RANGE_CUM, DL_AVG = "일자별 매출", "월간 누계 매출", "기간 누계 매출", "기간 일평균 매출"
+DL_MA_N = 7
+DL_MA = f"{DL_MA_N}일 이동평균"
 _DL_DOW = ["월", "화", "수", "목", "금", "토", "일"]
 
 
@@ -5526,6 +5531,25 @@ def _dl_build(fd, start, end, basis, last_day=None):
     return days, pdays, cur, prv, ccum, pcum, n
 
 
+def _dl_moving_avg(fd, targets, first_day=None, last_day=None, win=DL_MA_N):
+    """항목40: targets의 날짜마다 '그날 포함 최근 win일' 매출 평균 — 달력일 기준(매출 0인 날도 분모에 포함).
+    값을 낼 수 없는 날은 NaN(화면 빈칸): 창이 데이터 시작일(first_day) 이전으로 넘어가 win일을 다 못 채우거나,
+    그날이 최신 업로드일(last_day) 뒤일 때."""
+    daily = fd.groupby(fd["_판매일"].dt.normalize())["_매출액"].sum()
+    dd = {pd.Timestamp(k): float(v) for k, v in daily.items()}
+    lo = pd.Timestamp(first_day) if first_day is not None else None
+    hi = pd.Timestamp(last_day) if last_day is not None else None
+    one = pd.Timedelta(days=1)
+    out = []
+    for t in targets:
+        t = pd.Timestamp(t)
+        if (hi is not None and t > hi) or (lo is not None and t - one * (win - 1) < lo):
+            out.append(np.nan)
+            continue
+        out.append(sum(dd.get(t - one * k, 0.0) for k in range(win)) / win)
+    return np.array(out, dtype=float)
+
+
 def _dl_weekend(v):
     """요일 칸 값('토'·'일' 또는 '9/6 (토)')이 주말이면 '토'/'일', 아니면 ''."""
     s = str(v).strip()
@@ -5540,7 +5564,7 @@ def _dl_rate(c, p):
 
 
 def _dl_excel_bytes(disp, sheet, block_starts):
-    """룰11·13: 화면 서식 그대로 엑셀 + 블록(요일|일자별|누계|일평균) 경계마다 두꺼운 세로선(룰12)."""
+    """룰11·13: 화면 서식 그대로 엑셀 + 블록(요일|일자별|누계|일평균|7일 이동평균) 경계마다 두꺼운 세로선(룰12)."""
     from openpyxl import load_workbook
     from openpyxl.styles import Border, Side, Font
     raw = styled_excel_bytes(disp, sheet, first_block_cols=block_starts[0])
@@ -5622,9 +5646,11 @@ def render_daily_trend(df):
     sels = fc3.multiselect("시즌별", _seasons, default=[], placeholder="전체", key="dl_fs")
 
     # 필요한 기간(금년 조회기간 + 전년 비교기간)만 잘라서 계산 — 메모리 절약
+    # 항목40: 7일 이동평균은 조회 시작일 앞 6일의 매출도 필요 → 두 구간 모두 앞쪽으로 (DL_MA_N-1)일 넓힌다.
+    _ma_back = pd.Timedelta(days=DL_MA_N - 1)
     p_lo = min(_dl_prev_date(start, basis), start - pd.DateOffset(years=1))
-    m = ((d["_판매일"] >= start) & (d["_판매일"] < end + pd.Timedelta(days=1))) | \
-        ((d["_판매일"] >= p_lo) & (d["_판매일"] < _dl_prev_date(end, basis) + pd.Timedelta(days=2)))
+    m = ((d["_판매일"] >= start - _ma_back) & (d["_판매일"] < end + pd.Timedelta(days=1))) | \
+        ((d["_판매일"] >= p_lo - _ma_back) & (d["_판매일"] < _dl_prev_date(end, basis) + pd.Timedelta(days=2)))
     fd = d.loc[m, ["_판매일", "_매출액"] + [c for c in ("브랜드명", "연차", "시즌명") if c in d.columns]]
     if selb:
         fd = fd[fd["브랜드명"].isin(selb)]
@@ -5634,6 +5660,9 @@ def render_daily_trend(df):
         fd = fd[fd["시즌명"].isin(sels)]
 
     days, pdays, cur, prv, ccum, pcum, n = _dl_build(fd, start, end, basis, last_day=dmax)
+    # 항목40: 7일 이동평균 — 금년은 그날 기준, 전년은 비교일 기준 최근 7일
+    cma = _dl_moving_avg(fd, days, first_day=dmin, last_day=dmax)
+    pma = _dl_moving_avg(fd, pdays, first_day=dmin, last_day=dmax)
     beyond_upload_note(end, dmax)   # 항목38
     multi_year = start.year != end.year
     if multi_year:
@@ -5641,24 +5670,33 @@ def render_daily_trend(df):
     else:
         ly, lc = f"{str(end.year - 1)[-2:]}년", f"{str(end.year)[-2:]}년"
 
-    # ── 표 구성 (중태님 양식 그대로: 요일 | 일자별 | 누계 | 일평균) ──
+    # ── 표 구성 (중태님 양식: 요일 | 일자별 | 누계 | 일평균 | 7일 이동평균(항목40)) ──
     W = "요일" if basis == DL_BASIS_DATE else "비교일 · 요일"
     cols = [(W, "전년"), (W, "금년"),
             (DL_DAILY, ly), (DL_DAILY, lc), (DL_DAILY, "증감율"),
             (cum_label, ly), (cum_label, lc), (cum_label, "증감율"),
-            (DL_AVG, ly), (DL_AVG, lc), (DL_AVG, "증감율")]
+            (DL_AVG, ly), (DL_AVG, lc), (DL_AVG, "증감율"),
+            (DL_MA, ly), (DL_MA, lc), (DL_MA, "증감율")]
     tot_p, N = float(pcum[-1]), int(n[-1])
     # 항목38: 올해는 업로드된 날까지만 — 합계·일평균의 올해 분모는 실제 데이터가 있는 일수
     _ok = ~np.isnan(ccum)
     tot_c = float(ccum[_ok][-1]) if _ok.any() else 0.0
     N_c = int(_ok.sum())
+    # 항목40: 기간 합계 행의 7일 이동평균 = 올해 데이터가 있는 마지막 날의 값(=가장 최근 추세), 전년도 같은 행.
+    #         이동평균은 합계가 아니라 '시점' 값이라 금년·전년을 같은 날 기준으로 맞춰 비교한다.
+    if _ok.any():
+        _il = int(np.where(_ok)[0][-1])
+        tot_ma = [pma[_il], cma[_il], _dl_rate(cma[_il], pma[_il])]
+    else:
+        tot_ma = [np.nan, np.nan, np.nan]
     rows, idx = [], []
     # 첫 행 = 기간 합계(룰6 노란 강조 — G.TOTAL 자리)
     rows.append([f"{pdays[0].month}/{pdays[0].day}~{pdays[-1].month}/{pdays[-1].day}"
                  if basis == DL_BASIS_DOW else "", (f"{N}일" if N_c == N else f"{N_c}/{N}일"),
                  tot_p, tot_c, _dl_rate(tot_c, tot_p),
                  tot_p, tot_c, _dl_rate(tot_c, tot_p),
-                 tot_p / N, (tot_c / N_c if N_c else 0.0), _dl_rate(tot_c / N_c if N_c else 0.0, tot_p / N)])
+                 tot_p / N, (tot_c / N_c if N_c else 0.0), _dl_rate(tot_c / N_c if N_c else 0.0, tot_p / N)]
+                + tot_ma)
     idx.append("기간 합계")
     for i, t in enumerate(days):
         p = pdays[i]
@@ -5668,7 +5706,8 @@ def render_daily_trend(df):
         rows.append([prev_txt, _DL_DOW[t.weekday()],
                      prv[i], cur[i], _dl_rate(cur[i], prv[i]),
                      pcum[i], ccum[i], _dl_rate(ccum[i], pcum[i]),
-                     pcum[i] / n[i], ccum[i] / n[i], _dl_rate(ccum[i], pcum[i])])
+                     pcum[i] / n[i], ccum[i] / n[i], _dl_rate(ccum[i], pcum[i]),
+                     pma[i], cma[i], _dl_rate(cma[i], pma[i])])
         idx.append(_dl_day_label(t, multi_year))
     D = pd.DataFrame(rows, index=pd.Index(idx, name="일자"), columns=pd.MultiIndex.from_tuples(cols))
 
@@ -5702,8 +5741,8 @@ def render_daily_trend(df):
             sty = sty.apply(lambda s, cc=c: _dow_color(cc), subset=pd.IndexSlice[:, [c]])
     sty = sty.set_properties(**{"text-align": "right"})
     sty = sty.set_properties(subset=pd.IndexSlice[:, [(W, "전년"), (W, "금년")]], **{"text-align": "center"})
-    # 룰12: 블록 경계 두꺼운 세로선 — 요일(2) | 일자별(3) | 누계(3) | 일평균(3)
-    starts = [2, 5, 8]
+    # 룰12: 블록 경계 두꺼운 세로선 — 요일(2) | 일자별(3) | 누계(3) | 일평균(3) | 7일 이동평균(3)
+    starts = [2, 5, 8, 11]
     sty = sty.set_table_styles(
         [{"selector": f"th.col{k}", "props": [("border-left", "3px solid #555555")]} for k in starts] +
         [{"selector": f"td.col{k}", "props": [("border-left", "3px solid #555555")]} for k in starts],
@@ -5712,6 +5751,9 @@ def render_daily_trend(df):
     _basis_txt = ("전년 같은 날짜" if basis == DL_BASIS_DATE else "전년 같은 요일(364일 전)")
     st.caption(f"비교: {_basis_txt} · 매출=실판가(실매출, 백만원) · 누계·일평균은 조회 시작일부터 그날까지 "
                f"· 일평균=누계÷경과 일수")
+    st.caption(f"{DL_MA} = 그날 포함 최근 {DL_MA_N}일 매출 합계 ÷ {DL_MA_N} — 조회 시작일 이전 날짜도 계산에 들어가요"
+               f"(예: {start.month}/{start.day}의 값 = {(start - _ma_back).month}/{(start - _ma_back).day}"
+               f"~{start.month}/{start.day} 평균). 기간 합계 행에는 가장 최근 날짜의 값이 표시돼요.")
     if selb or sela or sels:
         st.caption("🔎 필터 적용 중 — 표의 모든 숫자는 선택한 브랜드·연차·시즌 기준이에요.")
     h1, h2 = st.columns([5, 1])
