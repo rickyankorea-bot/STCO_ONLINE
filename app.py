@@ -8213,6 +8213,21 @@ TREND_SMOOTH = {
     "3주 중앙값 (단발 폭증에 강함)": ("median", 3),
 }
 TREND_SMOOTH_DEFAULT = "3주 이동평균 (권장)"
+# 항목45(261015, 중태님): 축 높이 맞춤 — 축 기준 최대값이 항상 축 높이의 80% 지점에 오도록 축 최대 = 최대값 ÷ 0.8.
+#  · 주축: 올해 선택 계열(실선)의 최대값 기준. 전년 점선이 이보다 높으면 위가 잘린다(마우스 오버 수치는 그대로).
+#  · 보조축(회사 전체 실판가): 같은 규칙으로 회색선 최대값이 80% 지점 → 두 묶음이 같은 높이대에서 움직여 모양 비교가 쉬움.
+TREND_AXIS_FILL = 0.8
+
+
+def _trend_axis_range(vals, fill=TREND_AXIS_FILL):
+    """[하한, 상한] — 상한 = 최대값 ÷ fill(최대값이 축의 fill 지점), 하한 = 0(음수가 있으면 최소값 ÷ fill). 값 없으면 None."""
+    v = pd.to_numeric(pd.Series(np.asarray(vals, dtype="float64").ravel()), errors="coerce").dropna()
+    if v.empty:
+        return None
+    hi, lo = float(v.max()), float(v.min())
+    if hi <= 0:
+        return None
+    return [min(0.0, lo / fill), hi / fill]
 
 
 def _trend_smooth(M, mode):
@@ -8682,10 +8697,17 @@ def render_trend_weekly(df):
         fig.update_layout(yaxis2=dict(title="기온(℃)", overlaying="y", side="right",
                                       showgrid=False, zeroline=True, zerolinecolor="#ddd",
                                       tickfont=dict(size=FS["y"]), title_font=dict(size=FS["ax"])))
+    # 항목45: 주축 = 올해 선택 계열 최대값이 축의 80% 지점
+    _yr_main = _trend_axis_range(M[picked].to_numpy(dtype="float64"))
+    if _yr_main:
+        fig.update_layout(yaxis=dict(range=_yr_main, autorange=False))
     if has_tot:
         y3 = dict(title="회사 전체 실판가(백만)", overlaying="y", side="right", showgrid=False,
                   rangemode="tozero", tickfont=dict(size=FS["y"], color="#7E838A"),
                   title_font=dict(size=FS["ax"], color="#7E838A"))
+        _yr_tot = _trend_axis_range(tot_ser.to_numpy(dtype="float64"))   # 항목45: 회색선 최대값도 80% 지점
+        if _yr_tot:
+            y3.update(range=_yr_tot, autorange=False)
         if n_right > 1:                      # 기온 축 바깥쪽(맨 오른쪽)에 한 칸 띄워 배치
             y3.update(anchor="free", position=1.0)
         fig.update_layout(yaxis3=y3)
@@ -8706,7 +8728,10 @@ def render_trend_weekly(df):
                   "**기준축·필터·계열 선택을 바꿔도 이 선은 항상 회사 전체로 고정**돼요 — "
                   "그래야 '신발만 봤을 때 전체 흐름과 어떻게 다른가'를 비교할 수 있으니까요. "
                   "개별 계열과 자릿수가 달라 별도 축을 쓰니 **선의 높낮이가 아니라 오르내리는 모양**을 비교해 주세요."
-                  if has_tot else ""))
+                  if has_tot else "")
+               + "  📏 두 축 모두 **가장 큰 값이 축 높이의 80%**에 오도록 맞췄어요(주축은 올해 실선 기준"
+               + (" — 전년 점선이 더 높은 주는 위가 잘려 보여도 마우스를 올리면 실제 값이 나와요" if show_prev else "")
+               + ").")
 
     # ── 시점 요약표 (본격 상승 · 피크 · 피크아웃) ────────────────────
     tot_all = float(cur["_매출액"].sum())
