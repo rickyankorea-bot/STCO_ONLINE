@@ -6041,15 +6041,17 @@ def _ms_tables(res, rows, cy, py):
 _MS_GROUP_ITEMS = ("자사채널", "외부몰(네이버제외)", "외부몰(네이버포함)")
 
 
-def _ms_style(disp, sign=None):
-    """증감율 행 = 작은 글씨 + 빨강/초록 · 채널 묶음 3줄 = 하늘색 · 당월누계 뒤 굵은 경계선(룰12)."""
+def _ms_style(disp, sign=None, groups=None):
+    """증감율 행 = 작은 글씨 + 빨강/초록 · 채널 묶음 3줄 = 하늘색 · 당월누계 뒤 굵은 경계선(룰12).
+    groups(항목44): 하늘색으로 칠할 '항목' 값 — 기본은 채널 묶음 3줄, 매장별 보기에선 유통별 '합계' 줄."""
     S = np.array(sign) if sign is not None else None
+    groups = _MS_GROUP_ITEMS if groups is None else groups
 
     def _f(_):
         css = pd.DataFrame("", index=disp.index, columns=disp.columns)
         for i, ix in enumerate(disp.index):
             row_css = []
-            if ix[1] in _MS_GROUP_ITEMS:
+            if ix[1] in groups:
                 row_css.append("background:#eaf6fc")
             if ix[3] == MS_RATE:
                 row_css.append("font-size:0.74rem")
@@ -6070,20 +6072,21 @@ def _ms_style(disp, sign=None):
     return sty
 
 
-def _ms_excel_bytes(top, sign, bot, cy, py, asof, vat="VAT+"):
+def _ms_excel_bytes(top, sign, bot, cy, py, asof, vat="VAT+", title="월간 매출 현황", groups=None):
     """두 표를 양식처럼 한 시트에 위(올해+증감율)·아래(전년)로 쌓아 화면 서식 그대로 내려받기(룰11·13)."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     wb = Workbook()
     ws = wb.active
-    ws.title = "월간 매출 현황"
+    ws.title = title
+    groups = _MS_GROUP_ITEMS if groups is None else groups
     thin, thick = Side(style="thin", color="D9D9D9"), Side(style="medium", color="555555")
     head_fill = PatternFill("solid", fgColor="F4F4F6")
     idx_fill = PatternFill("solid", fgColor="FAFAFA")
     gt_fill = PatternFill("solid", fgColor="FFF2B8")
     grp_fill = PatternFill("solid", fgColor="EAF6FC")
-    ws.cell(1, 1, f"월간 매출 현황 · 기준일 {asof.date()} · [금액: 백만원 / {vat}]").font = Font(bold=True, size=12)
+    ws.cell(1, 1, f"{title} · 기준일 {asof.date()} · [금액: 백만원 / {vat}]").font = Font(bold=True, size=12)
     r0 = 3
 
     def put(df, sgn, start):
@@ -6095,7 +6098,7 @@ def _ms_excel_bytes(top, sign, bot, cy, py, asof, vat="VAT+"):
         for i, (ix, row) in enumerate(df.iterrows()):
             r = start + 1 + i
             is_gt = ix[1] == "G.TOTAL"
-            fill = gt_fill if is_gt else (grp_fill if ix[1] in _MS_GROUP_ITEMS else None)
+            fill = gt_fill if is_gt else (grp_fill if ix[1] in groups else None)
             lab = list(ix) if ix[3] != MS_RATE else ["", "", "", MS_RATE]
             for k, v in enumerate(lab, 1):
                 c = ws.cell(r, k, v)
@@ -6151,13 +6154,14 @@ def _ms_section_starts(index):
     return out
 
 
-def _ms_render(sty, disp, tag):
+def _ms_render(sty, disp, tag, widths=None):
     """월간 매출 현황 표 렌더.
     · 35-3: 칸 너비 고정(_MS_COL_W) + 표 폭 고정 → 올해·전년 표의 세로 칸이 위아래로 정확히 일치.
     · 35-4: 대분류(전체 / 유통별 / 브랜드별)가 바뀌는 줄 위에 굵은 검정 선."""
+    widths = widths or _MS_COL_W
     cls = f"ms-tbl ms-{tag}"
-    html = sty.set_table_attributes(f'class="erp-tbl {cls}" style="width:{sum(_MS_COL_W)}px"').to_html()
-    cg = "<colgroup>" + "".join(f'<col style="width:{w}px">' for w in _MS_COL_W) + "</colgroup>"
+    html = sty.set_table_attributes(f'class="erp-tbl {cls}" style="width:{sum(widths)}px"').to_html()
+    cg = "<colgroup>" + "".join(f'<col style="width:{w}px">' for w in widths) + "</colgroup>"
     i = html.index(">", html.index("<table")) + 1
     html = html[:i] + cg + html[i:]
     sel = ",".join(f"table.ms-{tag} tbody tr:nth-child({n}) th, table.ms-{tag} tbody tr:nth-child({n}) td"
@@ -6220,6 +6224,106 @@ def render_monthly_status(df):
     _ms_render(_ms_style(bot), bot, "bot")
     st.caption(f"※ 전년 표의 월 칸은 한 달 전체 실적(참고용). 연간 토탈은 {asof_p_txt(asof)}까지의 같은 기간, "
                f"당월누계는 1월–마감월 말일까지예요.")
+
+    # 항목44(261015, 중태님): 표 아래 큰 '매장별 보기' 버튼 → 같은 형식의 매장별 월간 표 펼치기/접기
+    _open = bool(st.session_state.get("ms_store_open", False))
+    st.markdown(_MS_STORE_BTN_CSS, unsafe_allow_html=True)
+    st.button("🏬  매장별 닫기  ▲" if _open else "🏬  매장별 보기  ▼", key="ms_store_btn",
+              type="primary", use_container_width=True, on_click=_ms_toggle_store)
+    if _open:
+        _ms_store_section(d, asof, cy, py, dmax, vat, _note)
+
+
+# ------------------------------------------------------------------------------
+# 항목44(261015): 월간 매출 현황 '매장별 보기' — 위 월간 표와 같은 계산(_ms_compute)·같은 칸 너비·같은 서식.
+#  · 행 = G.TOTAL → 유통별(통합몰·네이버스토어·원래직입점·웹뜰이관·웍스바이이관·기타) [합계 줄 + 매장들].
+#  · 매장의 유통 = 주간현황과 같은 _CHANNEL_MASKS(매장코드·채널스토리)로 판정, 어디에도 안 걸리면 '기타'.
+#  · 같은 유통 안에서는 올해 연간 토탈 큰 순. 올해·전년 둘 다 0인 매장은 표에서 빠진다.
+#  · 계산 전에 (매장코드·채널스토리·판매일) 단위로 먼저 합쳐 매장 수가 많아도 가볍게 돈다(값은 동일).
+# ------------------------------------------------------------------------------
+_MS_STORE_BTN_CSS = """
+<style>
+.st-key-ms_store_btn{margin-top:18px;}
+.st-key-ms_store_btn button{min-height:64px !important;border-radius:14px !important;}
+.st-key-ms_store_btn button p{font-size:1.25rem !important;font-weight:700 !important;letter-spacing:0.02em;}
+</style>
+"""
+_MS_STORE_SUM = "합계"
+_MS_STORE_COL_W = [100, 150, 64, 78] + _MS_COL_W[4:]   # 유통명·매장명이 길어 앞 4칸만 넓힘 (매장별 올해·전년 표 공통)
+_MS_STORE_ETC = "기타"
+
+
+def _ms_toggle_store():
+    st.session_state["ms_store_open"] = not st.session_state.get("ms_store_open", False)
+
+
+def _ms_store_rows(d, cy):
+    """매장별 행 정의 [(키, mask)] + 유통 순서. 키 = (유통, 매장명 or '합계', 매장코드 or '매장 n개')."""
+    code = d["매장코드"].astype(str).str.strip()
+    names = {}
+    if "매장명" in d.columns:
+        _nm = pd.DataFrame({"c": code, "n": d["매장명"].astype(str).str.strip()})
+        names = _nm.drop_duplicates("c", keep="last").set_index("c")["n"].to_dict()
+    # 매장 → 유통 (주간현황 기준 마스크 순서대로 첫 번째로 걸리는 유통)
+    ch_of = {}
+    for ch, m in _CHANNEL_MASKS.items():
+        hit = code[m(d).fillna(False)].unique()
+        for c in hit:
+            ch_of.setdefault(c, ch)
+    cy_sum = d.loc[d["_판매일"].dt.year == cy].groupby(code)["_매출액"].sum().to_dict()
+    tot = d.groupby(code)["_매출액"].apply(lambda v: float(v.abs().sum())).to_dict()
+    stores = [c for c in code.unique() if c not in ("nan", "None", "") and tot.get(c, 0)]
+    order = list(_CHANNEL_MASKS.keys()) + [_MS_STORE_ETC]
+    rows = [(("전체", "G.TOTAL", ""), lambda x: pd.Series(True, index=x.index))]
+    for ch in order:
+        members = [c for c in stores if ch_of.get(c, _MS_STORE_ETC) == ch]
+        if not members:
+            continue
+        members.sort(key=lambda c: -cy_sum.get(c, 0.0))
+        rows.append(((ch, _MS_STORE_SUM, f"{len(members)}개 매장"),
+                     (lambda ms: (lambda x: x["매장코드"].astype(str).str.strip().isin(ms)))(members)))
+        for c in members:
+            rows.append(((ch, names.get(c, c) or c, c),
+                         (lambda cc: (lambda x: x["매장코드"].astype(str).str.strip() == cc))(c)))
+    return rows
+
+
+def _ms_store_section(d, asof, cy, py, dmax, vat, note):
+    st.markdown("#### 🏬 매장별 월간 매출 (월별 · 전년 비교)")
+    sl = d[(d["_판매일"] >= pd.Timestamp(py, 1, 1)) & (d["_판매일"] < pd.Timestamp(cy + 1, 1, 1))].copy()
+    if sl.empty:
+        st.info("기준일 기준 올해·전년 데이터가 없어요.")
+        return
+    sl["매장코드"] = sl["매장코드"].astype(str).str.strip()
+    sl["_채널스토리"] = sl["_채널스토리"].astype(str)
+    keep = ["매장코드", "_채널스토리"] + (["매장명"] if "매장명" in sl.columns else [])
+    if "매장명" in sl.columns:
+        sl["매장명"] = sl["매장명"].astype(str)
+    sl["_판매일"] = sl["_판매일"].dt.normalize()
+    slim = sl.groupby(keep + ["_판매일"], dropna=False, observed=True)["_매출액"].sum().reset_index()
+    rows = _ms_store_rows(slim, cy)
+    chans = [ch for ch in list(_CHANNEL_MASKS.keys()) + [_MS_STORE_ETC]
+             if any(k[0] == ch for k, _ in rows)]
+    f1, _f2 = st.columns([1, 2])
+    pick = f1.selectbox("유통 선택", ["전체"] + chans, key="ms_store_ch")
+    if pick != "전체":
+        rows = [r for r in rows if r[0][0] == pick]
+    res = _ms_compute(slim, asof, rows, last_day=dmax)
+    top, sign, bot = _ms_tables(res, rows, cy, py)
+    grp = (_MS_STORE_SUM,)
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(f"**{str(cy)[-2:]}년 매장별 월간 매출 + 전년 대비 증감율 · 기준일 {asof.date()}**" + note,
+                unsafe_allow_html=True)
+    h2.download_button("⬇ 엑셀", _ms_excel_bytes(top, sign, bot, cy, py, asof, vat,
+                                                 title="매장별 월간 매출", groups=grp),
+                       file_name=f"매장별_월간매출_{asof.date()}_{vat}.xlsx", mime=XLSX_MIME,
+                       key="ms_store_xls", use_container_width=True)
+    _ms_render(_ms_style(top, sign, groups=grp), top, "stop", _MS_STORE_COL_W)
+    st.caption("※ 매장의 유통은 주간현황 분석과 같은 기준(매장코드·채널스토리)이고, 5개 유통에 안 걸리는 매장은 '기타'로 모았어요. "
+               "같은 유통 안에서는 올해 연간 토탈이 큰 매장부터, 세부 칸은 매장코드예요. "
+               "계산 규칙(연간 토탈·당월누계·진행 중인 달)은 위 월간 표와 같아요.")
+    st.markdown(f"**{str(py)[-2:]}년 매장별 월간 매출 (전년 · 참고)**" + note, unsafe_allow_html=True)
+    _ms_render(_ms_style(bot, groups=grp), bot, "sbot", _MS_STORE_COL_W)
 
 
 def asof_p_txt(asof):
