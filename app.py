@@ -1583,13 +1583,19 @@ def render_flagship(df):
     _all_min, _all_max = d["_판매일"].min().date(), d["_판매일"].max().date()
     with st.form("fs_form"):
         # 항목30(261006): 당월누계 시작일 칸 추가 · 항목32(261006): 기준기간을 시작일·종료일 두 칸으로 분리
-        f1, f2a, f2b, f3 = st.columns([0.8, 1.1, 1.5, 1.8])
+        # 항목46(261019, 중태님 요청): '기준기간 시작일' 칸 제거 → 입력은 [기준연도 · 조회 시작일 · 조회 종료일].
+        #   · 조회 시작일~종료일 = 첫 블록(같은 달이면 '당월누계', 달이 다르면 '조회기간')
+        #   · 연간누계 블록·상단 KPI = 항상 종료일 연도의 1/1 → 조회 종료일 (시작일과 무관)
+        #   예전엔 연간누계가 '기준기간 시작일'을 따라가서, 그 칸을 9/1로 바꾸면 연간누계가
+        #   (09/01→10/16)으로 나오는 문제가 있었다.
+        f1, f3, f2b = st.columns([0.8, 2.0, 1.6])
         with f1:
             cy = st.selectbox("기준연도", years, index=0, key="fs_y")
         cur_all = d[d["_판매일"].dt.year == cy]
         dmin, dmax = cur_all["_판매일"].min().date(), cur_all["_판매일"].max().date()
-        rng = date_range_input("기준기간", (dmin, dmax), min_value=_all_min, max_value=year_end_of(_all_max),
-                               key="fs_rng", hint=f"전년 {cy-1} 동기간 자동", cols=(f2a, f2b))
+        _e_in = f2b.date_input(f"조회 종료일 (전년 {cy-1} 동기간 자동)", value=dmax,
+                               min_value=_all_min, max_value=year_end_of(_all_max), key="fs_rng_e")
+        rng = (_e_in.replace(month=1, day=1), _e_in) if _e_in is not None else ()
         # ── 항목30(261006): '당월누계' 블록의 시작일 직접 지정 (주간현황 항목29와 같은 규칙) ──
         # · 기본값 = 기준기간 끝날짜가 속한 달의 1일(= 지금까지의 당월누계). 손대지 않으면 끝날짜를
         #   바꿔 조회할 때마다 그 달 1일로 따라가고, 직접 고치면 그 날짜가 유지된다. 다시 그 달 1일로
@@ -1614,7 +1620,7 @@ def render_flagship(df):
             st.session_state["fs_ms"] = _ms_val
         st.session_state["_fs_ms_auto"] = _ms_def
         with f3:
-            st.date_input("당월누계 시작일 (기본: 종료일이 속한 달 1일 · 수정 가능)",
+            st.date_input("조회 시작일 (기본: 종료일이 속한 달 1일 · 앞 달로 당기면 '조회기간')",
                           min_value=_all_min, max_value=year_end_of(_all_max), key="fs_ms")
         # 공통 필터 (주간보고 방식) — 브랜드별 → 연차별 → 시즌별 · 빈칸=전체
         fb1, fb2, fb3 = st.columns(3)
@@ -1626,10 +1632,11 @@ def render_flagship(df):
         sels = fb3.multiselect("시즌별", seasons, default=[], placeholder="전체", key="fs_s")
         chans = sorted(d["_채널"].dropna().unique()) if "_채널" in d.columns else []
         selc = st.multiselect("매장/채널", chans, default=[], placeholder="전체", key="fs_c")
-        st.caption("※ 기준연도를 바꿨다면 기준기간 날짜도 그 연도로 맞춘 뒤 🔍 조회를 눌러 주세요. "
-                   "(실제 집계는 기준기간 날짜를 따라요)  \n"
-                   "※ **당월누계 시작일**을 앞 달로 당기면(예: 9/20) 모든 표의 '당월누계' 블록이 "
-                   "그 날짜부터 종료일까지의 '조회기간'으로 바뀌어요. 연간누계 블록은 기준기간 그대로예요.")
+        st.caption("※ 기준연도를 바꿨다면 조회 날짜도 그 연도로 맞춘 뒤 🔍 조회를 눌러 주세요. "
+                   "(실제 집계는 조회 날짜를 따라요)  \n"
+                   "※ **조회 시작일**을 앞 달로 당기면(예: 9/1) 모든 표의 '당월누계' 블록이 "
+                   "그 날짜부터 종료일까지의 '조회기간'으로 바뀌어요. **연간누계 블록과 상단 KPI는 "
+                   "항상 1/1 → 조회 종료일**이에요.")
         run = st.form_submit_button("🔍 조회", type="primary")
     if _need_search("fs_go", run):
         # 2026-08-06: 조회 전에도 "이 화면이 뭘 보여주는 표인지" 헤더만 미리 보여줌 —
@@ -1642,9 +1649,9 @@ def render_flagship(df):
         return
 
     if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
-        st.info("기간(시작~끝)을 선택한 뒤 🔍 조회를 눌러 주세요.")
+        st.info("조회 종료일을 선택한 뒤 🔍 조회를 눌러 주세요.")
         return
-    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])
+    s, e = pd.to_datetime(rng[0]), pd.to_datetime(rng[1])   # 항목46: s = 종료일 연도 1/1 (연간누계·KPI)
     beyond_upload_note(e, _all_max)   # 항목38
     base = d.copy()
     if selb and "브랜드명" in base:
@@ -1663,7 +1670,7 @@ def render_flagship(df):
     if ms > e:                      # 방어: 폼 계산과 어긋난 경우(이론상 없음) 그 달 1일로
         ms, _ms_note = e.replace(day=1), True
     if _ms_note:
-        st.caption("⚠️ 당월누계 시작일이 기준기간 종료일보다 늦어서, 종료일이 속한 달의 1일로 되돌렸어요.")
+        st.caption("⚠️ 조회 시작일이 조회 종료일보다 늦어서, 종료일이 속한 달의 1일로 되돌렸어요.")
     cur_m = base[(base["_판매일"] >= ms) & (base["_판매일"] <= e)]
     prev_m = base[(base["_판매일"] >= ms - pd.DateOffset(years=1)) & (base["_판매일"] <= e - pd.DateOffset(years=1))]
     _fs_multi = (ms.year, ms.month) != (e.year, e.month)      # 복수의 달 → '조회기간'
