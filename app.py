@@ -3919,8 +3919,11 @@ def render_category_mix(df):
 # 매장(채널) 기준정보 마스터  ─ 업로드 시 전체 교체
 # ==============================================================================
 MASTER_TABLE = "channel_master"
-MASTER_COLS = ["매장코드", "매장명", "담당자", "유통성격", "채널소유", "채널스토리", "리그구분"]
+MASTER_COLS = ["매장코드", "매장명", "담당자", "유통성격", "채널소유", "채널스토리", "리그구분", "매장통합"]
 # ↑ 리그구분 (2026-07-31 추가): 1부리그/2부리그/꿈나무리그 — 대시보드 채널 리그 랭킹용
+# ↑ 매장통합 (항목47, 261026 중태님): 엑셀 헤더 '매장통합(전년대비)'(괄호 표기 무관, '매장통합'으로 시작하면 인식).
+#   예) SD182 행의 매장통합 = SD157 → 작년에 SD157로 잡힌 매출을 SD182 매출로 보고 전년대비 분석.
+#   여러 개면 쉼표·슬래시·공백으로 구분(SD157, SD160). 비워두면 통합 없음.
 
 
 def read_master_file(uploaded_file):
@@ -3936,8 +3939,11 @@ def read_master_file(uploaded_file):
             hrow = i
             break
     header = [str(v).strip() for v in raw.iloc[hrow].tolist()]
+    # 항목47: '매장통합(전년대비)' 처럼 괄호 설명이 붙은 헤더도 '매장통합'으로 인식
+    header = ["매장통합" if h.replace(" ", "").startswith("매장통합") else h for h in header]
     m = raw.iloc[hrow + 1:].copy()
     m.columns = header
+    m = m.loc[:, ~pd.Index(header).duplicated()]
     m = m.dropna(how="all")
     keep = [c for c in MASTER_COLS if c in m.columns]
     m = m[keep].copy()
@@ -3974,6 +3980,100 @@ def load_master():
     for c in m.columns:
         m[c] = m[c].astype(str).str.strip()
     return m
+
+
+# ── 항목47(261026, 중태님): 매장통합(전년대비) ──────────────────────────────────
+#  같은 매장인데 작년엔 SD157, 올해는 SD182로 매출을 등록한 경우, 전년대비 분석이 끊긴다.
+#  매장 기준정보의 '매장통합' 칸(SD182 행 = SD157)을 읽어, 전년대비를 보는 분석 메뉴에서는
+#  SD157 매출을 SD182(매장명·담당자·유통·채널스토리 전부 SD182 기준)로 바꿔 '한 매장'으로 본다.
+#  · 원본 DB·캐시(load_db)는 건드리지 않음 — 메뉴에 넘기기 직전에 매장코드·매장명·_채널 3칸만 교체한 사본.
+#  · category 코드 배열만 다시 매기므로 행 복제 없이 가볍다(메모리 대책 260922 유지).
+#  · A→B, B→C 처럼 이어지면 최종 C로 모음. 자기 자신·순환은 무시.
+import re as _re47
+
+def store_merge_map(master=None):
+    """{흡수될 매장코드: 대표 매장코드} — 매장 기준정보 '매장통합' 칸 기준. 없으면 빈 dict."""
+    m = load_master() if master is None else master
+    if m is None or m.empty or "매장통합" not in m.columns or "매장코드" not in m.columns:
+        return {}
+    raw = {}
+    for code, val in zip(m["매장코드"].astype(str).str.strip(), m["매장통합"].tolist()):
+        val = "" if val is None or (isinstance(val, float) and pd.isna(val)) else str(val).strip()
+        if not code or not val:
+            continue
+        for old in _re47.split(r"[,\s/;·]+", val):
+            old = old.strip().upper()
+            if not old or old in ("NAN", "NONE", "-") or old == code.upper():
+                continue
+            raw[old] = code
+    # 대표코드 대소문자를 마스터 표기 그대로 맞추고, 연쇄(A→B→C)는 끝까지 따라감
+    out = {}
+    for old, new in raw.items():
+        seen, cur = {old}, new
+        while cur.upper() in raw and cur.upper() not in seen:
+            seen.add(cur.upper())
+            cur = raw[cur.upper()]
+        if cur.upper() != old:
+            out[old] = cur
+    return out
+
+
+def _remap_cat(ser, mapping):
+    """category/일반 Series 값을 mapping으로 교체 — category면 코드 배열만 재계산(행 복제 없음)."""
+    if str(ser.dtype) == "category":
+        cats = ser.cat.categories.astype(str)
+        new_vals = [mapping.get(c, c) for c in cats]
+        uniq = pd.Index(pd.unique(pd.Series(new_vals, dtype="object")))
+        lut = np.append(uniq.get_indexer(new_vals), -1)          # 코드 -1(결측)은 그대로 -1
+        codes = lut[ser.cat.codes.to_numpy()]
+        return pd.Series(pd.Categorical.from_codes(codes, categories=uniq), index=ser.index, name=ser.name)
+    return ser.astype(str).map(lambda v: mapping.get(v, v))
+
+
+def apply_store_merge(df, merge=None):
+    """전년대비 분석 메뉴용: 흡수 매장의 매장코드·매장명·_채널을 대표 매장 것으로 바꾼 '얕은 사본'.
+    (merge 대상 행이 하나도 없으면 원본 df를 그대로 돌려줌)  → (df, 실제 적용된 {흡수:대표})"""
+    merge = store_merge_map() if merge is None else merge
+    if not merge or df is None or df.empty or "매장코드" not in df.columns:
+        return df, {}
+    code_s = df["매장코드"]
+    codes_str = (code_s.cat.categories if str(code_s.dtype) == "category"
+                 else pd.Index(code_s.astype(str).unique())).astype(str)
+    key_of = {c: c.strip().upper() for c in codes_str}
+    hit = {c: merge[k] for c, k in key_of.items() if k in merge}       # 원본 표기 그대로 → 대표코드
+    if not hit:
+        return df, {}
+    # 대표 매장명: 매장 기준정보의 매장명 우선, 없으면 매출 데이터에서 대표코드로 찍힌 매장명
+    name_of = {}
+    mast = load_master()
+    if mast is not None and not mast.empty and "매장명" in mast.columns:
+        name_of = dict(zip(mast["매장코드"].astype(str).str.strip(), mast["매장명"].astype(str).str.strip()))
+    out = df.copy(deep=False)
+    new_codes = _remap_cat(code_s, {**{c: c.strip() for c in codes_str}, **hit})
+    if "매장명" in df.columns:
+        is_old = code_s.astype(str).isin(list(hit.keys())).to_numpy()
+        tgt_names = {}
+        for old, new in hit.items():
+            nm = name_of.get(new)
+            if not nm:
+                _r = df.loc[code_s.astype(str).str.strip() == new, "매장명"]
+                nm = str(_r.iloc[0]) if len(_r) else new
+            tgt_names[old] = nm
+        nm_ser = df["매장명"].astype(str).where(~is_old, code_s.astype(str).map(tgt_names))
+        out["매장명"] = nm_ser.astype("category")
+        out["_채널"] = out["매장명"]
+    out["매장코드"] = new_codes
+    applied = {k.strip(): v for k, v in hit.items()}
+    return out, applied
+
+
+def store_merge_note(applied):
+    """메뉴 상단 안내 한 줄."""
+    if not applied:
+        return
+    pairs = " · ".join(f"{old} → {new}" for old, new in sorted(applied.items()))
+    st.caption(f"🔗 **매장통합(전년대비) 적용 중** : {pairs}  "
+               "(매장 기준정보의 '매장통합' 칸 기준 — 흡수된 매장 매출을 대표 매장 매출로 합쳐서 보여줘요)")
 
 
 def master_row_count():
@@ -11829,14 +11929,19 @@ def main():
 
             st.divider()
             st.caption(f"🏬 매장 기준정보(태그): 현재 **{master_row_count():,}개** 매장")
-            mup = st.file_uploader("매장 기준정보 업로드 (담당자·유통성격·채널소유·채널스토리)",
+            mup = st.file_uploader("매장 기준정보 업로드 (담당자·유통성격·채널소유·채널스토리·매장통합)",
                                    type=["xlsx", "xls", "csv"], accept_multiple_files=False, key="master_up")
             if mup is not None:
                 if st.button("🏬 매장 기준정보 적용(전체 교체)", use_container_width=True):
                     try:
-                        n = replace_master(read_master_file(mup))
+                        _m47 = read_master_file(mup)
+                        n = replace_master(_m47)
                         load_master.clear()
                         st.success(f"매장 기준정보 갱신 완료 ✅ {n}개 매장")
+                        _mg47 = store_merge_map(_m47)
+                        if _mg47:
+                            st.caption("🔗 매장통합(전년대비): " +
+                                       " · ".join(f"{o} → {n_}" for o, n_ in sorted(_mg47.items())))
                     except Exception as ex:
                         st.error(f"매장 기준정보 오류: {ex}")
 
@@ -11926,6 +12031,11 @@ def main():
         else:
             render_inventory()
         return
+
+    # 항목47: 전년대비를 보는 분석 메뉴에서만 매장통합(SD157→SD182 등) 적용 — 원본 df(캐시)는 그대로
+    if menu in (MENU_DASH, MENU_WEEK, MENU_FLAG, MENU_CHAN, MENU_CATMIX, MENU_DAILY, MENU_MONTHLY, MENU_TRND):
+        df, _applied47 = apply_store_merge(df)
+        store_merge_note(_applied47)
 
     # 사이드바에서 고른 메뉴 '1개만' 실행 (탭 방식은 8개가 매번 전부 계산돼 느렸다)
     if menu == MENU_DASH:
