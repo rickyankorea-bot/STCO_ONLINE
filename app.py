@@ -1751,19 +1751,32 @@ CH_MERGE = {"SD185": "쿠팡토탈", "SD184": "쿠팡토탈",
 #   → "쿠팡합계" 한 줄. 화면 표시용 합산일 뿐, 원본 데이터·다른 메뉴는 그대로.
 COUPANG_MERGE_CODES = ("SD185", "SD184")
 COUPANG_MERGE_NAME = "쿠팡합계"
+# 항목50(261102): 같은 방식의 '네이버 통합' — SD165 SD 네이버스토어 + SD174 SD N오늘배송 → "네이버합계"
+#   (대시보드 CH_MERGE의 네이버토탈과 같은 두 매장)
+NAVER_MERGE_CODES = ("SD165", "SD174")
+NAVER_MERGE_NAME = "네이버합계"
+
+
+def _merge_store_codes(frame, groups):
+    """frame의 매장코드를 groups[(코드목록, 합친이름), …]대로 바꾼 사본(해당 행이 없으면 원본 그대로)."""
+    if not groups or frame is None or frame.empty or "매장코드" not in frame.columns:
+        return frame
+    c = frame["매장코드"].astype(str).str.strip()
+    new_c, changed = c, False
+    for codes, name in groups:
+        hit = c.isin(codes)
+        if hit.any():
+            new_c, changed = new_c.where(~hit, name), True
+    if not changed:
+        return frame
+    out = frame.copy()
+    out["매장코드"] = new_c
+    return out
 
 
 def _merge_coupang_codes(frame):
-    """frame의 매장코드 SD185·SD184를 '쿠팡합계'로 바꾼 사본(해당 행이 없으면 원본 그대로)."""
-    if frame is None or frame.empty or "매장코드" not in frame.columns:
-        return frame
-    c = frame["매장코드"].astype(str).str.strip()
-    hit = c.isin(COUPANG_MERGE_CODES)
-    if not hit.any():
-        return frame
-    out = frame.copy()
-    out["매장코드"] = c.where(~hit, COUPANG_MERGE_NAME)
-    return out
+    """(항목49 호환) 쿠팡 두 매장만 '쿠팡합계'로 합친 사본."""
+    return _merge_store_codes(frame, [(COUPANG_MERGE_CODES, COUPANG_MERGE_NAME)])
 
 # 채널 리그 정의 (매장 마스터 '리그구분' 값과 동일해야 함)
 LEAGUES = [("1부리그", "🏆", "#2f4d7d", "메이저 채널"),
@@ -5101,7 +5114,8 @@ def _wk_pn_popup(sub, title, caption, key_prefix, on_dismiss=None):
 
 
 def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, show_plan=True,
-                            period=None, big_title=False, mon_label=None, merge_coupang=False):
+                            period=None, big_title=False, mon_label=None, merge_coupang=False,
+                            merge_naver=False):
     """선택한 그룹(유통 또는 담당자)의 매장별 상세표 — 주간보고와 동일 형식(당월+누계). 비중=해당 그룹 내.
 
     period·big_title(항목26 · 260828): 드릴다운1 전용 — period("당월 실적"/"연간누계")면 그 블록만
@@ -5109,14 +5123,20 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
     기본값이면 기존 화면(드릴다운 2·3 포함)과 100% 동일.
 
     merge_coupang(항목49 · 261102): True면 SD185 SD 쿠팡(그로스) + SD184 SD 쿠팡을 '쿠팡합계' 한 줄로
-    합쳐 보여준다(마스크 적용 뒤 매장코드만 바꿈 → 합계·비중·전년대비는 변하지 않음). 사업계획도 두 매장 합."""
+    합쳐 보여준다(마스크 적용 뒤 매장코드만 바꿈 → 합계·비중·전년대비는 변하지 않음). 사업계획도 두 매장 합.
+    merge_naver(항목50 · 261102): 같은 방식으로 SD165 SD 네이버스토어 + SD174 SD N오늘배송 → '네이버합계'."""
     cm, pm = cur_m[mask(cur_m)], prev_m[mask(prev_m)]
     cyd, pyd = cur_y[mask(cur_y)], prev_y[mask(prev_y)]
     if cm.empty and cyd.empty and pm.empty and pyd.empty:
         st.info(f"'{label}'에 해당하는 매장 데이터가 없어요.")
         return
+    _mgroups = []
     if merge_coupang:
-        cm, pm, cyd, pyd = (_merge_coupang_codes(f) for f in (cm, pm, cyd, pyd))
+        _mgroups.append((COUPANG_MERGE_CODES, COUPANG_MERGE_NAME))
+    if merge_naver:   # 항목50
+        _mgroups.append((NAVER_MERGE_CODES, NAVER_MERGE_NAME))
+    if _mgroups:
+        cm, pm, cyd, pyd = (_merge_store_codes(f, _mgroups) for f in (cm, pm, cyd, pyd))
 
     tot_m = float(cm["_매출액"].sum())    # 당월 유통 total (비중 분모)
     tot_y = float(cyd["_매출액"].sum())   # 누계 유통 total
@@ -5128,18 +5148,19 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
     if "매장명" in lbl_src.columns:
         tmp = lbl_src[["매장코드", "매장명"]].astype(str)
         name_map = dict(zip(tmp["매장코드"].str.strip(), tmp["매장명"]))
-    if merge_coupang:
-        name_map[COUPANG_MERGE_NAME] = COUPANG_MERGE_NAME   # 항목49
+    for _codes, _mname in _mgroups:   # 항목49·50
+        name_map[_mname] = _mname
 
     def sub(frame, c):
         return frame[frame["매장코드"].astype(str).str.strip() == c]
 
     store_ann = _store_annual() if show_plan else {}   # 매장코드 → 연간 사업계획 (필터 시 생략)
-    if merge_coupang and store_ann:   # 항목49: 쿠팡합계 사업계획 = 두 매장 계획 합
+    if _mgroups and store_ann:   # 항목49·50: 합친 줄 사업계획 = 두 매장 계획 합
         store_ann = dict(store_ann)
-        _cp = [store_ann.get(c) for c in COUPANG_MERGE_CODES if store_ann.get(c)]
-        if _cp:
-            store_ann[COUPANG_MERGE_NAME] = sum(_cp)
+        for _codes, _mname in _mgroups:
+            _cp = [store_ann.get(c) for c in _codes if store_ann.get(c)]
+            if _cp:
+                store_ann[_mname] = sum(_cp)
 
     def _addplan(y, pl):
         y["사업계획"] = pl
@@ -5393,11 +5414,14 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py, mon_l
         selp = wc4.radio("표시 기간", ["전체", WK_MON, WK_YTD], horizontal=True, key="wk_cat_period",
                          format_func=lambda o: (mon_label or WK_MON) if o == WK_MON else o)
         dim = wc2.radio("아이템 or 매장", WK_DIM_OPTS, horizontal=True, key="wk_cat_dim")
-        rb1, rb2 = st.columns([1, 4])
+        rb1, rb2, rb3 = st.columns([1, 2.2, 2.2])
         run = rb1.form_submit_button("🔍 상세보기", type="primary")
         # 항목49(261102): 매장별 보기에서 SD 쿠팡(그로스)+SD 쿠팡 → '쿠팡합계' 한 줄
-        cpm = rb2.checkbox("쿠팡매장 합치기 (SD 쿠팡(그로스) + SD 쿠팡 → 쿠팡합계 · 매장별 보기에 적용)",
-                           key="wk_cat_cpmerge")
+        cpm = rb2.checkbox("쿠팡매장 합치기 (SD 쿠팡(그로스) + SD 쿠팡 → 쿠팡합계)",
+                           key="wk_cat_cpmerge", help="매장별 보기에 적용돼요.")
+        # 항목50(261102): SD 네이버스토어 + SD N오늘배송 → '네이버합계' 한 줄
+        nvm = rb3.checkbox("네이버 통합 (SD 네이버스토어 + SD N오늘배송 → 네이버합계)",
+                           key="wk_cat_nvmerge", help="매장별 보기에 적용돼요.")
     if _need_search("wk_cat_go", run):
         return
 
@@ -5447,7 +5471,7 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py, mon_l
     else:
         render_weekly_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, show_plan=False,
                                 period=_period, big_title=True, mon_label=mon_label,
-                                merge_coupang=cpm)
+                                merge_coupang=cpm, merge_naver=nvm)
     st.caption("※ 유통/브랜드·연차·시즌은 다중선택(선택한 항목 중 하나라도 해당하면 포함, OR 조건) — "
                "빈칸이면 전체. '아이템'은 중카테고리(아이템그룹) 기준 breakdown, '매장별'은 위 필터에 "
                "해당하는 매장 목록을 보여줘요. 비중=선택 조건 내 비중, 필터가 걸린 상태라 사업계획·진도율은 "
@@ -5609,18 +5633,21 @@ def render_weekly_report(df):
     opts = [NONE, HEAD_C] + list(_CHANNEL_MASKS.keys())
     if managers:
         opts += [HEAD_M] + managers
-    _dd1, _dd2 = st.columns([3, 1.4])
+    _dd1, _dd2, _dd3 = st.columns([3, 1.3, 1.3])
     sel = _dd1.selectbox("유통 또는 담당자를 선택하면 그 그룹의 매장별 지표가 같은 형식으로 펼쳐져요.",
                          opts, key="wk_drill")
     _dd2.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
     cpm2 = _dd2.checkbox("쿠팡매장 합치기 (→ 쿠팡합계)", key="wk_drill_cpmerge")   # 항목49
+    _dd3.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+    nvm2 = _dd3.checkbox("네이버 통합 (→ 네이버합계)", key="wk_drill_nvmerge")    # 항목50
     if sel not in (NONE, HEAD_C, HEAD_M):
         if sel in _CHANNEL_MASKS:
             _mask = _CHANNEL_MASKS[sel]
         else:
             _mask = (lambda nm: (lambda x: x["_담당자"].astype(str).str.strip() == nm))(sel)
         render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, sel, _mask, cy, py, show_plan=not _filtered,
-                                mon_label=mon_label, merge_coupang=cpm2)
+                                mon_label=mon_label, merge_coupang=cpm2,
+                                merge_naver=nvm2)
 
     st.divider()
     st.markdown("##### 🔍 (드릴다운 3) 매장별/담당별 아이템분석")   # 260828: 드릴다운 번호 재정렬(구 드릴다운2)
