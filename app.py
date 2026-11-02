@@ -8024,7 +8024,9 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
         vals[42], vals[43], vals[44] = rec["AA"], rec["AB"], rec["AF"]
         vals[45], vals[46], vals[47] = rec["AC"], rec["AD"], rec["AE"]
         vals[48] = vals[49] = None
-        vals[50] = f"={_INV_AH_COL_LETTER}{rr}/T{rr}"                # 변경후할인율 = 변동가격(AW)÷최초가(T)
+        # 항목51(261102, 중태님): 변경후할인율 = (변동가격(AW) − 최초가(T)) ÷ 최초가(T) → 할인 폭(예: -76%).
+        #   (이전: AW÷T = 최초가 대비 판매가 비율). 셀 서식은 아래에서 숫자 % ("0%")로 지정.
+        vals[50] = f"=({_INV_AH_COL_LETTER}{rr}-T{rr})/T{rr}"
         vals[51] = raw[21]      # 260928: 구형식=수정일 / 신형식=이관구분 (선판정 소스, 헤더는 미러링)
         vals[52] = raw[22]      # 260928: 구형식=이관구분 / 신형식=상품테마1 (헤더는 미러링)
         # 260811: 패스스루 구간이 raw24~93(70열) → raw24~94(71열)로 1열 확장. 신규 '사이즈구분'이
@@ -8041,6 +8043,8 @@ def process_inventory(raw_file, master, template_path, X, Y, period, workdate,
             nc = tws.cell(rr, c, v)
             f, b, al, nf, fl = dstyle[c]
             nc.font = f; nc.border = b; nc.alignment = al; nc.number_format = nf
+            if c == 50:
+                nc.number_format = "0%"                             # 항목51: 변경후할인율 = 숫자 %
             if c in _INV_YELLOW_COLS:
                 nc.fill = fill_yellow
             elif c in _INV_GREEN_COLS:
