@@ -4669,12 +4669,15 @@ def _wk_style_table(bm, by, idx, cy, py, click_ns=None, period=None, mon_label=N
     sdisp = disp
     if click_ns and use_m:   # 항목26: 당월 블록이 보일 때만 클릭 링크(연간누계만 표시 중엔 대상 셀 없음)
         sdisp = disp.copy()
-        _ccol = (MON, f"{sc}실판가")
-        sdisp[_ccol] = [
-            (v if (v is None or str(v) == "–")
-             else f"<span class='wk-pnclick' data-wkpn='{click_ns}#{i}'>{v}</span>")
-            for i, v in enumerate(disp[_ccol])
-        ]
+        # 항목48(261102): 전년(25) 실판가도 클릭 가능 — 인덱스 규칙: 올해 = #i, 전년 = #(행수 + i).
+        # 숨은 버튼도 같은 순서(올해 0..n-1 → 전년 n..2n-1)로 만들어 브리지 3단계 탐색이 그대로 맞는다.
+        _nrow = len(disp)
+        for _ccol, _off in (((MON, f"{sc}실판가"), 0), ((MON, f"{sy}실판가"), _nrow)):
+            sdisp[_ccol] = [
+                (v if (v is None or str(v) == "–")
+                 else f"<span class='wk-pnclick' data-wkpn='{click_ns}#{i + _off}'>{v}</span>")
+                for i, v in enumerate(disp[_ccol])
+            ]
     sty = sdisp.style
     for col in D.columns:
         if col[1] in ("증감율", "편차"):
@@ -5223,14 +5226,14 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
     if click_ns:
         # 링크 스타일 + 숨은 버튼 감추기 CSS를 표보다 먼저 내보낸다(버튼이 잠깐 보였다 사라지는 것 방지).
         # 항목26: 타이틀 줄보다도 먼저 내보낸다 — 타이틀과 표 사이에 끼면 빈 세로 여백이 생긴다.
-        st.markdown(_WK_PN_CSS + _wk_pn_hide_css(click_ns, len(rows)), unsafe_allow_html=True)
+        st.markdown(_WK_PN_CSS + _wk_pn_hide_css(click_ns, 2 * len(rows)), unsafe_allow_html=True)   # 항목48: 올해+전년
     # 룰11: 제목 + 우측 일반 엑셀 다운로드 버튼 (2026-07-31)
     if big_title:   # 항목26: 드릴다운1은 위 필터 박스와 간격을 살짝 띄운다
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
     i1, i2 = st.columns([5, 1])
     _has_m = any(c[0] == _mon for c in disp.columns)
-    _hint = (f"· <b>{_mon_short} {str(cy)[-2:]}실판가 숫자를 클릭</b>하면 품번별 상세"
-             if (click_ns and _has_m) else "")
+    _hint = (f"· <b>{_mon_short} {str(py)[-2:]}·{str(cy)[-2:]}실판가 숫자를 클릭</b>하면 품번별 상세"
+             if (click_ns and _has_m) else "")   # 항목48: 전년 숫자도 클릭 가능
     _sub = (f"<span style='color:#888;font-size:0.8rem;font-weight:400;'>"
             f"(비중=해당 그룹 내 · G.TOTAL=선택 전체 {_hint})</span>")
     if big_title:   # 항목26: 드릴다운1 결과 타이틀은 다른 드릴다운 타이틀과 동일 크기(##### 헤딩)
@@ -5249,10 +5252,14 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
 
     # ── 260818: 숫자 클릭 → 품번별 상세 팝업 ──────────────────────────────────
     # 숨은 버튼(JS가 대신 눌러줌) — 라벨의 보이지 않는 표식으로 브리지가 찾아낸다.
+    # 항목48(261102): 버튼 0..n-1 = 올해(cy) 실판가, n..2n-1 = 전년(py) 실판가. picked = (행 인덱스, 연도구분)
     picked = None
-    for i, (key, _m) in enumerate(rows):
-        if st.button(f"{_WK_PN_MARK}{click_ns}#{i}", key=f"wkpnb_{click_ns}_{i}"):
-            picked = i
+    _n = len(rows)
+    for _yr_i, _yr in enumerate(("cy", "py")):
+        for i, (key, _m) in enumerate(rows):
+            _bi = i + _yr_i * _n
+            if st.button(f"{_WK_PN_MARK}{click_ns}#{_bi}", key=f"wkpnb_{click_ns}_{_bi}"):
+                picked = (i, _yr)
     _wk_pn_click_bridge(click_ns)
 
     # 260818 2차: JS 브리지가 어떤 이유로든 안 먹는 환경(사내 보안 확장, iframe 차단 등)을 대비한
@@ -5260,11 +5267,14 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
     # 똑같은 팝업이 뜬다. (숫자 클릭이 안 뜬다는 리포트가 있어 신설 — 기능이 조용히 실패하지 않도록)
     _row_names = [k[1] for k, _ in rows]
     with st.expander("🔍 숫자 클릭이 안 될 때 — 아이템을 골라서 품번별 상세 보기", expanded=False):
-        fb1, fb2 = st.columns([3, 1])
+        fb1, fb0, fb2 = st.columns([3, 1.4, 1])
         fb_sel = fb1.selectbox("아이템", _row_names, key=f"wkpn_fb_sel_{click_ns}",
                                label_visibility="collapsed")
+        _yr_lbls = [f"올해({cy})", f"전년({py})"]   # 항목48: 전년 품번별 상세도 폴백에서 선택 가능
+        fb_yr = fb0.radio("연도", _yr_lbls, key=f"wkpn_fb_yr_{click_ns}", horizontal=True,
+                          label_visibility="collapsed")
         if fb2.button("상세보기", key=f"wkpn_fb_go_{click_ns}", use_container_width=True):
-            picked = _row_names.index(fb_sel)
+            picked = (_row_names.index(fb_sel), "cy" if fb_yr == _yr_lbls[0] else "py")
 
     # 열려 있는 팝업은 "행 인덱스"가 아니라 **아이템그룹 이름**으로 기억한다 — 위쪽 필터(매장·연차 등)를
     # 바꾸면 표의 행 구성이 달라져서, 인덱스로 기억하면 엉뚱한 아이템의 팝업이 뜰 수 있기 때문.
@@ -5277,9 +5287,13 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
         st.session_state[lbl_key] = label
         if picked is None:
             st.session_state.pop(open_key, None)
+    # 항목48: 열린 팝업 = (아이템그룹 이름, "cy"/"py") — 예전 세션값(이름 문자열만)은 올해로 간주
     if picked is not None:
-        st.session_state[open_key] = rows[picked][0][1]
-    opened_name = st.session_state.get(open_key)
+        st.session_state[open_key] = (rows[picked[0]][0][1], picked[1])
+    opened = st.session_state.get(open_key)
+    if isinstance(opened, str):
+        opened = (opened, "cy")
+    opened_name, opened_yr = (opened if opened else (None, "cy"))
     hit = [(k, m) for k, m in rows if k[1] == opened_name]
     if opened_name is None or not hit:
         st.session_state.pop(open_key, None)
@@ -5287,19 +5301,32 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
 
     row_key, row_mask = hit[0]
     grp = row_key[1]                       # "G.TOTAL" 또는 아이템그룹명
-    sub = cm[row_mask(cm)] if len(cm) else cm
+    is_py = opened_yr == "py"
+    src = pm if is_py else cm              # 항목48: 전년 숫자 클릭 → 전년 동기간 거래행
+    sub = src[row_mask(src)] if len(src) else src
     grp_txt = "전체 아이템" if grp == "G.TOTAL" else grp
+    yr = py if is_py else cy
+
+    # 전년 기간 문구 = 올해 조회기간의 각 날짜 −1년 (메인 표의 prev_m 정의와 동일)
+    _ptxt = period_txt
+    if period_txt and is_py:
+        try:
+            _a, _b = [pd.to_datetime(x.strip()) - pd.DateOffset(years=1) for x in period_txt.split("→")]
+            _ptxt = f"{_a.date()} → {_b.date()}"
+        except Exception:                                         # noqa: BLE001
+            _ptxt = f"{period_txt} (전년 동기간)"
 
     def _close():
         st.session_state.pop(open_key, None)
 
     _wk_pn_popup(
         sub,
-        title=f"{label} · {grp_txt} · 품번별 상세",
+        title=f"{label} · {grp_txt} · {str(yr)[-2:]}년 품번별 상세",
         caption=f"{label} · 아이템: {grp_txt} · 기간: "
-                + (f"{_mon_short} {period_txt}" if period_txt else f"당월({cy}년)") + " — "
+                + (f"{_mon_short} {_ptxt}" if _ptxt else f"당월({yr}년)")
+                + (" (전년 동기간)" if is_py else "") + " — "
                 f"품번별 판매현황 + 품번별 판매수량 상위 3개 매장",
-        key_prefix=f"wkpn_{click_ns}_{_safe_name(grp)}",
+        key_prefix=f"wkpn_{click_ns}_{opened_yr}_{_safe_name(grp)}",
         on_dismiss=_close,
     )
 
