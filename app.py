@@ -4895,12 +4895,14 @@ def _wk_pn_click_bridge(ns):
 
   function bind(){
     collect();
+    // 항목54(261109): addEventListener + '이미 연결됨' 표식 방식은, 화면 전환(아이템→매장별) 때 곧 사라질
+    // 이전 브리지(iframe)가 새 숫자에 먼저 붙으면 새 브리지가 건너뛰어 클릭이 죽는 문제가 있었다.
+    // onclick 속성을 매번 덮어쓰면 항상 지금 살아 있는 브리지가 연결을 맡는다(중복 실행도 없음).
     var spans = doc.querySelectorAll('span.wk-pnclick');
     for(var i = 0; i < spans.length; i++){
       (function(el){
-        if(el.getAttribute('data-wkbound') === '1') return;
         el.setAttribute('data-wkbound', '1');
-        el.addEventListener('click', function(){ fire(el.getAttribute('data-wkpn')); });
+        el.onclick = function(){ fire(el.getAttribute('data-wkpn')); };
       })(spans[i]);
     }
   }
@@ -5224,7 +5226,12 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
                      store_ann.get(str(c).strip()) if store_ann else None)
         rev_y = float(sub(cyd, c)["_매출액"].sum())
         store_rows.append((name_map.get(c, c) or c, m, y, rev_y, c))
-    store_rows.sort(key=lambda t: -t[3])   # 누계 올해 매출 큰 순
+    # 항목54(261109, 중태님): 정렬 = 당월(조회기간) 올해 매출 큰 순 → 같으면 누계 올해 매출 큰 순.
+    # '연간누계'만 표시 중일 땐 보이는 숫자 기준으로 누계 올해 매출 큰 순.
+    if period == WK_YTD:
+        store_rows.sort(key=lambda t: -t[3])
+    else:
+        store_rows.sort(key=lambda t: (-(t[1].get("cy실판가") or 0.0), -t[3]))
 
     plan_head = sum(store_ann.get(str(c).strip(), 0) for c in codes) if store_ann else None
     head_y = _addplan(_wk_metrics(cyd, pyd, tot_y), plan_head)
@@ -5298,7 +5305,8 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
     _hint = (f" · <b>{'조회기간' if MON == WK_RANGE else '당월'} {sy}·{sc}실판가 숫자를 클릭</b>하면 일별 매출"
              if _click else "")   # 항목53
     _sub = (f"<span style='color:#888;font-size:0.8rem;font-weight:400;'>"
-            f"(매장 {len(store_rows)}개 · 비중=해당 그룹 내 · 매출 큰 순{_hint})</span>")
+            f"(매장 {len(store_rows)}개 · 비중=해당 그룹 내 · "
+            f"{'누계' if period == WK_YTD else ('조회기간' if MON == WK_RANGE else '당월')} {sc}실판가 큰 순{_hint})</span>")
     if big_title:   # 항목26: 드릴다운1 결과 타이틀은 다른 드릴다운 타이틀과 동일 크기(##### 헤딩)
         d1.markdown(f"##### 🔍 {label} · 매장별 상세  {_sub}{_NOTE_FLOAT}", unsafe_allow_html=True)
     else:
@@ -5527,7 +5535,9 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py, mon_l
         # 값이 그대로라 아래 period 비교·세션에 남아있는 이전 선택값이 모두 그대로 유효하다.
         selp = wc4.radio("표시 기간", ["전체", WK_MON, WK_YTD], horizontal=True, key="wk_cat_period",
                          format_func=lambda o: (mon_label or WK_MON) if o == WK_MON else o)
-        dim = wc2.radio("아이템 or 매장", WK_DIM_OPTS, horizontal=True, key="wk_cat_dim")
+        # 항목54(261109): 기본값 = '매장별'(메뉴를 열면 매장별 상세가 바로 보이게)
+        dim = wc2.radio("아이템 or 매장", WK_DIM_OPTS, index=WK_DIM_OPTS.index("매장별"), horizontal=True,
+                        key="wk_cat_dim")
         rb1, rb2, rb3 = st.columns([1, 2.2, 2.2])
         run = rb1.form_submit_button("🔍 상세보기", type="primary")
         # 항목49(261102): 매장별 보기에서 SD 쿠팡(그로스)+SD 쿠팡 → '쿠팡합계' 한 줄
@@ -5536,8 +5546,9 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py, mon_l
         # 항목50(261102): SD 네이버스토어 + SD N오늘배송 → '네이버합계' 한 줄
         nvm = rb3.checkbox("네이버 통합 (SD 네이버스토어 + SD N오늘배송 → 네이버합계)",
                            key="wk_cat_nvmerge", help="매장별 보기에 적용돼요.")
-    if _need_search("wk_cat_go", run):
-        return
+    # 항목54(261109, 중태님): 메뉴를 열면 버튼 없이 기본 조건(전체·매장별)으로 바로 표시 — 조회 게이트 생략.
+    # 폼 방식은 그대로라 조건을 바꾼 뒤엔 '🔍 상세보기'를 눌러야 반영된다.
+    st.session_state["wk_cat_go"] = True
 
     def _grp_mask(frame, name):
         fn = _CHANNEL_MASKS.get(name) or _BRAND_MASKS.get(name)
