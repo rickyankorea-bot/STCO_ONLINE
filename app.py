@@ -5113,9 +5113,53 @@ def _wk_pn_popup(sub, title, caption, key_prefix, on_dismiss=None):
     _popup()
 
 
+def _wk_daily_popup(ctx, mask, codes, title, caption, key_prefix, on_dismiss=None):
+    """항목53(261109): 매장별 표 숫자 클릭 → '일별 매출 추세' 메뉴와 같은 형식의 일별 표 팝업
+    (요일 | 일자별 매출 | 누계 매출 — 일평균·7일 이동평균·그래프는 중태님 요청으로 생략).
+
+    ctx["src"]()로 조건(드릴다운1의 유통/브랜드·연차·시즌 + 상단 공통필터)이 걸린 전체 거래행을 받아
+    mask(그룹)·codes(매장코드 목록, None이면 그룹 전체)로 좁힌 뒤, 메뉴와 같은 방식으로 조회기간(+7일 이동평균용
+    앞 6일, 전년 비교기간)만 잘라 _dl_render_body에 넘긴다. 팝업 안에서 일자기준/요일기준을 바꿀 수 있다.
+    """
+    start, end = pd.Timestamp(ctx["start"]), pd.Timestamp(ctx["end"])
+    dmin, dmax = ctx["dmin"], ctx["dmax"]
+
+    @_dialog_or_expander(title, on_dismiss=on_dismiss)
+    def _popup():
+        try:
+            st.caption(caption)
+            basis = st.radio("비교 기준", [DL_BASIS_DATE, DL_BASIS_DOW], horizontal=True,
+                             key=f"{key_prefix}_basis",
+                             help="일자기준 = 전년 같은 날짜와 비교 · 요일기준 = 전년 같은 요일(364일 전)과 비교")
+            d = ctx["src"]()
+            if d is None or d.empty:
+                st.info("해당 조건에 판매 데이터가 없어요.")
+                return
+            _ma_back = pd.Timedelta(days=DL_MA_N - 1)
+            p_lo = min(_dl_prev_date(start, basis), start - pd.DateOffset(years=1))
+            m = ((d["_판매일"] >= start - _ma_back) & (d["_판매일"] < end + pd.Timedelta(days=1))) | \
+                ((d["_판매일"] >= p_lo - _ma_back) & (d["_판매일"] < _dl_prev_date(end, basis) + pd.Timedelta(days=2)))
+            fd = d.loc[m]
+            if len(fd):
+                fd = fd[mask(fd)]
+            if codes is not None and len(fd):
+                fd = fd[fd["매장코드"].astype(str).str.strip().isin(codes)]
+            fd = fd[["_판매일", "_매출액"]]
+            _dl_render_body(fd, start, end, basis, dmin, dmax, _dl_cum_label(start, end),
+                            key_prefix=key_prefix, table_title="일별 매출",
+                            file_prefix=f"{_safe_name(title)}", show_upload_note=False, compact=True)
+            if pd.Timestamp(end).date() > pd.Timestamp(dmax).date():
+                st.caption(f"※ 종료일({pd.Timestamp(end).date()})이 최신 업로드일({pd.Timestamp(dmax).date()})보다 "
+                           f"뒤예요 — 올해는 {pd.Timestamp(dmax).date()}까지 실적, 전년은 기간 전체로 비교해요.")
+        except Exception as e:                                    # noqa: BLE001
+            st.error(f"일별 매출을 만드는 중 오류가 났어요 — 이 문구를 그대로 전달해 주세요.\n\n"
+                     f"`{type(e).__name__}: {e}`")
+    _popup()
+
+
 def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, show_plan=True,
                             period=None, big_title=False, mon_label=None, merge_coupang=False,
-                            merge_naver=False):
+                            merge_naver=False, click_ns=None, daily_ctx=None):
     """선택한 그룹(유통 또는 담당자)의 매장별 상세표 — 주간보고와 동일 형식(당월+누계). 비중=해당 그룹 내.
 
     period·big_title(항목26 · 260828): 드릴다운1 전용 — period("당월 실적"/"연간누계")면 그 블록만
@@ -5124,7 +5168,12 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
 
     merge_coupang(항목49 · 261102): True면 SD185 SD 쿠팡(그로스) + SD184 SD 쿠팡을 '쿠팡합계' 한 줄로
     합쳐 보여준다(마스크 적용 뒤 매장코드만 바꿈 → 합계·비중·전년대비는 변하지 않음). 사업계획도 두 매장 합.
-    merge_naver(항목50 · 261102): 같은 방식으로 SD165 SD 네이버스토어 + SD174 SD N오늘배송 → '네이버합계'."""
+    merge_naver(항목50 · 261102): 같은 방식으로 SD165 SD 네이버스토어 + SD174 SD N오늘배송 → '네이버합계'.
+
+    click_ns·daily_ctx(항목53 · 261109): 둘 다 주면 조회기간(당월) 블록의 **25·26실판가 숫자를 클릭**했을 때
+    그 매장(합계 행이면 선택 조건 전체)의 조회기간 일별 매출을 '일별 매출 추세' 메뉴와 같은 표·그래프로 팝업.
+    daily_ctx = {"src": 조건이 걸린 전체 거래행을 돌려주는 함수, "start", "end", "dmin", "dmax"}.
+    None(기본값)이면 클릭 기능 없이 기존과 100% 동일."""
     cm, pm = cur_m[mask(cur_m)], prev_m[mask(prev_m)]
     cyd, pyd = cur_y[mask(cur_y)], prev_y[mask(prev_y)]
     if cm.empty and cyd.empty and pm.empty and pyd.empty:
@@ -5174,7 +5223,7 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
         y = _addplan(_wk_metrics(sub(cyd, c), sub(pyd, c), tot_y),
                      store_ann.get(str(c).strip()) if store_ann else None)
         rev_y = float(sub(cyd, c)["_매출액"].sum())
-        store_rows.append((name_map.get(c, c) or c, m, y, rev_y))
+        store_rows.append((name_map.get(c, c) or c, m, y, rev_y, c))
     store_rows.sort(key=lambda t: -t[3])   # 누계 올해 매출 큰 순
 
     plan_head = sum(store_ann.get(str(c).strip(), 0) for c in codes) if store_ann else None
@@ -5220,7 +5269,21 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
             return ["" for _ in D[col]]
         return ["color:#c62828;font-weight:600" if (pd.notnull(v) and v < 0)
                 else ("color:#1f8a4c;font-weight:600" if (pd.notnull(v) and v > 0) else "") for v in D[col]]
-    sty = disp.style
+    # 항목53(261109): 조회기간(당월) 블록 25·26실판가 셀을 클릭 링크로 — 엑셀용 disp는 그대로 둔다.
+    _click = bool(click_ns and daily_ctx and use_m)
+    sdisp = disp
+    if _click:
+        sdisp = disp.copy()
+        _nrow = len(disp)   # 인덱스 규칙(항목48과 동일): 올해 = #i, 전년 = #(행수 + i)
+        for _ccol, _off in (((MON, f"{sc}실판가"), 0), ((MON, f"{sy}실판가"), _nrow)):
+            sdisp[_ccol] = [
+                (v if (v is None or str(v) == "–")
+                 else f"<span class='wk-pnclick' data-wkpn='{click_ns}#{i + _off}'>{v}</span>")
+                for i, v in enumerate(disp[_ccol])
+            ]
+        # 링크 스타일 + 숨은 버튼 감추기 CSS를 표보다 먼저(버튼 깜빡임 방지)
+        st.markdown(_WK_PN_CSS + _wk_pn_hide_css(click_ns, 2 * _nrow), unsafe_allow_html=True)
+    sty = sdisp.style
     for col in D.columns:
         if col[1] in ("증감율", "편차"):
             sty = sty.apply(lambda s, c=col: _color(c), subset=pd.IndexSlice[:, [col]])
@@ -5232,8 +5295,10 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
     if big_title:   # 항목26: 드릴다운1은 위 필터 박스와 간격을 살짝 띄운다
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
     d1, d2 = st.columns([5, 1])
+    _hint = (f" · <b>{'조회기간' if MON == WK_RANGE else '당월'} {sy}·{sc}실판가 숫자를 클릭</b>하면 일별 매출"
+             if _click else "")   # 항목53
     _sub = (f"<span style='color:#888;font-size:0.8rem;font-weight:400;'>"
-            f"(매장 {len(store_rows)}개 · 비중=해당 그룹 내 · 매출 큰 순)</span>")
+            f"(매장 {len(store_rows)}개 · 비중=해당 그룹 내 · 매출 큰 순{_hint})</span>")
     if big_title:   # 항목26: 드릴다운1 결과 타이틀은 다른 드릴다운 타이틀과 동일 크기(##### 헤딩)
         d1.markdown(f"##### 🔍 {label} · 매장별 상세  {_sub}{_NOTE_FLOAT}", unsafe_allow_html=True)
     else:
@@ -5243,6 +5308,54 @@ def render_weekly_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, s
                        file_name=f"{_safe_name(label)}_매장별상세.xlsx", mime=XLSX_MIME,
                        key=f"wk_dl_drill_{label}", use_container_width=True)
     render_styled_table(sty)
+    if not _click:
+        return
+
+    # ── 항목53(261109): 숫자 클릭 → 그 매장의 조회기간 일별 매출 팝업 ──────────────
+    # 행 목록: 0 = 합계(선택 조건 전체), 1.. = 매장(표 순서). 행 = (표시 이름, 매장코드 또는 None)
+    rows_st = [(f"{label} (합계)", None)] + [(r[0], r[4]) for r in store_rows]
+    _n = len(rows_st)
+    picked = None
+    for _bi in range(2 * _n):   # 0..n-1 = 26실판가, n..2n-1 = 25실판가 → 어느 쪽이든 같은 팝업(25·26 나란히)
+        if st.button(f"{_WK_PN_MARK}{click_ns}#{_bi}", key=f"wkpnb_{click_ns}_{_bi}"):
+            picked = _bi % _n
+    _wk_pn_click_bridge(click_ns)
+
+    # 브리지가 막힌 환경 대비 폴백(항목17-2와 같은 방식)
+    _names = [r[0] for r in rows_st]
+    with st.expander("📆 숫자 클릭이 안 될 때 — 매장을 골라서 일별 매출 보기", expanded=False):
+        fb1, fb2 = st.columns([4, 1])
+        fb_sel = fb1.selectbox("매장", _names, key=f"wkdl_fb_sel_{click_ns}", label_visibility="collapsed")
+        if fb2.button("일별 매출", key=f"wkdl_fb_go_{click_ns}", use_container_width=True):
+            picked = _names.index(fb_sel)
+
+    # 열린 팝업은 매장코드("__ALL__" = 합계 행)로 기억 — 조건이 바뀌어 행 순서가 달라져도 엉뚱한 매장이 안 뜨게.
+    open_key, lbl_key = f"wkdl_open_{click_ns}", f"wkdl_lbl_{click_ns}"
+    if st.session_state.get(lbl_key) != label:
+        st.session_state[lbl_key] = label
+        if picked is None:
+            st.session_state.pop(open_key, None)
+    if picked is not None:
+        st.session_state[open_key] = rows_st[picked][1] or "__ALL__"
+    opened = st.session_state.get(open_key)
+    if opened is None:
+        return
+    hit = [r for r in rows_st if (r[1] or "__ALL__") == opened]
+    if not hit:
+        st.session_state.pop(open_key, None)
+        return
+    row_name, row_code = hit[0]
+
+    def _close():
+        st.session_state.pop(open_key, None)
+
+    # 합친 줄(쿠팡합계·네이버합계)은 원래 매장코드 2개로 되돌려 거른다
+    _merged = {mname: [str(c) for c in codes] for codes, mname in _mgroups}
+    _codes = None if row_code is None else _merged.get(row_code, [str(row_code)])
+    _wk_daily_popup(daily_ctx, mask, _codes,
+                    title=f"{row_name} · 일별 매출",
+                    caption=(f"{label}" + ("" if row_code is None else f" · 매장: {row_name}")),
+                    key_prefix=f"wkdl_{click_ns}_{_safe_name(str(opened))}", on_dismiss=_close)
 
 
 def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, py, click_ns=None,
@@ -5382,7 +5495,8 @@ def render_weekly_item_drilldown(cur_m, prev_m, cur_y, prev_y, label, mask, cy, 
     )
 
 
-def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py, mon_label=None, period_txt=None):
+def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py, mon_label=None, period_txt=None,
+                                     daily_ctx=None):
     """🔍 (드릴다운 1) 유통/브랜드 · 연차 · 아이템/매장별 상세 보기 — 2026-08-10 신규.
     (260828 번호 재정렬: 화면 표기가 드릴다운 1로 바뀜. 코드 내부 주석·키의 "드릴다운3"(click_ns "cat" 등)
      명칭은 세션키 호환을 위해 그대로 두었다 — 내부 드릴다운3 = 화면 드릴다운 1, 내부 1·2 = 화면 2·3.)
@@ -5469,9 +5583,16 @@ def render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py, mon_l
                                      period=_period, big_title=True,
                                      mon_label=mon_label, period_txt=period_txt)
     else:
+        # 항목53(261109): 실판가 숫자 클릭 → 일별 매출 팝업. 원본(daily_ctx["full"])에 같은 _apply 필터를
+        # 팝업을 열 때만 적용한다(평소 화면엔 계산 부담 없음).
+        _dctx = None
+        if daily_ctx is not None and daily_ctx.get("full") is not None:
+            _dctx = dict(daily_ctx)
+            _dctx["src"] = (lambda full=daily_ctx["full"]: _apply(full))
         render_weekly_drilldown(fcm, fpm, fcy, fpy, label, _all_true, cy, py, show_plan=False,
                                 period=_period, big_title=True, mon_label=mon_label,
-                                merge_coupang=cpm, merge_naver=nvm)
+                                merge_coupang=cpm, merge_naver=nvm,
+                                click_ns=("catst" if _dctx else None), daily_ctx=_dctx)
     st.caption("※ 유통/브랜드·연차·시즌은 다중선택(선택한 항목 중 하나라도 해당하면 포함, OR 조건) — "
                "빈칸이면 전체. '아이템'은 중카테고리(아이템그룹) 기준 breakdown, '매장별'은 위 필터에 "
                "해당하는 매장 목록을 보여줘요. 비중=선택 조건 내 비중, 필터가 걸린 상태라 사업계획·진도율은 "
@@ -5597,7 +5718,9 @@ def render_weekly_report(df):
 
     st.divider()
     render_weekly_category_drilldown(cur_m, prev_m, cur_y, prev_y, cy, py,
-                                     mon_label=mon_label, period_txt=_period_txt)   # 2026-08-10, 메인 표 바로 아래로 배치(중태님 지시)
+                                     mon_label=mon_label, period_txt=_period_txt,
+                                     daily_ctx={"full": fd, "start": m_start, "end": asof,   # 항목53
+                                                "dmin": dmin, "dmax": dmax})   # 2026-08-10, 메인 표 바로 아래로 배치(중태님 지시)
 
     # ── 매장 담당별 분석 (위 표와 동일 프레임, 행만 담당자) ──
     _MGR_BOTTOM = ["없음", "26년 미운영", "직원구매"]   # 비담당 라벨 → 맨 아래(이 순서)
@@ -5961,11 +6084,31 @@ def render_daily_trend(df):
         fd = fd.assign(_채널스토리=fd["매장코드"].astype(str).str.strip().map(_cs_map))
         fd = fd[_dl_channel_mask(fd, selu)]
 
+    _ftxt = None
+    if selb or sela or sels or selu or selst:
+        _ftxt = " · ".join(f"{k}: {', '.join(map(str, v))}" for k, v in
+                           (("유통", selu), ("매장", selst), ("브랜드", selb), ("연차", sela), ("시즌", sels)) if v)
+    _dl_render_body(fd, start, end, basis, dmin, dmax, cum_label, filter_txt=_ftxt)
+
+
+def _dl_render_body(fd, start, end, basis, dmin, dmax, cum_label, filter_txt=None, key_prefix="dl",
+                    table_title="일별 매출", file_prefix="일별매출추세", show_upload_note=True, compact=False):
+    """일별 매출 추세의 표(요일|일자별|누계|일평균|7일 이동평균) + 추세 그래프를 그린다.
+
+    항목53(261109): 원래 render_daily_trend 안에 있던 코드를 그대로 떼어낸 것 — 주간현황 드릴다운1
+    매장별 표의 실판가 숫자 클릭 팝업(_wk_daily_popup)이 **이 메뉴와 똑같은 화면**을 띄우도록 공용화.
+    fd는 이미 조건(브랜드·연차·시즌·유통·매장)으로 걸러진 거래행이고, 7일 이동평균·요일기준 비교를 위해
+    조회기간 앞쪽 날짜와 전년 비교기간까지 포함돼 있어야 한다. 메뉴에서 호출하면 기존과 100% 동일.
+    compact=True(팝업용 · 261109 중태님): 요일 | 일자별 매출 | 누계 매출 3블록만 — 기간 일평균·7일 이동평균
+    블록과 추세 그래프(일평균·이동평균 선 중심)는 생략.
+    """
+    _ma_back = pd.Timedelta(days=DL_MA_N - 1)
     days, pdays, cur, prv, ccum, pcum, n = _dl_build(fd, start, end, basis, last_day=dmax)
     # 항목40: 7일 이동평균 — 금년은 그날 기준, 전년은 비교일 기준 최근 7일
     cma = _dl_moving_avg(fd, days, first_day=dmin, last_day=dmax)
     pma = _dl_moving_avg(fd, pdays, first_day=dmin, last_day=dmax)
-    beyond_upload_note(end, dmax)   # 항목38
+    if show_upload_note:
+        beyond_upload_note(end, dmax)   # 항목38
     multi_year = start.year != end.year
     if multi_year:
         ly, lc = "전년", "금년"
@@ -6012,6 +6155,8 @@ def render_daily_trend(df):
                      pma[i], cma[i], _dl_rate(cma[i], pma[i])])
         idx.append(_dl_day_label(t, multi_year))
     D = pd.DataFrame(rows, index=pd.Index(idx, name="일자"), columns=pd.MultiIndex.from_tuples(cols))
+    if compact:   # 팝업: 요일(2) + 일자별(3) + 누계(3)만
+        D = D.iloc[:, :8]
 
     disp = D.copy()
     for c in D.columns:
@@ -6044,31 +6189,35 @@ def render_daily_trend(df):
     sty = sty.set_properties(**{"text-align": "right"})
     sty = sty.set_properties(subset=pd.IndexSlice[:, [(W, "전년"), (W, "금년")]], **{"text-align": "center"})
     # 룰12: 블록 경계 두꺼운 세로선 — 요일(2) | 일자별(3) | 누계(3) | 일평균(3) | 7일 이동평균(3)
-    starts = [2, 5, 8, 11]
+    starts = [2, 5] if compact else [2, 5, 8, 11]
     sty = sty.set_table_styles(
         [{"selector": f"th.col{k}", "props": [("border-left", "3px solid #555555")]} for k in starts] +
         [{"selector": f"td.col{k}", "props": [("border-left", "3px solid #555555")]} for k in starts],
         overwrite=False)
 
     _basis_txt = ("전년 같은 날짜" if basis == DL_BASIS_DATE else "전년 같은 요일(364일 전)")
-    st.caption(f"비교: {_basis_txt} · 매출=실판가(실매출, 백만원) · 누계·일평균은 조회 시작일부터 그날까지 "
-               f"· 일평균=누계÷경과 일수")
-    st.caption(f"{DL_MA} = 그날 포함 최근 {DL_MA_N}일 매출 합계 ÷ {DL_MA_N} — 조회 시작일 이전 날짜도 계산에 들어가요"
+    if compact:
+        st.caption(f"비교: {_basis_txt} · 매출=실판가(실매출, 백만원) · 누계는 조회 시작일부터 그날까지")
+    else:
+        st.caption(f"비교: {_basis_txt} · 매출=실판가(실매출, 백만원) · 누계·일평균은 조회 시작일부터 그날까지 "
+                   f"· 일평균=누계÷경과 일수")
+    if not compact:
+        st.caption(f"{DL_MA} = 그날 포함 최근 {DL_MA_N}일 매출 합계 ÷ {DL_MA_N} — 조회 시작일 이전 날짜도 계산에 들어가요"
                f"(예: {start.month}/{start.day}의 값 = {(start - _ma_back).month}/{(start - _ma_back).day}"
                f"~{start.month}/{start.day} 평균). 기간 합계 행에는 가장 최근 날짜의 값이 표시돼요.")
-    if selb or sela or sels or selu or selst:
-        _ftxt = " · ".join(f"{k}: {', '.join(map(str, v))}" for k, v in
-                           (("유통", selu), ("매장", selst), ("브랜드", selb), ("연차", sela), ("시즌", sels)) if v)
-        st.caption(f"🔎 필터 적용 중 — 표·그래프의 모든 숫자는 선택한 조건 기준이에요. ({_ftxt})")
+    if filter_txt:
+        st.caption(f"🔎 필터 적용 중 — 표·그래프의 모든 숫자는 선택한 조건 기준이에요. ({filter_txt})")
     h1, h2 = st.columns([5, 1])
-    h1.markdown(f"**일별 매출 · {start.date()} → {end.date()}** ({N}일 · {basis})" + _NOTE_FLOAT,
+    h1.markdown(f"**{table_title} · {start.date()} → {end.date()}** ({N}일 · {basis})" + _NOTE_FLOAT,
                 unsafe_allow_html=True)
-    _fn = f"일별매출추세_{basis}_{start.date()}_{end.date()}.xlsx"
+    _fn = f"{file_prefix}_{basis}_{start.date()}_{end.date()}.xlsx"
     h2.download_button("⬇ 엑셀", _dl_excel_bytes(disp, "일별 매출 추세", starts),
-                       file_name=_fn, mime=XLSX_MIME, key="dl_xls", use_container_width=True)
+                       file_name=_fn, mime=XLSX_MIME, key=f"{key_prefix}_xls", use_container_width=True)
     render_styled_table(sty)
     if end.date() == dmax:
         st.caption(f"※ 종료일({dmax})은 최신 적재일이에요 — 그날 매출이 하루치 전부 들어왔는지 확인해 주세요.")
+    if compact:   # 팝업: 그래프 생략(일평균·이동평균 선 중심이라)
+        return
 
     # ── 추세 그래프 (항목41 · 261012 → 항목43 · 261012, 중태님) ──
     #  주축(왼쪽): 7일 이동평균(빨강 · 가장 굵게) + 기간 일평균(검정)
